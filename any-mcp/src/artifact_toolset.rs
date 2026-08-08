@@ -12,7 +12,7 @@ use std::{
     fs::File,
     future::Future,
     io::{Read, Seek, SeekFrom, Write},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use anytype::{
@@ -935,18 +935,27 @@ struct OperationEntry {
 /// prevents a second upload or publication after an uncertain first dispatch.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ArtifactOperationState {
-    entries: Arc<tokio::sync::Mutex<HashMap<[u8; 32], OperationEntry>>>,
+    entries: Arc<Mutex<HashMap<[u8; 32], OperationEntry>>>,
 }
 
 impl ArtifactOperationState {
-    pub(crate) async fn settle_import_timeout(&self, key: [u8; 32]) {
-        if let Some(entry) = self.entries.lock().await.get_mut(&key) {
+    fn entries(&self) -> MutexGuard<'_, HashMap<[u8; 32], OperationEntry>> {
+        match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub(crate) fn settle_import_timeout_now(&self, key: [u8; 32]) {
+        if let Some(entry) = self.entries().get_mut(&key) {
             entry.outcome = match &entry.outcome {
-                OperationOutcome::ImportVerifying { candidate, validator_findings } =>
-                    OperationOutcome::ImportCandidate {
-                        candidate: candidate.clone(),
-                        validator_findings: validator_findings.clone(),
-                    },
+                OperationOutcome::ImportVerifying {
+                    candidate,
+                    validator_findings,
+                } => OperationOutcome::ImportCandidate {
+                    candidate: candidate.clone(),
+                    validator_findings: validator_findings.clone(),
+                },
                 OperationOutcome::ImportCleaning(candidate) => {
                     OperationOutcome::ImportIndeterminate(candidate.clone())
                 }
@@ -956,12 +965,25 @@ impl ArtifactOperationState {
         }
     }
 
+    pub(crate) async fn settle_import_timeout(&self, key: [u8; 32]) {
+        self.settle_import_timeout_now(key);
+    }
+
+    #[cfg(test)]
     pub(crate) async fn reserve_import(
         &self,
         key: [u8; 32],
         fingerprint: [u8; 32],
     ) -> Result<ImportIdempotency, ArtifactToolError> {
-        let mut entries = self.entries.lock().await;
+        self.reserve_import_now(key, fingerprint)
+    }
+
+    pub(crate) fn reserve_import_now(
+        &self,
+        key: [u8; 32],
+        fingerprint: [u8; 32],
+    ) -> Result<ImportIdempotency, ArtifactToolError> {
+        let mut entries = self.entries();
         let Some(entry) = entries.get(&key) else {
             entries.insert(
                 key,
@@ -977,11 +999,13 @@ impl ArtifactOperationState {
         }
         let _ = entry.outcome.retained_import_candidate();
         match &entry.outcome {
-            OperationOutcome::ImportCandidate { candidate, validator_findings } =>
-                Ok(ImportIdempotency::VerifyCandidate {
-                    candidate: candidate.clone(),
-                    validator_findings: validator_findings.clone(),
-                }),
+            OperationOutcome::ImportCandidate {
+                candidate,
+                validator_findings,
+            } => Ok(ImportIdempotency::VerifyCandidate {
+                candidate: candidate.clone(),
+                validator_findings: validator_findings.clone(),
+            }),
             OperationOutcome::ImportComplete(output) => {
                 Ok(ImportIdempotency::Reuse(Box::new(output.clone())))
             }
@@ -1005,7 +1029,7 @@ impl ArtifactOperationState {
         key: [u8; 32],
         fingerprint: [u8; 32],
     ) -> Result<ExportIdempotency, ArtifactToolError> {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.entries();
         let Some(entry) = entries.get(&key) else {
             entries.insert(
                 key,
@@ -1044,7 +1068,7 @@ impl ArtifactOperationState {
         key: [u8; 32],
         fingerprint: [u8; 32],
     ) -> Result<DocumentMutationIdempotency, ArtifactToolError> {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.entries();
         let Some(entry) = entries.get(&key) else {
             entries.insert(
                 key,
@@ -1078,7 +1102,7 @@ impl ArtifactOperationState {
         key: [u8; 32],
         fingerprint: [u8; 32],
     ) -> Result<DocumentExportIdempotency, ArtifactToolError> {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.entries();
         let Some(entry) = entries.get(&key) else {
             entries.insert(
                 key,
@@ -1101,13 +1125,13 @@ impl ArtifactOperationState {
     }
 
     async fn set_outcome(&self, key: [u8; 32], outcome: OperationOutcome) {
-        if let Some(entry) = self.entries.lock().await.get_mut(&key) {
+        if let Some(entry) = self.entries().get_mut(&key) {
             entry.outcome = outcome;
         }
     }
 
     async fn remove(&self, key: [u8; 32]) {
-        self.entries.lock().await.remove(&key);
+        self.entries().remove(&key);
     }
 }
 
@@ -1416,6 +1440,32 @@ impl PreparedImport {
                 .verify_unchanged()
                 .map_err(|error| classify_root_error(&error)),
             Self::Staged(_) | Self::StagedReplay(_) => Ok(()),
+        }
+    }
+
+    fn mark_import_dispatched(
+        &mut self,
+        runtime: &RuntimeContext,
+    ) -> Result<(), ArtifactToolError> {
+        match self {
+            Self::Staged(source) => staging(runtime)?
+                .mark_import_dispatched(source)
+                .map_err(classify_staging_error),
+            Self::Local { .. } => Ok(()),
+            Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
+        }
+    }
+
+    fn restore_after_definitive_rejection(
+        &mut self,
+        runtime: &RuntimeContext,
+    ) -> Result<(), ArtifactToolError> {
+        match self {
+            Self::Staged(source) => staging(runtime)?
+                .restore_import_operation(source)
+                .map_err(classify_staging_error),
+            Self::Local { .. } => Ok(()),
+            Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
         }
     }
 
@@ -1743,14 +1793,10 @@ async fn file_import(
     {
         return Err(ArtifactToolError::Indeterminate);
     }
-    let settlement_permit = runtime
+    let mut settlement_permit = runtime
         .admit_import_settlement(runtime.request_deadline())
         .await?;
-    match runtime
-        .artifact_operations()
-        .reserve_import(key, fingerprint)
-        .await?
-    {
+    match settlement_permit.reserve_import(runtime.artifact_operations(), key, fingerprint)? {
         ImportIdempotency::Reuse(mut output) => {
             if let Some(handle) = staged_handle.as_deref() {
                 let retained = staging(runtime)?
@@ -1765,7 +1811,10 @@ async fn file_import(
             drop(settlement_permit);
             return Ok(*output);
         }
-        ImportIdempotency::VerifyCandidate { candidate, validator_findings } => {
+        ImportIdempotency::VerifyCandidate {
+            candidate,
+            validator_findings,
+        } => {
             if let Some(handle) = staged_handle.as_deref() {
                 let retained = staging(runtime)?
                     .reconciliation_import(handle, &space_id, key)
@@ -1829,7 +1878,7 @@ async fn file_import(
     let owned_cancellation = CancellationToken::new();
     let operation_timeout = runtime.artifact_config().limits.operation_timeout;
     let receiver = runtime.supervise_import_settlement(key, settlement_permit, async move {
-        let result = match tokio::time::timeout(
+        match tokio::time::timeout(
             operation_timeout,
             settle_reserved_import(
                 owned_runtime.clone(),
@@ -1857,8 +1906,7 @@ async fn file_import(
                     .await;
                 Err(ArtifactToolError::Indeterminate)
             }
-        };
-        result
+        }
     });
     tokio::select! {
         () = cancellation.cancelled() => Err(ArtifactToolError::Indeterminate),
@@ -1910,9 +1958,20 @@ async fn settle_reserved_import(
     if let Some(media_type) = declared_media_type.as_ref() {
         request = request.mime(media_type);
     }
+    if let Err(error) = source.mark_import_dispatched(&runtime) {
+        runtime.artifact_operations().remove(key).await;
+        return Err(error);
+    }
     let uploaded = match request.upload().await {
         Ok(uploaded) => uploaded,
         Err(error) if mutation_rejection_is_definitive(&error) => {
+            if source.restore_after_definitive_rejection(&runtime).is_err() {
+                runtime
+                    .artifact_operations()
+                    .set_outcome(key, OperationOutcome::Indeterminate)
+                    .await;
+                return Err(ArtifactToolError::Indeterminate);
+            }
             runtime.artifact_operations().remove(key).await;
             return Err(classify_anytype_error(&error));
         }
@@ -1924,7 +1983,7 @@ async fn settle_reserved_import(
             return Err(ArtifactToolError::Indeterminate);
         }
     };
-    let candidate = match EntityId::new(uploaded.id.clone()) {
+    let candidate = match validated_uploaded_candidate(&uploaded, &space_id, source_length) {
         Ok(candidate) => candidate,
         Err(_) => {
             runtime
@@ -1968,17 +2027,6 @@ async fn settle_reserved_import(
             .await;
         return Err(ArtifactToolError::Indeterminate);
     }
-    if validate_uploaded(&uploaded, &candidate, &space_id, source_length).is_err() {
-        drop(source);
-        runtime
-            .artifact_operations()
-            .set_outcome(
-                key,
-                OperationOutcome::ImportIndeterminate(candidate.clone()),
-            )
-            .await;
-        return Err(ArtifactToolError::Indeterminate);
-    }
     let stored_media_type = match verify_import_candidate(
         &runtime,
         &space_id,
@@ -2005,6 +2053,19 @@ async fn settle_reserved_import(
             return Err(ArtifactToolError::Indeterminate);
         }
     };
+    // Candidate verification is replay evidence. Publish it before consuming
+    // staged authority so cancellation, timeout, or panic in the following
+    // gap can resume verification without issuing a second upload.
+    runtime
+        .artifact_operations()
+        .set_outcome(
+            key,
+            OperationOutcome::ImportCandidate {
+                candidate: candidate.clone(),
+                validator_findings: validator_findings.clone(),
+            },
+        )
+        .await;
     if let PreparedImport::Staged(staged) = &mut source {
         let consumed = match staging(&runtime) {
             Ok(staging) => staging
@@ -2081,12 +2142,13 @@ async fn prepare_import_source(
     }
 }
 
-fn validate_uploaded(
+fn validated_uploaded_candidate(
     uploaded: &FileObject,
-    candidate: &EntityId,
     space_id: &SpaceId,
     length: u64,
-) -> Result<(), ArtifactToolError> {
+) -> Result<EntityId, ArtifactToolError> {
+    let candidate =
+        EntityId::new(uploaded.id.clone()).map_err(|_| ArtifactToolError::Indeterminate)?;
     let size = uploaded
         .size
         .and_then(|value| u64::try_from(value).ok())
@@ -2095,7 +2157,7 @@ fn validate_uploaded(
     {
         return Err(ArtifactToolError::Indeterminate);
     }
-    Ok(())
+    Ok(candidate)
 }
 
 async fn verify_import_candidate(
@@ -3981,6 +4043,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn import_candidate_survives_initial_and_replay_completion_gaps() {
+        let state = ArtifactOperationState::default();
+        let key = digest_fields(b"key", &[b"consume-complete-gap"]);
+        let fingerprint = digest_fields(b"fingerprint", &[b"consume-complete-gap"]);
+        let candidate =
+            EntityId::new("bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ".to_owned())
+                .expect("candidate");
+        let findings = vec![ValidatorFinding {
+            id: "preserved-evidence".to_owned(),
+            status: crate::artifact_validators::ValidatorStatus::Accepted,
+            detected_media_type: Some("text/plain".to_owned()),
+        }];
+
+        assert!(matches!(
+            state.reserve_import(key, fingerprint).await,
+            Ok(ImportIdempotency::Dispatch)
+        ));
+        state
+            .set_outcome(
+                key,
+                OperationOutcome::ImportCandidate {
+                    candidate: candidate.clone(),
+                    validator_findings: findings.clone(),
+                },
+            )
+            .await;
+
+        // Initial settlement cancellation after staged consumption leaves the
+        // verified candidate replayable with its validator evidence.
+        state.settle_import_timeout(key).await;
+        assert!(matches!(
+            state.reserve_import(key, fingerprint).await,
+            Ok(ImportIdempotency::VerifyCandidate {
+                candidate: actual,
+                validator_findings,
+            }) if actual == candidate
+                && validator_findings.first().is_some_and(|finding| finding.id == "preserved-evidence")
+        ));
+
+        // A second cancellation in candidate replay's consume/Complete gap is
+        // equally replayable and never returns Dispatch.
+        state.settle_import_timeout(key).await;
+        assert!(matches!(
+            state.reserve_import(key, fingerprint).await,
+            Ok(ImportIdempotency::VerifyCandidate { candidate: actual, .. })
+                if actual == candidate
+        ));
+    }
+
+    #[tokio::test]
+    async fn definitive_import_failure_removes_reservation_for_same_key_retry() {
+        let state = ArtifactOperationState::default();
+        let key = digest_fields(b"key", &[b"definitive-rejection"]);
+        let fingerprint = digest_fields(b"fingerprint", &[b"definitive-rejection"]);
+        assert!(matches!(
+            state.reserve_import(key, fingerprint).await,
+            Ok(ImportIdempotency::Dispatch)
+        ));
+        state.remove(key).await;
+        assert!(matches!(
+            state.reserve_import(key, fingerprint).await,
+            Ok(ImportIdempotency::Dispatch)
+        ));
+        assert!(matches!(
+            state
+                .reserve_import(key, digest_fields(b"fingerprint", &[b"wrong-operation"]))
+                .await,
+            Err(ArtifactToolError::Conflict)
+        ));
+    }
+
+    #[test]
+    fn malformed_upload_response_never_yields_cleanup_authority() {
+        let space = SpaceId::new(
+            "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7",
+        )
+        .expect("space id");
+        let valid_id = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+        let response = |id: &str, space_id: &str, size| FileObject {
+            id: id.to_owned(),
+            space_id: space_id.to_owned(),
+            name: Some("fixture.bin".to_owned()),
+            size,
+            mime: Some("application/octet-stream".to_owned()),
+            added_at: None,
+            file_type: anytype::files::FileType::default(),
+            style: anytype::files::FileStyle::Auto,
+            target_object_id: None,
+            details: Value::Null,
+        };
+
+        assert!(
+            validated_uploaded_candidate(&response(valid_id, space.as_str(), Some(5)), &space, 5)
+                .is_ok()
+        );
+        for malformed in [
+            response("", space.as_str(), Some(5)),
+            response(valid_id, "wrong-space", Some(5)),
+            response(valid_id, space.as_str(), Some(4)),
+            response(valid_id, space.as_str(), None),
+            response(valid_id, space.as_str(), Some(-1)),
+        ] {
+            assert_eq!(
+                validated_uploaded_candidate(&malformed, &space, 5),
+                Err(ArtifactToolError::Indeterminate)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn in_flight_document_retry_is_indeterminate() {
         let state = ArtifactOperationState::default();
         let key = digest_fields(b"key", &[b"document"]);
@@ -4044,7 +4216,7 @@ mod tests {
                 .await,
             Err(ArtifactToolError::Conflict)
         );
-        assert!(!state.entries.lock().await.contains_key(&key));
+        assert!(!state.entries().contains_key(&key));
         assert!(matches!(
             state.reserve_document_mutation(key, fingerprint).await,
             Ok(DocumentMutationIdempotency::Dispatch)
@@ -4102,7 +4274,7 @@ mod tests {
             }
         }
 
-        assert!(state.entries.lock().await.is_empty());
+        assert!(state.entries().is_empty());
     }
 
     #[tokio::test]
@@ -4143,7 +4315,7 @@ mod tests {
             ArtifactToolError::Conflict
         );
 
-        assert!(state.entries.lock().await.is_empty());
+        assert!(state.entries().is_empty());
         assert!(matches!(
             state.reserve_export(file_key, file_fingerprint).await,
             Ok(ExportIdempotency::Dispatch)
@@ -4156,7 +4328,7 @@ mod tests {
             state.reserve_export(file_key, file_fingerprint).await,
             Err(ArtifactToolError::Indeterminate)
         ));
-        assert_eq!(state.entries.lock().await.len(), 1);
+        assert_eq!(state.entries().len(), 1);
     }
 
     #[test]

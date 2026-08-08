@@ -98,6 +98,9 @@ pub(crate) struct StageSource {
     pub(crate) media_type: Option<String>,
     record: [u8; RECORD_BYTES],
     operation: [u8; 32],
+    restore_ready_on_drop: bool,
+    #[cfg(test)]
+    fail_reader_clone: bool,
     lease: tokio::sync::OwnedMutexGuard<RecordState>,
 }
 
@@ -156,6 +159,10 @@ impl StageSource {
     }
 
     pub(crate) fn try_clone_reader(&self) -> Result<File, StagingError> {
+        #[cfg(test)]
+        if self.fail_reader_clone {
+            return Err(StagingError::Upstream);
+        }
         let mut reader = self.file.try_clone().map_err(|_| StagingError::Upstream)?;
         reader
             .seek(SeekFrom::Start(0))
@@ -178,16 +185,17 @@ pub(crate) struct RetainedStageImport {
 
 impl Drop for StageSource {
     fn drop(&mut self) {
-        // A source lease must never silently restore Ready after it has been
-        // handed to an import settlement task.  The task publishes its ledger
-        // terminal state only after this guard is released, so a cancelled or
-        // panicked task leaves a non-acquirable reconciliation record.
-        if self.operation != [0; 32]
-            && let RecordState::Ready { import } = &*self.lease
+        // Before POST dispatch, the lease itself is the rollback guard: a
+        // cancelled or panicked settlement restores the one-use authority.
+        // Once dispatch starts, reconciliation remains bound to the operation
+        // until a definitive rejection restores it explicitly or verification
+        // consumes it.
+        if self.restore_ready_on_drop
+            && let RecordState::Reconciliation { import, operation } = &*self.lease
+            && operation == &self.operation
         {
-            *self.lease = RecordState::Reconciliation {
+            *self.lease = RecordState::Ready {
                 import: Arc::clone(import),
-                operation: self.operation,
             };
         }
     }
@@ -1337,6 +1345,9 @@ impl ArtifactStaging {
             media_type: record.media_type.clone(),
             record: record_id,
             operation: [0; 32],
+            restore_ready_on_drop: false,
+            #[cfg(test)]
+            fail_reader_clone: false,
             lease: state,
         })
     }
@@ -1355,6 +1366,50 @@ impl ArtifactStaging {
         let import = Arc::clone(import);
         *source.lease = RecordState::Reconciliation { import, operation };
         source.operation = operation;
+        source.restore_ready_on_drop = true;
+        Ok(())
+    }
+
+    /// Marks the point immediately before the bound source's upload request is
+    /// dispatched.  Later drops retain reconciliation authority.
+    pub(crate) fn mark_import_dispatched(
+        &self,
+        source: &mut StageSource,
+    ) -> Result<(), StagingError> {
+        let RecordState::Reconciliation { operation, .. } = &*source.lease else {
+            return Err(StagingError::NotFound);
+        };
+        if operation != &source.operation {
+            return Err(StagingError::NotFound);
+        }
+        source.restore_ready_on_drop = false;
+        Ok(())
+    }
+
+    /// Restores a bound source after a definitive upload rejection proved that
+    /// no candidate needs reconciliation.
+    pub(crate) fn restore_import_operation(
+        &self,
+        source: &mut StageSource,
+    ) -> Result<(), StagingError> {
+        let prior = std::mem::replace(
+            &mut *source.lease,
+            RecordState::Receiving {
+                destination: None,
+                offset: 0,
+            },
+        );
+        let RecordState::Reconciliation { import, operation } = prior else {
+            *source.lease = prior;
+            return Err(StagingError::NotFound);
+        };
+        if operation != source.operation {
+            *source.lease = RecordState::Reconciliation { import, operation };
+            return Err(StagingError::NotFound);
+        }
+        *source.lease = RecordState::Ready { import };
+        source.operation = [0; 32];
+        source.restore_ready_on_drop = false;
         Ok(())
     }
 
@@ -1415,23 +1470,26 @@ impl ArtifactStaging {
                 offset: 0,
             },
         );
-        let RecordState::Reconciliation {
-            import,
-            operation: retained,
-        } = prior
-        else {
-            *state = prior;
-            return Err(StagingError::NotFound);
-        };
-        if retained != operation {
-            *state = RecordState::Reconciliation {
+        match prior {
+            RecordState::Reconciliation {
                 import,
                 operation: retained,
-            };
-            return Err(StagingError::NotFound);
+            } if retained == operation => {
+                *state = RecordState::Consumed { import, operation };
+                Ok(())
+            }
+            RecordState::Consumed {
+                import,
+                operation: retained,
+            } if retained == operation => {
+                *state = RecordState::Consumed { import, operation };
+                Ok(())
+            }
+            other => {
+                *state = other;
+                Err(StagingError::NotFound)
+            }
         }
-        *state = RecordState::Consumed { import, operation };
-        Ok(())
     }
 
     /// Reads authenticated import metadata without acquiring the one-use
@@ -1483,6 +1541,7 @@ impl ArtifactStaging {
             return Err(StagingError::NotFound);
         }
         *source.lease = RecordState::Consumed { import, operation };
+        source.restore_ready_on_drop = false;
         Ok(())
     }
 
@@ -2334,12 +2393,52 @@ mod tests {
             .bind_import_operation(&mut source, [1; 32])
             .expect("bind import operation");
         assert!(
-            test.staging
-                .import_source(&allocation.handle, &space_id())
-                .await
-                .is_err(),
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                test.staging.import_source(&allocation.handle, &space_id()),
+            )
+            .await
+            .is_err(),
             "a second caller cannot acquire reconciliation authority"
         );
+        source.fail_reader_clone = true;
+        assert!(matches!(
+            source.try_clone_reader(),
+            Err(StagingError::Upstream)
+        ));
+        drop(source);
+        assert_eq!(
+            test.staging
+                .inspect(&allocation.handle)
+                .await
+                .expect("pre-dispatch rollback status")
+                .state,
+            "ready",
+            "dropping before upload dispatch restores staged authority"
+        );
+        let mut source = test
+            .staging
+            .import_source(&allocation.handle, &space_id())
+            .await
+            .expect("reacquire after pre-dispatch rollback");
+        test.staging
+            .bind_import_operation(&mut source, [1; 32])
+            .expect("rebind import operation");
+        test.staging
+            .mark_import_dispatched(&mut source)
+            .expect("mark upload dispatched");
+        test.staging
+            .restore_import_operation(&mut source)
+            .expect("definitive rejection restores staged authority");
+        drop(source);
+        let mut source = test
+            .staging
+            .import_source(&allocation.handle, &space_id())
+            .await
+            .expect("reacquire after definitive rejection");
+        test.staging
+            .bind_import_operation(&mut source, [1; 32])
+            .expect("bind final import operation");
         test.staging
             .consume(&mut source)
             .await
@@ -2358,6 +2457,20 @@ mod tests {
                 .is_err(),
             "a wrong key cannot inspect consumed authority"
         );
+        test.staging
+            .consume_reconciliation(&allocation.handle, &space_id(), [1; 32])
+            .await
+            .expect("same operation can replay consumed settlement");
+        test.staging
+            .consume_reconciliation(&allocation.handle, &space_id(), [1; 32])
+            .await
+            .expect("consumed settlement replay remains idempotent");
+        assert!(matches!(
+            test.staging
+                .consume_reconciliation(&allocation.handle, &space_id(), [2; 32])
+                .await,
+            Err(StagingError::NotFound)
+        ));
         test.staging
             .release(&allocation.handle)
             .await

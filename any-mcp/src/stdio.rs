@@ -188,7 +188,12 @@ where
     R: AsyncBufRead + Unpin,
 {
     async fn queue_decoder_message(&mut self, item: Value) -> io::Result<()> {
-        debug_assert!(self.pending_decoder_frame.is_none());
+        if self.pending_decoder_frame.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "a decoder frame is already pending",
+            ));
+        }
         self.pending_decoder_frame = Some(encode_bounded_legacy_frame(&item)?);
         self.flush_pending_decoder_frame().await
     }
@@ -202,10 +207,9 @@ where
         let permit = outbound.reserve_owned().await.map_err(|_| {
             io::Error::new(io::ErrorKind::BrokenPipe, "stdout writer is unavailable")
         })?;
-        let encoded = self
-            .pending_decoder_frame
-            .take()
-            .expect("pending decoder frame survives cancellation");
+        let encoded = self.pending_decoder_frame.take().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "no decoder frame is pending")
+        })?;
         permit.send(encoded);
         Ok(())
     }
