@@ -702,10 +702,12 @@ impl ArtifactStaging {
         };
         let _request_permit = request_permit;
         if !valid_header_block(&request, &self.state.limits)
-            || request.headers().contains_key(ORIGIN)
             || request.headers().contains_key(TRANSFER_ENCODING)
         {
             return fixed_response(StatusCode::BAD_REQUEST);
+        }
+        if request.headers().contains_key(ORIGIN) {
+            return fixed_response(StatusCode::FORBIDDEN);
         }
         let host = match single_header(request.headers(), HOST, 255) {
             Ok(Some(host))
@@ -2204,7 +2206,9 @@ fn wall_expiry(ttl: Duration) -> Result<DateTime<Utc>, StagingError> {
 mod tests {
     use std::path::PathBuf;
 
-    use reqwest::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HOST, ORIGIN, RANGE};
+    use reqwest::header::{
+        AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HOST, HeaderValue, ORIGIN, RANGE,
+    };
 
     use super::*;
     use crate::{artifact_config::ArtifactConfig, artifact_roots::RootRegistry};
@@ -2310,6 +2314,40 @@ mod tests {
             .get_or_init(|| std::sync::Mutex::new(None))
             .lock()
             .expect("cleanup pause lock") = None;
+    }
+
+    async fn raw_staging_status(url: &str, request: Vec<u8>) -> StatusCode {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let parsed = url::Url::parse(url).expect("parse private staging URL");
+        let host = parsed.host_str().expect("staging URL host");
+        let port = parsed.port_or_known_default().expect("staging URL port");
+        let mut stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .expect("connect raw staging request");
+        stream
+            .write_all(&request)
+            .await
+            .expect("write raw staging request");
+        stream.shutdown().await.expect("finish raw staging request");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
+            .await
+            .expect("raw staging response deadline")
+            .expect("read raw staging response");
+        let first = response
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("raw staging status line");
+        match first {
+            line if line.starts_with(b"HTTP/1.1 400 ") => StatusCode::BAD_REQUEST,
+            line if line.starts_with(b"HTTP/1.1 401 ") => StatusCode::UNAUTHORIZED,
+            line if line.starts_with(b"HTTP/1.1 404 ") => StatusCode::NOT_FOUND,
+            line if line.starts_with(b"HTTP/1.1 405 ") => StatusCode::METHOD_NOT_ALLOWED,
+            line if line.starts_with(b"HTTP/1.1 429 ") => StatusCode::TOO_MANY_REQUESTS,
+            line if line.starts_with(b"HTTP/1.1 503 ") => StatusCode::SERVICE_UNAVAILABLE,
+            _ => panic!("unexpected raw staging status category"),
+        }
     }
 
     #[tokio::test]
@@ -2800,7 +2838,7 @@ mod tests {
             .send()
             .await
             .expect("browser-origin request");
-        assert_eq!(browser.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(browser.status(), StatusCode::FORBIDDEN);
 
         let wrong_host = client
             .head(&allocation.url)
@@ -2818,6 +2856,193 @@ mod tests {
             .await
             .expect("query-bearing request");
         assert_eq!(query.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn handle_abuse_matrix_is_uniform_and_state_preserving() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate HAND fixture");
+        let client = reqwest::Client::new();
+
+        let (_, guessed, _) = make_handle(&[0x55; 32]).expect("mint guessed handle");
+        assert!(matches!(
+            test.staging.release(&guessed).await,
+            Err(StagingError::NotFound)
+        ));
+        assert!(matches!(
+            test.staging.release("not-a-handle").await,
+            Err(StagingError::NotFound)
+        ));
+
+        let wrong_space = SpaceId::new(
+            "bafyreih62bq2tfyvb4chv53hxsfm74qf27medzfkfap6bxsno7yhk3qxwu.2tq5w93cr6oe7",
+        )
+        .expect("second valid space id");
+        assert!(matches!(
+            test.staging
+                .import_source(&allocation.handle, &wrong_space)
+                .await,
+            Err(StagingError::NotFound)
+        ));
+
+        let direction = client
+            .get(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .send()
+            .await
+            .expect("HAND-06 direction request");
+        assert_eq!(direction.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            direction.bytes().await.expect("HAND-06 response body"),
+            Bytes::from_static(b"not found\n")
+        );
+
+        let wrong_record = "00000000000000000000000000000000";
+        assert_ne!(allocation.record, wrong_record);
+        let wrong_route = allocation.url.replace(&allocation.record, wrong_record);
+        let route = client
+            .head(wrong_route)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .send()
+            .await
+            .expect("HAND-08 route request");
+        assert_eq!(route.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            test.staging
+                .inspect(&allocation.handle)
+                .await
+                .expect("record remains live")
+                .offset,
+            0
+        );
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("release HAND fixture");
+    }
+
+    #[tokio::test]
+    async fn staging_request_shedding_and_closed_grammar_preserve_records() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate request-grammar fixture");
+        let client = reqwest::Client::new();
+        let bearer = format!("Bearer {}", allocation.handle);
+
+        for request in [
+            client
+                .head(&allocation.url)
+                .header(AUTHORIZATION, format!("Basic {}", allocation.handle)),
+            client
+                .head(&allocation.url)
+                .header(AUTHORIZATION, format!("{bearer} extra")),
+        ] {
+            let response = request.send().await.expect("send HAND-09 request");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let method = client
+            .post(&allocation.url)
+            .header(AUTHORIZATION, &bearer)
+            .send()
+            .await
+            .expect("send HAND-13 request");
+        assert_eq!(method.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let parsed = url::Url::parse(&allocation.url).expect("parse HAND-15 URL");
+        let host = parsed.host_str().expect("HAND-15 host");
+        let port = parsed.port_or_known_default().expect("HAND-15 port");
+        let request = format!(
+            "PUT {} HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: {bearer}\r\nTransfer-Encoding: gzip\r\nConnection: close\r\n\r\n",
+            parsed.path()
+        )
+        .into_bytes();
+        assert_eq!(
+            raw_staging_status(&allocation.url, request).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        {
+            let mut window = test.staging.state.rate_window.lock().await;
+            window.extend(std::iter::repeat_n(
+                Instant::now(),
+                test.staging.state.limits.staging_requests_per_minute as usize,
+            ));
+        }
+        let rate_limited = client
+            .head(&allocation.url)
+            .header(AUTHORIZATION, &bearer)
+            .send()
+            .await
+            .expect("send HAND-14 request");
+        assert_eq!(rate_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        test.staging.state.rate_window.lock().await.clear();
+        let resumed = client
+            .head(&allocation.url)
+            .header(AUTHORIZATION, &bearer)
+            .send()
+            .await
+            .expect("resume after HAND-14 window");
+        assert_eq!(resumed.status(), StatusCode::OK);
+
+        let permits = Arc::clone(&test.staging.state.request_permits)
+            .acquire_many_owned(
+                u32::try_from(test.staging.state.limits.staging_requests)
+                    .expect("staging request permits fit u32"),
+            )
+            .await
+            .expect("hold all staging request permits");
+        let overloaded = client
+            .head(&allocation.url)
+            .header(AUTHORIZATION, &bearer)
+            .send()
+            .await
+            .expect("send FLOOD-06 request");
+        assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(permits);
+
+        assert_eq!(
+            test.staging
+                .inspect(&allocation.handle)
+                .await
+                .expect("request grammar preserved record")
+                .offset,
+            0
+        );
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("release request-grammar fixture");
+    }
+
+    #[test]
+    fn partial_write_and_critical_header_grammar_is_closed() {
+        assert_eq!(parse_content_range("bytes 5-9/10", 10), Some((5, 5)));
+        assert_eq!(parse_content_range("bytes 5-9/11", 10), None);
+        assert_eq!(parse_content_range("bytes 9-5/10", 10), None);
+        assert_eq!(parse_download_range("bytes=10-10", 10), None);
+        assert_eq!(parse_download_range("bytes=invalid", 10), None);
+
+        let mut headers = hyper::HeaderMap::new();
+        headers.append(AUTHORIZATION, HeaderValue::from_static("Bearer first"));
+        headers.append(AUTHORIZATION, HeaderValue::from_static("Bearer second"));
+        assert!(matches!(
+            single_header(&headers, AUTHORIZATION, 160),
+            Err(StagingError::Conflict)
+        ));
+        headers.clear();
+        headers.append(CONTENT_LENGTH, HeaderValue::from_static("05"));
+        assert!(matches!(
+            parse_single_u64(&headers, CONTENT_LENGTH, 128),
+            Err(StagingError::Conflict)
+        ));
     }
 
     #[tokio::test]
