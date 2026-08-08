@@ -125,8 +125,12 @@ and `FileObject`. Important conveniences include:
   markdown, tags, and query strings before network I/O.
 - Create builders support optional eventual-consistency verification through
   `ensure_available`; `VerifyConfig` controls retries and backoff.
-- One HTTP pipeline supplies serialization, typed API errors, tracing, retries,
-  rate-limit backoff, response-size validation, and request/byte metrics.
+- One HTTP pipeline supplies serialization, typed API errors, tracing,
+  absolute per-request deadlines, read-only retries, rate-limit backoff,
+  response-size validation, and request/byte/timeout metrics. File and
+  multipart REST requests use the long profile; each paginated page uses the
+  standard profile. REST SSE keeps open, error-body, established-idle, and
+  established-lifetime boundaries separate.
 - Authentication helpers combine challenge creation, user-code exchange,
   in-memory credential installation, and optional keystore persistence.
 

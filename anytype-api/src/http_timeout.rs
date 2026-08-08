@@ -236,8 +236,8 @@ mod tests {
         assert_eq!(disabled.sse_error_body, None);
         assert_eq!(disabled.sse_idle, None);
         assert_eq!(disabled.sse_total_lifetime, None);
-        let finite = HttpTimeoutPolicy::from_environment(Some(OsString::from("17")))
-            .expect("finite policy");
+        let finite =
+            HttpTimeoutPolicy::from_environment(Some(OsString::from("17"))).expect("finite policy");
         assert_eq!(finite.standard_operation, Some(Duration::from_secs(17)));
         assert_eq!(finite.long_operation, Some(Duration::from_secs(17)));
     }
@@ -254,9 +254,7 @@ mod tests {
     fn inherited_environment_rejects_non_unicode() {
         use std::os::unix::ffi::OsStringExt;
 
-        assert!(
-            HttpTimeoutPolicy::from_environment(Some(OsString::from_vec(vec![0xff]))).is_err()
-        );
+        assert!(HttpTimeoutPolicy::from_environment(Some(OsString::from_vec(vec![0xff]))).is_err());
     }
 
     #[test]

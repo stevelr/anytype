@@ -504,9 +504,7 @@ impl AnytypeError {
                 Some(diagnostic_method(method).to_owned()),
                 Some(crate::http_client::diagnostic_path(url)),
             ),
-            Self::HttpTimeout {
-                method, path, ..
-            } => (
+            Self::HttpTimeout { method, path, .. } => (
                 "http_timeout",
                 None,
                 Some(diagnostic_method(method).to_owned()),
@@ -616,9 +614,7 @@ impl AnytypeError {
                         crate::http_timeout::TimeoutOutcome::MutationIndeterminate
                     })
                 }),
-                elapsed.map(|elapsed| {
-                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-                }),
+                elapsed.map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
                 *attempts,
             ),
             _ => (None, None, None, None),

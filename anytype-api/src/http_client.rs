@@ -148,12 +148,7 @@ impl HttpMetrics {
             .fetch_add(secs, Ordering::Relaxed);
     }
 
-    fn record_timeout(
-        &self,
-        class: HttpTimeoutClass,
-        outcome: TimeoutOutcome,
-        elapsed: Duration,
-    ) {
+    fn record_timeout(&self, class: HttpTimeoutClass, outcome: TimeoutOutcome, elapsed: Duration) {
         saturating_increment(&self.timeout_counts[class.index()]);
         saturating_add(
             &self.timeout_elapsed_millis[class.index()],
@@ -365,7 +360,9 @@ impl EstablishedSseState {
         if self.terminated {
             return None;
         }
-        let idle_deadline = self.idle.and_then(|idle| self.last_progress.checked_add(idle));
+        let idle_deadline = self
+            .idle
+            .and_then(|idle| self.last_progress.checked_add(idle));
         let lifetime_deadline = self
             .lifetime
             .and_then(|lifetime| self.started.checked_add(lifetime));
@@ -774,41 +771,55 @@ impl HttpClient {
                 result => result,
             };
         };
-        let deadline = timing.started.checked_add(duration).ok_or_else(|| {
-            AnytypeError::Validation {
-                message: format!("{class} HTTP deadline cannot be represented"),
-            }
-        })?;
+        let deadline =
+            timing
+                .started
+                .checked_add(duration)
+                .ok_or_else(|| AnytypeError::Validation {
+                    message: format!("{class} HTTP deadline cannot be represented"),
+                })?;
         match tokio::time::timeout_at(deadline, operation).await {
             Ok(Err(AnytypeError::Http { source, .. })) => {
                 Err(self.classify_transport_error(source, method, path, timing))
             }
-            Ok(result) => result,
-            Err(_) => {
-                let elapsed = timing.elapsed();
-                let attempts = timing.attempts();
-                self.metrics.increment_errors();
-                self.metrics.record_timeout(class, outcome, elapsed);
-                warn!(
-                    target: "anytype::http",
-                    error_variant = "logical_timeout",
-                    timeout_class = %class,
-                    timeout_outcome = %outcome,
-                    elapsed_millis = duration_millis_saturating(elapsed),
-                    http_method = %method,
-                    http_path = %diagnostic_path(path),
-                    physical_attempt = attempts,
-                    "HTTP logical deadline expired"
-                );
-                Err(AnytypeError::HttpTimeout {
-                    class,
-                    outcome,
-                    method: method.as_str().to_owned(),
-                    path: path.to_owned(),
-                    elapsed,
-                    attempts,
-                })
+            Ok(_result) if tokio::time::Instant::now() >= deadline => {
+                Err(self.logical_timeout_error(class, outcome, method, path, timing))
             }
+            Ok(result) => result,
+            Err(_) => Err(self.logical_timeout_error(class, outcome, method, path, timing)),
+        }
+    }
+
+    fn logical_timeout_error(
+        &self,
+        class: HttpTimeoutClass,
+        outcome: TimeoutOutcome,
+        method: &Method,
+        path: &str,
+        timing: &OperationTiming,
+    ) -> AnytypeError {
+        let elapsed = timing.elapsed();
+        let attempts = timing.attempts();
+        self.metrics.increment_errors();
+        self.metrics.record_timeout(class, outcome, elapsed);
+        warn!(
+            target: "anytype::http",
+            error_variant = "logical_timeout",
+            timeout_class = %class,
+            timeout_outcome = %outcome,
+            elapsed_millis = duration_millis_saturating(elapsed),
+            http_method = %method,
+            http_path = %diagnostic_path(path),
+            physical_attempt = attempts,
+            "HTTP logical deadline expired"
+        );
+        AnytypeError::HttpTimeout {
+            class,
+            outcome,
+            method: method.as_str().to_owned(),
+            path: path.to_owned(),
+            elapsed,
+            attempts,
         }
     }
 
@@ -1568,11 +1579,7 @@ impl HttpClient {
                 .map_err(reqwest::Error::without_url);
             let response = match sent {
                 Ok(response) => response,
-                Err(source)
-                    if replay_safe
-                        && attempts < max_attempts
-                        && source.is_connect() =>
-                {
+                Err(source) if replay_safe && attempts < max_attempts && source.is_connect() => {
                     self.metrics.increment_retries();
                     log_and_backoff(attempts - 1, "file transport failure").await;
                     continue;
@@ -2129,6 +2136,12 @@ impl HttpClient {
                                     return Err(err)
                                 }
                                 Ok(ParsedRetry{ header, duration}) => {
+                                    self.read_error_body(
+                                        response,
+                                        req.method.as_str(),
+                                        &req.path,
+                                    )
+                                    .await?;
                                     if self.rate_limit_max_retries > 0
                                         && rate_limit_retries > self.rate_limit_max_retries
                                     {
@@ -2481,10 +2494,7 @@ async fn log_and_backoff(attempt: u32, reason: &str) {
 }
 
 fn is_idempotent_method(method: &Method) -> bool {
-    matches!(
-        *method,
-        Method::GET | Method::HEAD | Method::OPTIONS
-    )
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 
 #[cfg(test)]
@@ -2495,12 +2505,12 @@ mod tests {
         time::Duration,
     };
 
+    use bytes::Bytes;
+    use futures::StreamExt;
     use reqwest::{
         ClientBuilder, Method, StatusCode,
         header::{HeaderMap, HeaderValue},
     };
-    use bytes::Bytes;
-    use futures::StreamExt;
     use serde::Deserialize;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -2516,11 +2526,11 @@ mod tests {
         deserialize_json, diagnostic_path, log_http_status, log_request, log_response,
         parse_retry_after,
     };
+    use crate::filters::QueryWithFilters;
     use crate::prelude::{
         AnytypeClient, AnytypeError, ClientConfig, HttpCredentials, HttpTimeoutPolicy,
         MAX_JSON_RESPONSE_BYTES, ResponseLimits, ValidationLimits,
     };
-    use crate::filters::QueryWithFilters;
 
     const TEST_SPACE_ID: &str =
         "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
@@ -2734,10 +2744,7 @@ mod tests {
                     .write_all(prefix.as_bytes())
                     .await
                     .expect("write SSE chunk prefix");
-                socket
-                    .write_all(chunk)
-                    .await
-                    .expect("write SSE chunk");
+                socket.write_all(chunk).await.expect("write SSE chunk");
                 socket
                     .write_all(b"\r\n")
                     .await
@@ -2948,7 +2955,10 @@ mod tests {
         let request = tokio::spawn(async move { request_client.send::<()>(get_request()).await });
         accepted.await.expect("request accepted");
         tokio::time::advance(Duration::from_secs(1)).await;
-        let error = request.await.expect("request task").expect_err("transport timeout");
+        let error = request
+            .await
+            .expect("request task")
+            .expect_err("transport timeout");
         let diagnostic = error.diagnostic().to_string();
         assert!(diagnostic.contains("timeout_class=transport"));
         assert!(diagnostic.contains("outcome=read_aborted"));
@@ -3108,7 +3118,7 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn sse_open_and_error_body_use_separate_timeout_classes() {
         let policy = HttpTimeoutPolicy {
             sse_open: Some(Duration::from_secs(1)),
@@ -3124,7 +3134,6 @@ mod tests {
                 .await
         });
         accepted.await.expect("SSE open accepted");
-        tokio::time::advance(Duration::from_secs(1)).await;
         assert!(matches!(
             open.await.expect("SSE open task"),
             Err(AnytypeError::HttpTimeout {
@@ -3148,19 +3157,21 @@ mod tests {
                 .await
         });
         prefix_written.await.expect("SSE error prefix");
-        tokio::time::advance(Duration::from_secs(1)).await;
         let error = error_body
             .await
             .expect("SSE error task")
             .err()
             .expect("SSE error response must fail");
-        assert!(matches!(
-            error,
-            AnytypeError::HttpTimeout {
-                class: crate::http_timeout::HttpTimeoutClass::SseErrorBody,
-                ..
-            }
-        ), "unexpected SSE error: {error:?}");
+        assert!(
+            matches!(
+                error,
+                AnytypeError::HttpTimeout {
+                    class: crate::http_timeout::HttpTimeoutClass::SseErrorBody,
+                    ..
+                }
+            ),
+            "unexpected SSE error: {error:?}"
+        );
         server.abort();
     }
 
@@ -3185,7 +3196,11 @@ mod tests {
             .expect("SSE headers open promptly");
         let mut chunks = response.bytes_stream();
         assert_eq!(
-            chunks.next().await.expect("SSE chunk").expect("healthy SSE"),
+            chunks
+                .next()
+                .await
+                .expect("SSE chunk")
+                .expect("healthy SSE"),
             Bytes::from_static(b"data: healthy\n\n")
         );
         server.await.expect("SSE server");
@@ -3211,7 +3226,10 @@ mod tests {
                 ..
             }))
         ));
-        assert!(chunks.next().await.is_none(), "stream emits one terminal error");
+        assert!(
+            chunks.next().await.is_none(),
+            "stream emits one terminal error"
+        );
         server.abort();
 
         let lifetime_policy = HttpTimeoutPolicy {
@@ -3234,7 +3252,10 @@ mod tests {
             .await
             .expect("SSE opens");
         let mut chunks = response.bytes_stream();
-        assert!(chunks.next().await.is_some(), "heartbeat counts as progress");
+        assert!(
+            chunks.next().await.is_some(),
+            "heartbeat counts as progress"
+        );
         let terminal = chunks.next().await;
         assert!(matches!(
             terminal,

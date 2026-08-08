@@ -8,6 +8,20 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Bound every REST wire request with one absolute logical deadline. Defaults
+  are 120 seconds for ordinary requests, 600 seconds for file and multipart
+  requests, and separate 120-second SSE open and error-body phases. Explicit
+  `HttpTimeoutPolicy` values support finite or disabled boundaries;
+  `ANYTYPE_HTTP_TIMEOUT_SECS` supplies inherited process policy. Established
+  SSE idle and lifetime limits remain disabled unless configured. Typed
+  secret-safe timeout outcomes and saturating per-class metrics distinguish
+  aborted reads, indeterminate mutations, terminated streams, and caller
+  transport timeouts.
+- Restrict automatic HTTP replay to `GET`, `HEAD`, and `OPTIONS`. Mutation
+  `POST`, `PATCH`, `DELETE`, and unapproved `PUT` dispatch once; ambiguous
+  transport, timeout, 408, 429, 504, and server failures require a fresh state
+  observation before application retry.
+
 - Reconcile the maintained HTTP/gRPC coverage inventory with the completed
   any-dm9k campaign. Remaining gaps now distinguish direct crate coverage from
   cross-crate evidence, reuse existing ticket owners, and define bounded

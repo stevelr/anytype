@@ -128,11 +128,13 @@ body, URL, request payload, or credential.
 ### Retry safety
 
 Automatic response, rate-limit, and transport retries are restricted to HTTP
-methods already classified as replay-safe: `GET`, `HEAD`, `PUT`, `DELETE`, and
-`OPTIONS`. `POST` and `PATCH` are sent exactly once. A 429, timeout-status,
-server-status, disconnect, or timeout from one of those mutation methods is
-returned to the caller without replaying its body, because the server may have
-applied a write even when the client did not receive a usable response.
+reads: `GET`, `HEAD`, and `OPTIONS`. `POST`, `PATCH`, mutation `DELETE`, and
+`PUT` without documented endpoint-specific replay approval are sent exactly
+once. A logical deadline or transport failure after dispatch returns an
+indeterminate mutation outcome. A 408, 429, 504, or other server failure is
+also indeterminate because the server may have applied the write before
+returning or losing the response. Observe fresh server state before deciding
+whether to retry.
 
 The client disables reqwest's lower-level retry and redirect handling so every
 additional send passes through this method-aware policy and its metrics. A 3xx
@@ -144,11 +146,60 @@ overridden; timeout, proxy, DNS, TLS, and user-agent customization is retained.
 `ClientConfig::rate_limit_max_retries` continues to control consecutive 429
 retries for replay-safe requests; zero disables that rate-limit-specific cap.
 Independently, one cumulative ceiling permits at most six physical attempts
-across 429, retryable-status, connection, and timeout failures, and the counter
-never resets when the failure class changes. It does not opt mutation requests
-into retries. HTTP metrics expose independent `logical_operations` and
-`physical_attempts` counters; the existing `total_requests` field retains its
-physical-request meaning.
+across 429, retryable-status, and connection failures, and the counter never
+resets when the failure class changes. Caller transport timeouts terminate the
+logical request so the shorter caller boundary wins. Retry count does not opt
+mutation requests into replay. HTTP metrics expose independent
+`logical_operations` and `physical_attempts` counters; the existing
+`total_requests` field retains its physical-request meaning.
+
+### HTTP deadlines
+
+Each REST request has one absolute logical deadline that covers every physical
+send, retry wait, rate-limit delay, response header, buffered body, and JSON
+decode. Ordinary requests default to 120 seconds. File and multipart requests
+default to 600 seconds. Each paginated page receives a fresh ordinary deadline.
+`AnytypeClient::with_config` also installs a fixed 30-second connection timeout.
+`AnytypeClient::with_client` preserves the caller's connection and request
+timeouts while applying the logical policy.
+
+Set an explicit policy when an embedding application owns different request or
+stream boundaries:
+
+```rust,no_run
+use anytype::prelude::*;
+use std::time::Duration;
+
+# fn client() -> Result<AnytypeClient, AnytypeError> {
+let policy = HttpTimeoutPolicy {
+    standard_operation: Some(Duration::from_secs(60)),
+    long_operation: Some(Duration::from_secs(900)),
+    sse_open: Some(Duration::from_secs(60)),
+    sse_error_body: Some(Duration::from_secs(30)),
+    sse_idle: Some(Duration::from_secs(90)),
+    sse_total_lifetime: None,
+};
+let config = ClientConfig::default().http_timeouts(policy);
+AnytypeClient::with_config(config)
+# }
+```
+
+Finite values range from one through 3,600 seconds. `None` in an explicit
+policy disables that boundary. Without an explicit policy,
+`ANYTYPE_HTTP_TIMEOUT_SECS=1..3600` replaces the four buffered/open defaults
+with one value, while `0` disables those four logical boundaries. Malformed,
+non-Unicode, signed, whitespace-bearing, overflowed, and larger values reject
+client construction. The environment never enables established SSE idle or
+lifetime limits.
+
+Successful SSE headers disarm the open deadline before the response body is
+returned. Non-success bodies receive a fresh error-body deadline. Established
+streams have no idle or total-lifetime deadline by default; when configured,
+any nonempty transport chunk resets the idle timer and the lifetime timer never
+resets. `AnytypeError::HttpTimeout` and `error.diagnostic()` report a closed
+class and outcome, sanitized method and path, elapsed time, and physical
+attempt count. Timeout metrics are available through `http_metrics().timeout`,
+`transport_timeouts`, and `timeout_outcome_count`.
 
 `http_credential_generation()` exposes only a monotonic process-local number.
 It advances whenever the in-memory HTTP key is set or cleared, allowing
@@ -355,7 +406,7 @@ allowlisted header evidence over the selected ceiling fail with typed,
 secret-safe errors. The header ceiling is checked independently before body or
 retry processing on every physical response, including intermediate 429 and
 retryable-status responses. The attempt ceiling is cumulative across 429,
-retryable status, connection, and timeout replays.
+retryable status, and connection replays.
 
 Use `files().metadata(space_id, file_id)` for a simple `HEAD` request. File
 deletion moves the object to the bin by default; permanent deletion is explicit:
@@ -372,8 +423,9 @@ client
 Server compatibility, verified against `anytype-cli` 0.3.6 (API `2025-11-08`):
 the file endpoint advertises `Accept-Ranges: bytes` and returns 206, 412, and
 416, but supplies neither `ETag` nor `Last-Modified`, so `304 Not Modified`
-cannot be triggered there. No request-wide timeout is applied by default, so
-supply one through a custom `ClientBuilder` when an endpoint may not respond.
+cannot be triggered there. File requests use the 600-second long-operation
+deadline by default; permanent deletion's independent live regression guard
+remains 180 seconds.
 
 `files().upload(space).from_path(path).upload()` selects REST for a simple
 path upload and returns a normalized `FileObject`. Adding `file_type`, `style`,

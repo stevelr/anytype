@@ -109,9 +109,9 @@ async fn test_rest_file_upload_download_and_delete() -> TestResult<()> {
 ///
 /// On `anytype-cli` 0.3.6, permanent deletion was measured taking about 154
 /// seconds before returning `204 No Content` (tracked as any-18f5). Because the
-/// client applies no default request timeout (any-sqns), the call is bounded by
-/// the same finite 180-second budget used for live CLI commands. A recurrence
-/// still fails instead of wedging the suite indefinitely.
+/// client's 600-second long-operation deadline preserves that behavior. This
+/// test retains the tighter 180-second regression budget used for live CLI
+/// commands, so a recurrence fails before the production boundary.
 #[tokio::test]
 async fn test_rest_file_permanent_delete_bypasses_bin() -> TestResult<()> {
     /// Wall-clock ceiling for the permanent delete.
