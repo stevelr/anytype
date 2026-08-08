@@ -2967,10 +2967,9 @@ async fn headless_artifact_traversal_direct_scenarios() {
                     .map_err(|_| TestError::Assertion {
                         message: "direct traversal execution partition was incomplete".to_owned(),
                     })?;
-                let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
                 *callback_evidence.lock().map_err(|_| TestError::Assertion {
                     message: "retain traversal owner evidence".to_owned(),
-                })? = Some((execution, audit));
+                })? = Some((log_baseline, log_needles, execution));
                 Ok(())
             })
         },
@@ -2979,11 +2978,13 @@ async fn headless_artifact_traversal_direct_scenarios() {
     .expect("cleanup-safe direct traversal acceptance");
     require_completed(outcome, "direct traversal acceptance")
         .expect("prefix-authorized disposable admission");
-    let (execution, audit) = owner_evidence
+    let (log_baseline, log_needles, execution) = owner_evidence
         .lock()
         .expect("traversal owner evidence lock")
         .take()
         .expect("traversal owner evidence");
+    let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)
+        .expect("post-cleanup traversal log audit");
     execution
         .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
         .expect("bounded traversal owner evidence");
@@ -3046,10 +3047,9 @@ async fn headless_artifact_alias_metadata_direct_scenarios() {
                         message: "direct alias-metadata execution partition was incomplete"
                             .to_owned(),
                     })?;
-                let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
                 *callback_evidence.lock().map_err(|_| TestError::Assertion {
                     message: "retain alias-metadata owner evidence".to_owned(),
-                })? = Some((execution, audit));
+                })? = Some((log_baseline, log_needles, execution));
                 Ok(())
             })
         },
@@ -3058,11 +3058,13 @@ async fn headless_artifact_alias_metadata_direct_scenarios() {
     .expect("cleanup-safe direct alias-metadata acceptance");
     require_completed(outcome, "direct alias-metadata acceptance")
         .expect("prefix-authorized disposable admission");
-    let (execution, audit) = owner_evidence
+    let (log_baseline, log_needles, execution) = owner_evidence
         .lock()
         .expect("alias-metadata owner evidence lock")
         .take()
         .expect("alias-metadata owner evidence");
+    let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)
+        .expect("post-cleanup alias-metadata log audit");
     execution
         .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
         .expect("bounded alias-metadata owner evidence");
@@ -3147,10 +3149,9 @@ async fn headless_artifact_bounded_metadata_direct_scenarios() {
                         message: "direct bounded-metadata execution partition was incomplete"
                             .to_owned(),
                     })?;
-                let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)?;
                 *callback_evidence.lock().map_err(|_| TestError::Assertion {
                     message: "retain bounded-metadata owner evidence".to_owned(),
-                })? = Some((execution, audit));
+                })? = Some((log_baseline, log_needles, execution));
                 Ok(())
             })
         },
@@ -3159,11 +3160,13 @@ async fn headless_artifact_bounded_metadata_direct_scenarios() {
     .expect("cleanup-safe direct bounded-metadata acceptance");
     require_completed(outcome, "direct bounded-metadata acceptance")
         .expect("prefix-authorized disposable admission");
-    let (execution, audit) = owner_evidence
+    let (log_baseline, log_needles, execution) = owner_evidence
         .lock()
         .expect("bounded-metadata owner evidence lock")
         .take()
         .expect("bounded-metadata owner evidence");
+    let audit = audit_direct_adversarial_log(&log_baseline, &log_needles, &execution)
+        .expect("post-cleanup bounded-metadata log audit");
     execution
         .emit_owner_evidence(ArtifactControlPlane::DirectRouter, &audit)
         .expect("bounded metadata owner evidence");
