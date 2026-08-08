@@ -278,4 +278,20 @@ mod tests {
         };
         assert!(disabled.validate().is_ok());
     }
+
+    #[test]
+    fn explicit_policy_resolution_ignores_environment_resolution() {
+        let explicit = HttpTimeoutPolicy {
+            standard_operation: None,
+            long_operation: Some(Duration::from_secs(17)),
+            sse_open: None,
+            sse_error_body: Some(Duration::from_secs(18)),
+            sse_idle: Some(Duration::from_secs(19)),
+            sse_total_lifetime: None,
+        };
+        assert_eq!(
+            HttpTimeoutPolicy::resolve(Some(explicit)).expect("explicit policy"),
+            explicit
+        );
+    }
 }

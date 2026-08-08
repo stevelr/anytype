@@ -1138,7 +1138,13 @@ impl HttpClient {
                         .await
                         .map_err(reqwest::Error::without_url)
                         .map_err(|source| {
-                            self.transport_error(source, &Method::GET, path, &open_timing)
+                            if source.is_timeout() {
+                                self.transport_error(source, &Method::GET, path, &open_timing)
+                            } else {
+                                AnytypeError::ChatSseTransport {
+                                    path: diagnostic_path(path),
+                                }
+                            }
                         })
                 },
             )
@@ -2485,7 +2491,7 @@ fn is_idempotent_method(method: &Method) -> bool {
 mod tests {
     use std::{
         io::{self, Write},
-        sync::{Arc, Barrier, Mutex, Once},
+        sync::{Arc, Barrier, Mutex, Once, atomic::Ordering},
         time::Duration,
     };
 
@@ -2506,7 +2512,7 @@ mod tests {
     use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt};
 
     use super::{
-        HttpClient, HttpRequest, MAX_DIAGNOSTIC_PATH_CHARS, REDACTED_DIAGNOSTIC_PATH,
+        HttpClient, HttpMetrics, HttpRequest, MAX_DIAGNOSTIC_PATH_CHARS, REDACTED_DIAGNOSTIC_PATH,
         deserialize_json, diagnostic_path, log_http_status, log_request, log_response,
         parse_retry_after,
     };
@@ -2833,6 +2839,14 @@ mod tests {
         accepted.await.expect("request accepted");
         tokio::time::advance(Duration::from_secs(1)).await;
         let error = request.await.expect("request task").expect_err("deadline");
+        let diagnostic = error.diagnostic().to_string();
+        assert!(diagnostic.contains("method=POST"));
+        assert!(diagnostic.contains("path=/mutation"));
+        assert!(diagnostic.contains("timeout_class=standard_operation"));
+        assert!(diagnostic.contains("outcome=mutation_indeterminate"));
+        assert!(diagnostic.contains("attempts=1"));
+        assert!(!diagnostic.contains("secret"));
+        assert!(!diagnostic.contains("redacted"));
         assert!(matches!(
             error,
             AnytypeError::HttpTimeout {
@@ -2935,6 +2949,11 @@ mod tests {
         accepted.await.expect("request accepted");
         tokio::time::advance(Duration::from_secs(1)).await;
         let error = request.await.expect("request task").expect_err("transport timeout");
+        let diagnostic = error.diagnostic().to_string();
+        assert!(diagnostic.contains("timeout_class=transport"));
+        assert!(diagnostic.contains("outcome=read_aborted"));
+        assert!(diagnostic.contains("elapsed_ms="));
+        assert!(diagnostic.contains("attempts=1"));
         assert!(matches!(error, AnytypeError::Http { source, .. } if source.is_timeout()));
         let metrics = client.metrics_snapshot();
         assert_eq!(metrics.transport_timeouts().count, 1);
@@ -2943,6 +2962,21 @@ mod tests {
             1
         );
         server.abort();
+    }
+
+    #[test]
+    fn timeout_metrics_use_saturating_arithmetic() {
+        let metrics = HttpMetrics::default();
+        let class = crate::http_timeout::HttpTimeoutClass::StandardOperation;
+        let outcome = crate::http_timeout::TimeoutOutcome::ReadAborted;
+        metrics.timeout_counts[class.index()].store(u64::MAX, Ordering::Relaxed);
+        metrics.timeout_elapsed_millis[class.index()].store(u64::MAX - 1, Ordering::Relaxed);
+        metrics.timeout_outcomes[outcome.index()].store(u64::MAX, Ordering::Relaxed);
+        metrics.record_timeout(class, outcome, Duration::from_millis(10));
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.timeout(class).count, u64::MAX);
+        assert_eq!(snapshot.timeout(class).elapsed_millis, u64::MAX);
+        assert_eq!(snapshot.timeout_outcome_count(outcome), u64::MAX);
     }
 
     #[tokio::test]
@@ -3562,8 +3596,8 @@ mod tests {
         assert_eq!(metrics.rate_limit_errors, 1);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn public_get_status_backoff_retry_remains_enabled_without_wall_delay() {
+    #[tokio::test]
+    async fn public_get_status_backoff_retry_remains_enabled() {
         let rejected = fixture_response("504 Gateway Timeout", "gateway timeout", "");
         let body = r#"{"items":[],"pagination":{"has_more":false,"limit":1,"offset":0,"total":0}}"#;
         let success = fixture_response("200 OK", body, "");
@@ -3586,7 +3620,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn alternating_retry_classes_never_send_a_seventh_physical_attempt() {
+    async fn caller_transport_timeout_stops_mixed_retry_sequence() {
         enum Reply {
             Response(Vec<u8>),
             Timeout,
@@ -3601,9 +3635,6 @@ mod tests {
         let replies = vec![
             Reply::Response(rate_limited.clone()),
             Reply::Response(timed_out.clone()),
-            Reply::Timeout,
-            Reply::Response(rate_limited),
-            Reply::Response(timed_out),
             Reply::Timeout,
         ];
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -3645,22 +3676,22 @@ mod tests {
             .limit(1)
             .list()
             .await
-            .expect_err("sixth physical attempt must exhaust the shared ceiling");
+            .expect_err("caller transport timeout must stop the logical request");
         assert!(
             matches!(&error, AnytypeError::Http { .. }),
             "unexpected terminal error: {error:?}"
         );
         let metrics = client.http_metrics();
-        assert_eq!(metrics.total_requests, 6, "terminal error: {error:?}");
+        assert_eq!(metrics.total_requests, 3, "terminal error: {error:?}");
         assert_eq!(metrics.logical_operations, 1);
-        assert_eq!(metrics.physical_attempts, 6);
-        assert_eq!(metrics.retries, 5);
-        assert_eq!(metrics.rate_limit_errors, 2);
+        assert_eq!(metrics.physical_attempts, 3);
+        assert_eq!(metrics.retries, 2);
+        assert_eq!(metrics.rate_limit_errors, 1);
         let requests = tokio::time::timeout(Duration::from_secs(1), server)
             .await
-            .expect("alternating fixture must receive all six attempts")
+            .expect("alternating fixture must receive all three attempts")
             .expect("alternating retry fixture");
-        assert_eq!(requests.len(), 6);
+        assert_eq!(requests.len(), 3);
         assert!(requests.iter().all(|request| request.starts_with("GET ")));
     }
 
@@ -4139,6 +4170,9 @@ mod tests {
             method: "GET".to_owned(),
             url: malformed_absolute.to_owned(),
             source,
+            outcome: None,
+            elapsed: None,
+            attempts: None,
         };
 
         let mut diagnostics = format!(
@@ -4279,6 +4313,9 @@ mod tests {
                 method: "GET".to_owned(),
                 url: target.clone(),
                 source,
+                outcome: None,
+                elapsed: None,
+                attempts: None,
             };
             diagnostics.push_str(&format!(
                 " {transport_error} {transport_error:?} {}",

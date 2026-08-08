@@ -4494,7 +4494,7 @@ mod tests {
         assert!(server.await.expect("history cancellation sentinel"));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn older_history_retry_failure_has_four_physical_attempts() {
         let responses = (0..4)
             .map(|_| scripted_text_response(StatusCode::GATEWAY_TIMEOUT, "retryable failure"))
