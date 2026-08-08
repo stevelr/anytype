@@ -26,49 +26,39 @@ jobs:
   ignored-test-inventory:
     name: disposable ignored-test inventory
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-
       - name: Install Rust 1.97.1
-        uses: dtolnay/rust-toolchain@1.97.1
-
+        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: anytype-api-inventory
-
-      - name: Verify the closed ignored-test inventory
+      - name: Verify the closed ignored-test inventory and workflow policy
         run: cargo test --locked -p anytype --test live_gate_manifest
 
   headless-required:
     name: protected disposable required tier
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: ignored-test-inventory
     environment: anytype-headless
-    runs-on:
-      - self-hosted
-      - linux
-      - anytype-headless
+    runs-on: [ self-hosted, linux, anytype-headless ]
     timeout-minutes: 45
     concurrency:
       group: anytype-headless-live
       cancel-in-progress: false
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-
       - name: Install Rust 1.97.1
-        uses: dtolnay/rust-toolchain@1.97.1
-
+        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: anytype-api-headless
-
       - name: Run required disposable ignored tests serially
         shell: bash
         env:
@@ -76,110 +66,97 @@ jobs:
           ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
-          test -n "$ANY_MCP_HEADLESS_ENV_FILE"
-          test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+          test -n "$ANY_MCP_HEADLESS_ENV_FILE" && test -r "$ANY_MCP_HEADLESS_ENV_FILE"
           test -n "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-          set -a
-          source "$ANY_MCP_HEADLESS_ENV_FILE"
-          set +a
+          set -a; source "$ANY_MCP_HEADLESS_ENV_FILE"; set +a
           export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
           test_prefix="${ANYTYPE_TEST_SPACE_PREFIX:-}"
-          test -n "$test_prefix"
-          test "${#test_prefix}" -le 485
-          case "$test_prefix" in
-            *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
-              printf '%s\n' "ANYTYPE_TEST_SPACE_PREFIX must use 1..485 ASCII letters, digits, hyphens, or underscores" >&2
-              exit 1
-              ;;
-          esac
-          unset test_prefix
-          reviewed_source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          test -n "$test_prefix" && test "${#test_prefix}" -le 485
+          case "$test_prefix" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*) exit 1 ;; esac
+          test "${ANYTYPE_KEYSTORE:-}" = env
+          test -n "${ANYTYPE_KEYSTORE_SERVICE:-}" && test "${#ANYTYPE_KEYSTORE_SERVICE}" -le 485
+          case "$ANYTYPE_KEYSTORE_SERVICE" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-]*) exit 1 ;; esac
+          test -n "${ANYTYPE_KEY_HTTP_TOKEN:-}"
+          test -n "${ANYTYPE_KEY_GRPC_SESSION_TOKEN:-${ANYTYPE_KEY_GRPC_ACCOUNT_TOKEN:-}}"
           umask 077
-          reviewed_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-reviewed-XXXXXX")"
-          reviewed_log="$reviewed_dir/server-events.jsonl"
-          cp -- "$reviewed_source" "$reviewed_log"
-          chmod 0600 "$reviewed_log"
+          evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-evidence-XXXXXX")"
+          start_bytes="$(wc -c < "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE")"
+          case "$start_bytes" in *[!0-9]*|'') exit 1 ;; esac
           run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#run_marker}" -eq 64
-          printf '\nanytype-api-run-marker=%s\n' "$run_marker" >> "$reviewed_log"
-          export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$reviewed_log"
+          context="$evidence_dir/context"
+          printf 'run_marker=%s\nstart_bytes=%s\n' "$run_marker" "$start_bytes" > "$context"
+          chmod 0600 "$context"
+          printf 'ANYTYPE_API_LIVE_EVIDENCE_CONTEXT=%s\n' "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
-          printf 'ANY_MCP_HEADLESS_REDACTED_LOG_FILE=%s\n' "$reviewed_log" >> "$GITHUB_ENV"
           cargo run --locked -q -p anyr -- auth status --pretty
-          python3 - required "$GITHUB_WORKSPACE/anytype-api/tests/live-gate-manifest.toml" > "$reviewed_dir/required.tsv" <<'PY'
-          import sys
-          import tomllib
-
-          tier, path = sys.argv[1:]
-          with open(path, "rb") as manifest_file:
-              manifest = tomllib.load(manifest_file)
-          for entry in manifest[tier]:
-              print(f"{entry['target']}\t{entry['test']}")
-          PY
-          while IFS=$'\t' read -r target test_name; do
-            output="$reviewed_dir/${target}-${test_name}.log"
-            set +e
-            if [[ "$target" == "lib" ]]; then
-              cargo test --locked -p anytype --lib "$test_name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$output"
-            else
-              cargo test --locked -p anytype --test "$target" "$test_name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$output"
-            fi
-            status="${PIPESTATUS[0]}"
-            set -e
-            if [[ "$status" -ne 0 ]]; then
-              rm -f -- "$output"
-              exit "$status"
-            fi
-            if ! grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$output"; then
-              rm -f -- "$output"
-              printf '%s\n' "live gate did not execute exactly one test: $target::$test_name" >&2
-              exit 1
-            fi
-            if grep -Fqi "skipped" "$output"; then
-              rm -f -- "$output"
-              printf '%s\n' "live gate reported skipped admission: $target::$test_name" >&2
-              exit 1
-            fi
-            rm -f -- "$output"
-          done < "$reviewed_dir/required.tsv"
-
-      - name: Retain redacted headless server evidence on failure
+          python3 anytype-api/scripts/run-live-gate.py required anytype-api/tests/live-gate-manifest.toml
+      - name: Capture bounded reviewed server evidence on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        shell: bash
+        env:
+          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+        run: |
+          set +e
+          umask 077
+          evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-failure-XXXXXX" 2>/dev/null)" || exit 1
+          artifact="$evidence_dir/reviewed-server-events.txt"
+          marker=unavailable; start_bytes=unavailable
+          context="${ANYTYPE_API_LIVE_EVIDENCE_CONTEXT:-}"
+          if [[ -r "$context" ]]; then
+            while IFS= read -r line; do
+              case "$line" in run_marker=[0-9a-f][0-9a-f]*) marker="${line#run_marker=}" ;; start_bytes=[0-9]*) start_bytes="${line#start_bytes=}" ;; esac
+            done < "$context"
+          fi
+          {
+            printf 'anytype-api live-gate reviewed failure evidence\nrun-marker=%s\nstart-bytes=%s\n' "$marker" "$start_bytes"
+            source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+            if [[ "$source" != /* || ! -r "$source" ]]; then
+              printf 'reviewed-source=unavailable\n'
+            else
+              current_bytes="$(wc -c < "$source" 2>/dev/null)"
+              if [[ "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
+                printf 'reviewed-source=fresh-window\n'
+                tail -c "+$((start_bytes + 1))" -- "$source" 2>/dev/null | tail -c 65000 2>/dev/null || true
+              else
+                printf 'reviewed-source=rotated-or-pre-marker-failure\n'
+                tail -c 65000 -- "$source" 2>/dev/null || true
+              fi
+            fi
+          } > "$artifact"
+          chmod 0600 "$artifact"
+          printf 'ANYTYPE_API_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
+      - name: Retain bounded reviewed server evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: anytype-api-required-server-log
-          path: ${{ env.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+          path: ${{ env.ANYTYPE_API_LIVE_FAILURE_EVIDENCE }}
           if-no-files-found: warn
           retention-days: 7
 
   headless-soak:
     name: scheduled disposable characterization tier
     if: github.event_name == 'schedule'
+    needs: ignored-test-inventory
     environment: anytype-headless
-    runs-on:
-      - self-hosted
-      - linux
-      - anytype-headless
+    runs-on: [ self-hosted, linux, anytype-headless ]
     timeout-minutes: 45
     concurrency:
       group: anytype-headless-live
       cancel-in-progress: false
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-
       - name: Install Rust 1.97.1
-        uses: dtolnay/rust-toolchain@1.97.1
-
+        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: anytype-api-headless
-
       - name: Provision a clean isolated headless server
         shell: bash
         env:
@@ -190,7 +167,6 @@ jobs:
           test "${ANY_MCP_HEADLESS_RESET_SCRIPT#/}" != "$ANY_MCP_HEADLESS_RESET_SCRIPT"
           test -x "$ANY_MCP_HEADLESS_RESET_SCRIPT"
           "$ANY_MCP_HEADLESS_RESET_SCRIPT"
-
       - name: Run soak disposable ignored tests serially
         shell: bash
         env:
@@ -198,80 +174,73 @@ jobs:
           ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
-          test -n "$ANY_MCP_HEADLESS_ENV_FILE"
-          test -r "$ANY_MCP_HEADLESS_ENV_FILE"
+          test -n "$ANY_MCP_HEADLESS_ENV_FILE" && test -r "$ANY_MCP_HEADLESS_ENV_FILE"
           test -n "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-          set -a
-          source "$ANY_MCP_HEADLESS_ENV_FILE"
-          set +a
+          set -a; source "$ANY_MCP_HEADLESS_ENV_FILE"; set +a
           export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
           test_prefix="${ANYTYPE_TEST_SPACE_PREFIX:-}"
-          test -n "$test_prefix"
-          test "${#test_prefix}" -le 485
-          case "$test_prefix" in
-            *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
-              printf '%s\n' "ANYTYPE_TEST_SPACE_PREFIX must use 1..485 ASCII letters, digits, hyphens, or underscores" >&2
-              exit 1
-              ;;
-          esac
-          unset test_prefix
-          reviewed_source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          test -n "$test_prefix" && test "${#test_prefix}" -le 485
+          case "$test_prefix" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*) exit 1 ;; esac
+          test "${ANYTYPE_KEYSTORE:-}" = env
+          test -n "${ANYTYPE_KEYSTORE_SERVICE:-}" && test "${#ANYTYPE_KEYSTORE_SERVICE}" -le 485
+          case "$ANYTYPE_KEYSTORE_SERVICE" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-]*) exit 1 ;; esac
+          test -n "${ANYTYPE_KEY_HTTP_TOKEN:-}"
+          test -n "${ANYTYPE_KEY_GRPC_SESSION_TOKEN:-${ANYTYPE_KEY_GRPC_ACCOUNT_TOKEN:-}}"
           umask 077
-          reviewed_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-reviewed-XXXXXX")"
-          reviewed_log="$reviewed_dir/server-events.jsonl"
-          cp -- "$reviewed_source" "$reviewed_log"
-          chmod 0600 "$reviewed_log"
+          evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-evidence-XXXXXX")"
+          start_bytes="$(wc -c < "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE")"
+          case "$start_bytes" in *[!0-9]*|'') exit 1 ;; esac
           run_marker="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#run_marker}" -eq 64
-          printf '\nanytype-api-run-marker=%s\n' "$run_marker" >> "$reviewed_log"
-          export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$reviewed_log"
+          context="$evidence_dir/context"
+          printf 'run_marker=%s\nstart_bytes=%s\n' "$run_marker" "$start_bytes" > "$context"
+          chmod 0600 "$context"
+          printf 'ANYTYPE_API_LIVE_EVIDENCE_CONTEXT=%s\n' "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
-          printf 'ANY_MCP_HEADLESS_REDACTED_LOG_FILE=%s\n' "$reviewed_log" >> "$GITHUB_ENV"
           cargo run --locked -q -p anyr -- auth status --pretty
-          python3 - soak "$GITHUB_WORKSPACE/anytype-api/tests/live-gate-manifest.toml" > "$reviewed_dir/soak.tsv" <<'PY'
-          import sys
-          import tomllib
-
-          tier, path = sys.argv[1:]
-          with open(path, "rb") as manifest_file:
-              manifest = tomllib.load(manifest_file)
-          for entry in manifest[tier]:
-              print(f"{entry['target']}\t{entry['test']}")
-          PY
-          while IFS=$'\t' read -r target test_name; do
-            output="$reviewed_dir/${target}-${test_name}.log"
-            set +e
-            if [[ "$target" == "lib" ]]; then
-              cargo test --locked -p anytype --lib "$test_name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$output"
-            else
-              cargo test --locked -p anytype --test "$target" "$test_name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$output"
-            fi
-            status="${PIPESTATUS[0]}"
-            set -e
-            if [[ "$status" -ne 0 ]]; then
-              rm -f -- "$output"
-              exit "$status"
-            fi
-            if ! grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$output"; then
-              rm -f -- "$output"
-              printf '%s\n' "live gate did not execute exactly one test: $target::$test_name" >&2
-              exit 1
-            fi
-            if grep -Fqi "skipped" "$output"; then
-              rm -f -- "$output"
-              printf '%s\n' "live gate reported skipped admission: $target::$test_name" >&2
-              exit 1
-            fi
-            rm -f -- "$output"
-          done < "$reviewed_dir/soak.tsv"
-
-      - name: Retain redacted headless server evidence on failure
+          python3 anytype-api/scripts/run-live-gate.py soak anytype-api/tests/live-gate-manifest.toml
+      - name: Capture bounded reviewed server evidence on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        shell: bash
+        env:
+          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+        run: |
+          set +e
+          umask 077
+          evidence_dir="$(mktemp -d "$RUNNER_TEMP/anytype-api-failure-XXXXXX" 2>/dev/null)" || exit 1
+          artifact="$evidence_dir/reviewed-server-events.txt"
+          marker=unavailable; start_bytes=unavailable
+          context="${ANYTYPE_API_LIVE_EVIDENCE_CONTEXT:-}"
+          if [[ -r "$context" ]]; then
+            while IFS= read -r line; do
+              case "$line" in run_marker=[0-9a-f][0-9a-f]*) marker="${line#run_marker=}" ;; start_bytes=[0-9]*) start_bytes="${line#start_bytes=}" ;; esac
+            done < "$context"
+          fi
+          {
+            printf 'anytype-api live-gate reviewed failure evidence\nrun-marker=%s\nstart-bytes=%s\n' "$marker" "$start_bytes"
+            source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+            if [[ "$source" != /* || ! -r "$source" ]]; then
+              printf 'reviewed-source=unavailable\n'
+            else
+              current_bytes="$(wc -c < "$source" 2>/dev/null)"
+              if [[ "$start_bytes" =~ ^[0-9]+$ && "$current_bytes" =~ ^[0-9]+$ && "$current_bytes" -ge "$start_bytes" ]]; then
+                printf 'reviewed-source=fresh-window\n'
+                tail -c "+$((start_bytes + 1))" -- "$source" 2>/dev/null | tail -c 65000 2>/dev/null || true
+              else
+                printf 'reviewed-source=rotated-or-pre-marker-failure\n'
+                tail -c 65000 -- "$source" 2>/dev/null || true
+              fi
+            fi
+          } > "$artifact"
+          chmod 0600 "$artifact"
+          printf 'ANYTYPE_API_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
+      - name: Retain bounded reviewed server evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: anytype-api-soak-server-log
-          path: ${{ env.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
+          path: ${{ env.ANYTYPE_API_LIVE_FAILURE_EVIDENCE }}
           if-no-files-found: warn
           retention-days: 7

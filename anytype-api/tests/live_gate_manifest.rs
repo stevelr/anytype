@@ -213,6 +213,66 @@ fn integration_test_targets() -> BTreeSet<String> {
     targets
 }
 
+fn safe_target(target: &str) -> bool {
+    let mut chars = target.bytes();
+    matches!(chars.next(), Some(byte) if byte.is_ascii_alphanumeric())
+        && chars.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn safe_test_path(test: &str) -> bool {
+    test.split("::").all(|segment| {
+        let mut chars = segment.bytes();
+        matches!(chars.next(), Some(byte) if byte.is_ascii_alphabetic() || byte == b'_')
+            && chars.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
+fn source_ignore_attribute_inventory(path: &PathBuf) -> (usize, usize) {
+    let mut ignored = 0;
+    let mut cfg_ignored = 0;
+    let entries =
+        std::fs::read_dir(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("read source entry: {error}"));
+        let path = entry.path();
+        if path.is_dir() {
+            let (nested_ignored, nested_cfg_ignored) = source_ignore_attribute_inventory(&path);
+            ignored += nested_ignored;
+            cfg_ignored += nested_cfg_ignored;
+            continue;
+        }
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        for (line_number, line) in source.lines().enumerate() {
+            let attribute = line.trim_start();
+            if attribute.starts_with("#[ignore") {
+                assert!(
+                    attribute.contains(']'),
+                    "unsupported multiline ignore attribute at {}:{}",
+                    path.display(),
+                    line_number + 1
+                );
+                ignored += 1;
+            }
+            if attribute.starts_with("#[cfg_attr") {
+                assert!(
+                    attribute.contains(']'),
+                    "unsupported multiline cfg_attr at {}:{}",
+                    path.display(),
+                    line_number + 1
+                );
+                if attribute.contains("ignore") {
+                    cfg_ignored += 1;
+                }
+            }
+        }
+    }
+    (ignored, cfg_ignored)
+}
+
 #[test]
 fn manifest_is_a_complete_partition_of_ignored_tests() {
     let manifest = manifest();
@@ -223,6 +283,12 @@ fn manifest_is_a_complete_partition_of_ignored_tests() {
 
     let mut expected_by_target = BTreeMap::<String, BTreeSet<String>>::new();
     for entry in manifest.required.iter().chain(&manifest.soak) {
+        assert!(safe_target(&entry.target), "unsafe target {}", entry.target);
+        assert!(
+            safe_test_path(&entry.test),
+            "unsafe test path {}",
+            entry.test
+        );
         assert_eq!(
             entry.serial_group, "disposable_anytype_api",
             "unexpected serial group for {}::{}",
@@ -239,6 +305,12 @@ fn manifest_is_a_complete_partition_of_ignored_tests() {
         );
     }
     for entry in &manifest.excluded {
+        assert!(safe_target(&entry.target), "unsafe target {}", entry.target);
+        assert!(
+            safe_test_path(&entry.test),
+            "unsafe test path {}",
+            entry.test
+        );
         assert!(
             !entry.reason.trim().is_empty(),
             "excluded {}::{} has no reason",
@@ -268,4 +340,36 @@ fn manifest_is_a_complete_partition_of_ignored_tests() {
         actual_by_target, expected_by_target,
         "ignored-test inventory drifted from the manifest"
     );
+    let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    assert_eq!(
+        source_ignore_attribute_inventory(&source_root),
+        (29, 0),
+        "source ignore-attribute inventory drifted"
+    );
+}
+
+#[test]
+fn manifest_entry_grammar_rejects_traversal_and_options() {
+    for target in ["test_body", "lib"] {
+        assert!(safe_target(target));
+    }
+    for target in ["../test_body", "-test", "test\tbody", "test\nbody", ""] {
+        assert!(!safe_target(target));
+    }
+    assert!(safe_test_path("module_name::test_case"));
+    for test in ["../test_case", "-test_case", "test\tcase", "test\ncase", ""] {
+        assert!(!safe_test_path(test));
+    }
+}
+
+#[test]
+fn protected_live_workflow_requires_inventory_and_trusted_events() {
+    let workflow = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join(".github/workflows/anytype-api-live.yml");
+    let workflow = std::fs::read_to_string(&workflow)
+        .unwrap_or_else(|error| panic!("read {}: {error}", workflow.display()));
+    assert!(workflow.contains("if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')"));
+    assert!(workflow.contains("needs: ignored-test-inventory"));
 }
