@@ -49,8 +49,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.96.0
-        uses: dtolnay/rust-toolchain@1.96.0
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
@@ -64,20 +64,21 @@ jobs:
           ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
-          test -n "$ANYR_ANYBACK_HEADLESS_ENV_FILE"
-          test "${ANYR_ANYBACK_HEADLESS_ENV_FILE#/}" != "$ANYR_ANYBACK_HEADLESS_ENV_FILE"
-          test -r "$ANYR_ANYBACK_HEADLESS_ENV_FILE"
-          test -n "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE"
-          test "${ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE"
-          test -r "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE"
+          fail_preflight() { printf '%s\n' "$1" >&2; exit 1; }
+          [[ -n "$ANYR_ANYBACK_HEADLESS_ENV_FILE" ]] || fail_preflight "headless environment file is required"
+          [[ "${ANYR_ANYBACK_HEADLESS_ENV_FILE#/}" != "$ANYR_ANYBACK_HEADLESS_ENV_FILE" ]] || fail_preflight "headless environment file must be absolute"
+          [[ -r "$ANYR_ANYBACK_HEADLESS_ENV_FILE" ]] || fail_preflight "headless environment file is unreadable"
+          [[ -n "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE" ]] || fail_preflight "redacted server log is required"
+          [[ "${ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE" ]] || fail_preflight "redacted server log must be absolute"
+          [[ -r "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE" ]] || fail_preflight "redacted server log is unreadable"
 
           set -a
           source "$ANYR_ANYBACK_HEADLESS_ENV_FILE"
           set +a
           export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
           test_prefix="${ANYTYPE_TEST_SPACE_PREFIX:-}"
-          test -n "$test_prefix"
-          test "${#test_prefix}" -le 470
+          [[ -n "$test_prefix" ]] || fail_preflight "ANYTYPE_TEST_SPACE_PREFIX is required"
+          [[ "${#test_prefix}" -le 470 ]] || fail_preflight "ANYTYPE_TEST_SPACE_PREFIX is too long"
           case "$test_prefix" in
             *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
               printf '%s\n' "ANYTYPE_TEST_SPACE_PREFIX must use ASCII letters, digits, hyphens, or underscores" >&2
@@ -88,13 +89,14 @@ jobs:
 
           umask 077
           gate_dir="$(mktemp -d "$RUNNER_TEMP/anyr-anyback-live-XXXXXX")"
+          trap 'rm -rf -- "$gate_dir"' EXIT
           export ANYBACK_HEADLESS_REDACTED_LOG_FILE="$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE"
 
           install_root="$gate_dir/installed"
           cargo install --locked --path anyr --root "$install_root"
           export ANYR_BIN="$install_root/bin/anyr"
-          test "${ANYR_BIN#/}" != "$ANYR_BIN"
-          test -x "$ANYR_BIN"
+          [[ "${ANYR_BIN#/}" != "$ANYR_BIN" ]] || fail_preflight "installed anyr path must be absolute"
+          [[ -x "$ANYR_BIN" ]] || fail_preflight "installed anyr binary is missing"
 
           run_required_live_gate() {
             local output="$gate_dir/gate-$1.log"
@@ -126,12 +128,12 @@ jobs:
           }
           run_required_type_property_gate
           run_required_live_gate python-cli env ANYR_PY_REQUIRE_LIVE=1 \
-            python3 anyr/tests/cli_commands.py -v
+            python3 anyr/tests/run_required_python_cli.py
 
           marker="$gate_dir/callback.marker"
           expected_marker="$gate_dir/callback.expected"
           nonce="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-          test "${#nonce}" -eq 64
+          [[ "${#nonce}" -eq 64 ]] || fail_preflight "required gate nonce generation failed"
           printf '%s\n' "$nonce" > "$expected_marker"
           export ANYBACK_REQUIRED_GATE_MARKER="$marker"
           export ANYBACK_REQUIRED_GATE_NONCE="$nonce"
@@ -139,8 +141,8 @@ jobs:
           cargo test --locked -p anyback --test required_live_gate \
             required_installed_anyr_backup_create_restore -- \
             --ignored --exact --test-threads=1 --nocapture
-          test -f "$marker"
-          cmp --silent "$expected_marker" "$marker"
+          [[ -f "$marker" ]] || fail_preflight "required gate callback was not invoked"
+          cmp --silent "$expected_marker" "$marker" || fail_preflight "required gate callback marker mismatch"
 
       - name: Capture bounded redacted server evidence on failure
         if: failure()

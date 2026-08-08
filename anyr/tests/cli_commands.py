@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import contextlib
+import dataclasses
 import json
 import os
 import shutil
@@ -15,6 +16,106 @@ from unittest import mock
 # server, but bounded so an unresponsive endpoint cannot wedge the suite and
 # skip a test's cleanup.
 CLI_TIMEOUT_SECONDS = 180
+SPACE_PAGE_SIZE = 200
+MAX_SPACE_INVENTORY_PAGES = 16
+MAX_SPACE_INVENTORY_ITEMS = SPACE_PAGE_SIZE * MAX_SPACE_INVENTORY_PAGES
+
+
+@dataclasses.dataclass(frozen=True)
+class SpaceIdentity:
+    """A validated regular-space identity from a complete CLI inventory."""
+
+    id: str
+    name: str
+
+
+def _space_identity(record: object, context: str) -> SpaceIdentity:
+    if not isinstance(record, dict):
+        raise AssertionError(f"{context} is not a space record")
+    space_id = record.get("id")
+    space_name = record.get("name")
+    if (
+        not isinstance(space_id, str)
+        or not space_id
+        or not isinstance(space_name, str)
+        or not space_name
+        or record.get("object") != "space"
+    ):
+        raise AssertionError(f"{context} has an invalid space identity")
+    return SpaceIdentity(space_id, space_name)
+
+
+def complete_space_inventory() -> dict[str, SpaceIdentity]:
+    """Return every regular space after rejecting partial or malformed pages."""
+    inventory: dict[str, SpaceIdentity] = {}
+    offset = 0
+    expected_total: int | None = None
+    for page_index in range(MAX_SPACE_INVENTORY_PAGES):
+        response = run_anyr_json(
+            "space", "list", "--limit", str(SPACE_PAGE_SIZE), "--offset", str(offset)
+        )
+        if not isinstance(response, dict):
+            raise AssertionError("space inventory response is invalid")
+        items = response.get("items")
+        pagination = response.get("pagination")
+        if not isinstance(items, list) or not isinstance(pagination, dict):
+            raise AssertionError("space inventory pagination is invalid")
+        has_more = pagination.get("has_more")
+        limit = pagination.get("limit")
+        page_offset = pagination.get("offset")
+        total = pagination.get("total")
+        if (
+            not isinstance(has_more, bool)
+            or limit != SPACE_PAGE_SIZE
+            or page_offset != offset
+            or not isinstance(total, int)
+            or total < 0
+            or len(items) > SPACE_PAGE_SIZE
+            or (expected_total is not None and total != expected_total)
+        ):
+            raise AssertionError("space inventory pagination is invalid")
+        expected_total = total
+        for item in items:
+            identity = _space_identity(item, "space inventory item")
+            if identity.id in inventory:
+                raise AssertionError("space inventory contains duplicate ids")
+            inventory[identity.id] = identity
+            if len(inventory) > MAX_SPACE_INVENTORY_ITEMS:
+                raise AssertionError("space inventory exceeds the bounded limit")
+        if not has_more:
+            if total != len(inventory):
+                raise AssertionError("space inventory is incomplete")
+            return inventory
+        if not items:
+            raise AssertionError("space inventory pagination did not advance")
+        offset += len(items)
+        if offset > MAX_SPACE_INVENTORY_ITEMS:
+            raise AssertionError("space inventory exceeds the bounded limit")
+    raise AssertionError("space inventory exceeds the bounded page limit")
+
+
+def _fresh_owned_space(space_id: str, expected_name: str) -> SpaceIdentity:
+    record = _space_identity(
+        run_anyr_json("space", "get", space_id), "space get response"
+    )
+    if record.id != space_id or record.name != expected_name:
+        raise AssertionError("disposable space create identity mismatch")
+    return record
+
+
+def _reconcile_owned_space(
+    before: dict[str, SpaceIdentity], expected_name: str
+) -> SpaceIdentity:
+    after = complete_space_inventory()
+    candidates = [
+        item
+        for space_id, item in after.items()
+        if space_id not in before and item.name == expected_name
+    ]
+    if len(candidates) != 1:
+        raise AssertionError("disposable space create ownership is ambiguous")
+    candidate = candidates[0]
+    return _fresh_owned_space(candidate.id, expected_name)
 
 
 def anyr_bin() -> str | None:
@@ -113,29 +214,31 @@ def wait_for_space_absence(
 
 
 def create_owned_space(space_name: str) -> str:
-    """Create a new exact-name space and prove that its returned ID is owned."""
-    before = run_anyr_json("space", "list", "--limit", "200").get("items", [])
-    before_ids = {item.get("id") for item in before if isinstance(item, dict)}
+    """Create a new exact-name space and prove that it is safe to delete."""
+    before = complete_space_inventory()
     try:
-        candidate = run_anyr_json("space", "create", space_name).get("id")
-    except AssertionError:
-        after = run_anyr_json("space", "list", "--limit", "200").get("items", [])
-        candidates = [
-            item
-            for item in after
-            if isinstance(item, dict)
-            and item.get("name") == space_name
-            and item.get("id") not in before_ids
-        ]
-        if len(candidates) != 1:
-            raise AssertionError("disposable space create ownership is ambiguous")
-        candidate = candidates[0].get("id")
-    if not isinstance(candidate, str) or not candidate or candidate in before_ids:
-        raise AssertionError("disposable space create did not return a new id")
-    fresh = run_anyr_json("space", "get", candidate)
-    if fresh.get("id") != candidate or fresh.get("name") != space_name:
-        raise AssertionError("disposable space create identity mismatch")
-    return candidate
+        receipt = run_anyr_json("space", "create", space_name)
+        if not isinstance(receipt, dict):
+            raise AssertionError("disposable space create receipt is invalid")
+        candidate = receipt.get("id")
+        if not isinstance(candidate, str) or not candidate or candidate in before:
+            raise AssertionError("disposable space create did not return a new id")
+        return _fresh_owned_space(candidate, space_name).id
+    except Exception:
+        # A request can commit before its response fails. Reconcile only a
+        # complete post-create inventory and only an exact, newly introduced
+        # name; ambiguity deliberately leaves all spaces untouched.
+        return _reconcile_owned_space(before, space_name).id
+
+
+def delete_owned_space(space_name: str, space_id: str) -> None:
+    """Delete only a twice-revalidated, cleanup-owned regular space."""
+    for _ in range(2):
+        _fresh_owned_space(space_id, space_name)
+    deleted = run_anyr("space", "delete", space_id, "--skip-archive", "--confirm")
+    if deleted.returncode != 0:
+        raise AssertionError("disposable space cleanup command failed")
+    wait_for_space_absence(space_name, space_id)
 
 
 class TestDisposableSpaceCleanup(unittest.TestCase):
@@ -191,9 +294,17 @@ class TestDisposableSpaceCleanup(unittest.TestCase):
         with mock.patch(
             __name__ + ".run_anyr_json",
             side_effect=[
-                {"items": [{"id": "ambient", "name": "old"}]},
+                {
+                    "items": [{"id": "ambient", "name": "old", "object": "space"}],
+                    "pagination": {
+                        "has_more": False,
+                        "limit": 200,
+                        "offset": 0,
+                        "total": 1,
+                    },
+                },
                 {"id": "new"},
-                {"id": "new", "name": "owned"},
+                {"id": "new", "name": "owned", "object": "space"},
             ],
         ):
             self.assertEqual(create_owned_space("owned"), "new")
@@ -201,11 +312,32 @@ class TestDisposableSpaceCleanup(unittest.TestCase):
             mock.patch(
                 __name__ + ".run_anyr_json",
                 side_effect=[
-                    {"items": [{"id": "ambient", "name": "owned"}]},
+                    {
+                        "items": [
+                            {"id": "ambient", "name": "owned", "object": "space"}
+                        ],
+                        "pagination": {
+                            "has_more": False,
+                            "limit": 200,
+                            "offset": 0,
+                            "total": 1,
+                        },
+                    },
                     {"id": "ambient"},
+                    {
+                        "items": [
+                            {"id": "ambient", "name": "owned", "object": "space"}
+                        ],
+                        "pagination": {
+                            "has_more": False,
+                            "limit": 200,
+                            "offset": 0,
+                            "total": 1,
+                        },
+                    },
                 ],
             ),
-            self.assertRaisesRegex(AssertionError, "new id"),
+            self.assertRaisesRegex(AssertionError, "ambiguous"),
         ):
             create_owned_space("owned")
 
@@ -214,13 +346,27 @@ class TestDisposableSpaceCleanup(unittest.TestCase):
             mock.patch(
                 __name__ + ".run_anyr_json",
                 side_effect=[
-                    {"items": []},
+                    {
+                        "items": [],
+                        "pagination": {
+                            "has_more": False,
+                            "limit": 200,
+                            "offset": 0,
+                            "total": 0,
+                        },
+                    },
                     AssertionError("indeterminate"),
                     {
                         "items": [
-                            {"id": "one", "name": "owned"},
-                            {"id": "two", "name": "owned"},
-                        ]
+                            {"id": "one", "name": "owned", "object": "space"},
+                            {"id": "two", "name": "owned", "object": "space"},
+                        ],
+                        "pagination": {
+                            "has_more": False,
+                            "limit": 200,
+                            "offset": 0,
+                            "total": 2,
+                        },
                     },
                 ],
             ),
@@ -349,21 +495,11 @@ class TestAnyrCommands(unittest.TestCase):
             yield state
         finally:
             if not state["deleted"]:
-                cleanup = run_anyr(
-                    "space",
-                    "delete",
-                    space_id,
-                    "--skip-archive",
-                    "--confirm",
-                )
                 try:
-                    self.assertEqual(cleanup.returncode, 0, cleanup.stderr)
-                    wait_for_space_absence(space_name, space_id)
+                    delete_owned_space(space_name, space_id)
                 except AssertionError as exc:
                     raise AssertionError(
-                        f"failed to clean up disposable space {space_name}:\n"
-                        f"delete stdout={cleanup.stdout}\n"
-                        f"delete stderr={cleanup.stderr}"
+                        f"failed to clean up disposable space {space_name}"
                     ) from exc
 
     def assert_space_exists(self, space_id: str, reason: str) -> None:
@@ -530,23 +666,7 @@ class TestAnyrCommands(unittest.TestCase):
         try:
             yield space_id
         finally:
-            deleted = run_anyr(
-                "space", "delete", space_id, "--skip-archive", "--confirm"
-            )
-            self.assertEqual(
-                deleted.returncode,
-                0,
-                msg=(
-                    f"failed to delete disposable space {space_name}:\n"
-                    f"stdout={deleted.stdout}\nstderr={deleted.stderr}"
-                ),
-            )
-            # Prove the deletion landed before returning. Other tests select
-            # their working space by prefix, so a space that lingers in the
-            # listing would silently be adopted by one of them. Only the CLI's
-            # explicit not-found outcome proves absence; transport and server
-            # failures must fail cleanup rather than masquerade as deletion.
-            wait_for_space_absence(space_name, space_id)
+            delete_owned_space(space_name, space_id)
 
     def test_file_operations(self) -> None:
         """Server-backed coverage for the migrated REST-default file surface."""
@@ -899,7 +1019,7 @@ class TestAnyrCommands(unittest.TestCase):
                 "# hello world",
                 "-p",
                 f"{type_prop_key}=123_text_data",
-                space_name or space_id,
+                space_id,
                 f"@{type_key}",
             )
             created_obj_id = obj.get("id")
@@ -924,7 +1044,7 @@ class TestAnyrCommands(unittest.TestCase):
                 type_key,
                 "--limit",
                 "200",
-                space_name or space_id,
+                space_id,
             )
             items_by_key = list_by_key.get("items", [])
             self.assertTrue(
@@ -952,11 +1072,7 @@ class TestAnyrCommands(unittest.TestCase):
                 run_anyr("property", "delete", space_id, prop_key)
             if created_type_id:
                 run_anyr("type", "delete", space_id, type_key)
-            deleted = run_anyr(
-                "space", "delete", space_id, "--skip-archive", "--confirm"
-            )
-            self.assertEqual(deleted.returncode, 0, deleted.stderr)
-            wait_for_space_absence(space_name, space_id)
+            delete_owned_space(space_name, space_id)
 
 
 if __name__ == "__main__":
