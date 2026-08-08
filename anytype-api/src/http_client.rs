@@ -823,6 +823,30 @@ impl HttpClient {
         }
     }
 
+    fn ensure_before_dispatch(
+        &self,
+        class: HttpTimeoutClass,
+        outcome: TimeoutOutcome,
+        method: &Method,
+        path: &str,
+        timing: &OperationTiming,
+    ) -> Result<()> {
+        let Some(duration) = self.timeout_policy.duration(class) else {
+            return Ok(());
+        };
+        let deadline =
+            timing
+                .started
+                .checked_add(duration)
+                .ok_or_else(|| AnytypeError::Validation {
+                    message: format!("{class} HTTP deadline cannot be represented"),
+                })?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(self.logical_timeout_error(class, outcome, method, path, timing));
+        }
+        Ok(())
+    }
+
     fn transport_error(
         &self,
         source: reqwest::Error,
@@ -1129,8 +1153,6 @@ impl HttpClient {
         debug!(path = %diagnostic_path(path), "get_streaming_request");
         self.metrics.increment_logical_operations();
         let open_timing = OperationTiming::start();
-        open_timing.record_attempt();
-        self.metrics.increment_requests();
         let response = self
             .with_deadline(
                 HttpTimeoutClass::SseOpen,
@@ -1139,6 +1161,15 @@ impl HttpClient {
                 path,
                 &open_timing,
                 async {
+                    self.ensure_before_dispatch(
+                        HttpTimeoutClass::SseOpen,
+                        TimeoutOutcome::ReadAborted,
+                        &Method::GET,
+                        path,
+                        &open_timing,
+                    )?;
+                    open_timing.record_attempt();
+                    self.metrics.increment_requests();
                     self.client
                         .get(&full_url)
                         .query(&query.params)
@@ -1165,6 +1196,13 @@ impl HttpClient {
             self.metrics.increment_errors();
             let code = response.status().as_u16();
             let error_timing = OperationTiming::start();
+            self.ensure_before_dispatch(
+                HttpTimeoutClass::SseErrorBody,
+                TimeoutOutcome::ReadAborted,
+                &Method::GET,
+                path,
+                &error_timing,
+            )?;
             error_timing.record_attempt();
             let message = self
                 .with_deadline(
@@ -1330,6 +1368,13 @@ impl HttpClient {
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "post_unauthenticated");
         self.metrics.increment_logical_operations();
+        self.ensure_before_dispatch(
+            HttpTimeoutClass::StandardOperation,
+            TimeoutOutcome::MutationIndeterminate,
+            &Method::POST,
+            path,
+            &timing,
+        )?;
         timing.record_attempt();
         self.metrics.increment_requests();
         let response = self
@@ -1407,6 +1452,13 @@ impl HttpClient {
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "delete_no_content");
         self.metrics.increment_logical_operations();
+        self.ensure_before_dispatch(
+            HttpTimeoutClass::StandardOperation,
+            TimeoutOutcome::MutationIndeterminate,
+            &Method::DELETE,
+            path,
+            &timing,
+        )?;
         timing.record_attempt();
         self.metrics.increment_requests();
         let response = self
@@ -1565,6 +1617,13 @@ impl HttpClient {
         let replay_safe = matches!(method, Method::GET | Method::HEAD);
         self.metrics.increment_logical_operations();
         loop {
+            self.ensure_before_dispatch(
+                HttpTimeoutClass::LongOperation,
+                timeout_outcome(&method),
+                &method,
+                path,
+                &timing,
+            )?;
             let attempts = timing.record_attempt();
             self.metrics.increment_requests();
             let sent = self
@@ -1776,6 +1835,13 @@ impl HttpClient {
         let full_url = format!("{}{}", self.base_url, path);
         debug!(path = %diagnostic_path(path), "post_multipart");
         self.metrics.increment_logical_operations();
+        self.ensure_before_dispatch(
+            HttpTimeoutClass::LongOperation,
+            TimeoutOutcome::MutationIndeterminate,
+            &Method::POST,
+            path,
+            &timing,
+        )?;
         timing.record_attempt();
         self.metrics.increment_requests();
         self.metrics.increment_multipart_posts();
@@ -1885,6 +1951,13 @@ impl HttpClient {
         let body = req.body.clone().unwrap_or_default();
         let body_size = body.len() as u64;
         log_request(&req);
+        self.ensure_before_dispatch(
+            HttpTimeoutClass::StandardOperation,
+            timeout_outcome(&req.method),
+            &req.method,
+            &req.path,
+            &timing,
+        )?;
         let physical_attempt = timing.record_attempt();
         self.metrics.increment_requests();
         self.metrics.add_bytes_sent(body_size);
@@ -2044,6 +2117,13 @@ impl HttpClient {
                 tokio::time::sleep(wait_time).await;
                 retry_wait = None;
             }
+            self.ensure_before_dispatch(
+                HttpTimeoutClass::StandardOperation,
+                timeout_outcome(&req.method),
+                &req.method,
+                &req.path,
+                &timing,
+            )?;
             let request = req_builder
                 .try_clone()
                 .ok_or_else(|| {
@@ -2847,13 +2927,11 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         let error = request.await.expect("request task").expect_err("deadline");
         let diagnostic = error.diagnostic().to_string();
-        assert!(diagnostic.contains("method=POST"));
-        assert!(diagnostic.contains("path=/mutation"));
+        assert!(diagnostic.contains("method=GET"));
+        assert!(diagnostic.contains("path=/test"));
         assert!(diagnostic.contains("timeout_class=standard_operation"));
-        assert!(diagnostic.contains("outcome=mutation_indeterminate"));
+        assert!(diagnostic.contains("outcome=read_aborted"));
         assert!(diagnostic.contains("attempts=1"));
-        assert!(!diagnostic.contains("secret"));
-        assert!(!diagnostic.contains("redacted"));
         assert!(matches!(
             error,
             AnytypeError::HttpTimeout {
@@ -2925,6 +3003,14 @@ mod tests {
         accepted.await.expect("mutation accepted");
         tokio::time::advance(Duration::from_secs(1)).await;
         let error = request.await.expect("request task").expect_err("deadline");
+        let diagnostic = error.diagnostic().to_string();
+        assert!(diagnostic.contains("method=POST"));
+        assert!(diagnostic.contains("path=/mutation"));
+        assert!(diagnostic.contains("timeout_class=standard_operation"));
+        assert!(diagnostic.contains("outcome=mutation_indeterminate"));
+        assert!(diagnostic.contains("attempts=1"));
+        assert!(!diagnostic.contains("secret"));
+        assert!(!diagnostic.contains("redacted"));
         assert!(matches!(
             error,
             AnytypeError::HttpTimeout {
@@ -3046,6 +3132,7 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(client.metrics_snapshot().physical_attempts, 1);
         tokio::time::resume();
         server.await.expect("rate-limit server");
     }
@@ -3103,6 +3190,7 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(client.metrics_snapshot().physical_attempts, 1);
         tokio::time::resume();
         server.await.expect("retry server");
     }
