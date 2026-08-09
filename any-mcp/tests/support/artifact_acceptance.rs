@@ -43,7 +43,10 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 
@@ -4179,6 +4182,336 @@ pub async fn run_artifact_missing_roots_case(
     execution.record_executed(AdversarialCaseId::Trav20)?;
     finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     Ok(execution)
+}
+
+/// Client-root posture of one stable stdio acceptance session.
+///
+/// The two variants are the remaining MCP protocol-matrix rows: a client that
+/// advertises roots and narrows the static policy, and a client without the
+/// roots capability that keeps the configured static policy exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtifactClientRootsMode {
+    /// The client advertises roots and its snapshot names only the physical
+    /// import root, so the configured export root loses its authority.
+    ImportIntersection,
+    /// The client advertises no roots capability, so both configured roots
+    /// stay effective and no snapshot is ever requested.
+    StaticFallback,
+}
+
+impl ArtifactClientRootsMode {
+    /// Complete closed inventory of client-root protocol rows.
+    pub const ALL: [Self; 2] = [Self::ImportIntersection, Self::StaticFallback];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ImportIntersection => "client_root_intersection",
+            Self::StaticFallback => "static_root_fallback",
+        }
+    }
+
+    /// Exact number of `roots/list` snapshots this row may cost.
+    ///
+    /// The intersecting session takes exactly one bounded snapshot and freezes
+    /// it; a session without the capability must never be asked at all.
+    #[must_use]
+    pub const fn expected_snapshots(self) -> u64 {
+        match self {
+            Self::ImportIntersection => 1,
+            Self::StaticFallback => 0,
+        }
+    }
+
+    /// Whether the export root keeps its authority under this posture.
+    #[must_use]
+    pub const fn export_authorized(self) -> bool {
+        matches!(self, Self::StaticFallback)
+    }
+}
+
+/// One client-roots acceptance session bound to its private fixture.
+pub struct ArtifactClientRootsRun<'a> {
+    /// Selected client-root posture.
+    pub mode: ArtifactClientRootsMode,
+    /// Private strict policy fixture backing the session.
+    pub policy: &'a ArtifactPolicyFixture,
+    /// Cleanup-owning disposable space context.
+    pub ctx: &'a TestContext,
+    /// Counter advanced once per served `roots/list` request.
+    pub snapshots: &'a AtomicU64,
+}
+
+/// Observed authority over the configured export root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactClientRootsExport {
+    /// The export published the exact bytes and reported this digest.
+    Published(String),
+    /// The export was refused by the uniform hidden-resource rejection.
+    RefusedNotFound,
+}
+
+/// Content-free result of one client-roots protocol row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactClientRootsEvidence {
+    /// Stable client-root posture identifier.
+    pub mode: &'static str,
+    /// Exact advertised artifact catalog.
+    pub catalog: ArtifactCatalogSnapshot,
+    /// Exact `artifact_status` projection, which narrowing must not change.
+    pub status: ArtifactStatusEvidence,
+    /// Exact number of `roots/list` snapshots production requested.
+    pub snapshot_requests: u64,
+    /// Digest of the bytes imported through the retained import root.
+    pub import_sha256: String,
+    /// Observed authority over the configured export root.
+    pub export: ArtifactClientRootsExport,
+}
+
+/// Runs one client-roots protocol row against a real Anytype backend.
+///
+/// Both rows import through the physical import root, so the intersecting row
+/// proves narrowing retains a covered root while removing the uncovered one,
+/// and the fallback row proves an unadvertised session keeps the complete
+/// static policy. Every created file is registered with the cleanup-owning
+/// context immediately after production reports its identity.
+///
+/// # Errors
+///
+/// Returns a fixed category when the catalog, the status projection, the
+/// snapshot count, the imported bytes, or the export authority diverges from
+/// the selected posture.
+pub async fn run_artifact_client_roots_scenario(
+    driver: &mut impl McpDriver,
+    run: &ArtifactClientRootsRun<'_>,
+) -> Result<ArtifactClientRootsEvidence, String> {
+    let mode = run.mode;
+    let space_id = run.ctx.space_id.as_str();
+    let suffix = unique_suffix();
+    let catalog = artifact_catalog_snapshot(driver).await?;
+
+    let status = ArtifactStatusEvidence::from_status(
+        &driver.call_tool("artifact_status", json!({})).await?,
+    )?;
+    if !status.local_roots_active || status.import_root_count != 1 || status.export_root_count != 1
+    {
+        return Err("client-roots status did not report the configured roots".to_owned());
+    }
+    if run.snapshots.load(Ordering::Acquire) != 0 {
+        return Err("a read-only status projection requested a client-root snapshot".to_owned());
+    }
+
+    let import_before = RootInventory::capture(run.policy.import_root())?;
+    let export_before = run.policy.export_snapshot()?;
+
+    let imported = driver
+        .call_tool(
+            "file_import",
+            file_import_arguments(
+                space_id,
+                local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    ArtifactPolicyFixture::FILE_SOURCE,
+                ),
+                &format!("client-roots-{suffix}.bin"),
+                Some(ARTIFACT_FILE_MEDIA_TYPE),
+            ),
+        )
+        .await?;
+    let file_id = required_str(&imported, "/file_id")?;
+    run.ctx.register_file(&file_id);
+    let import_sha256 = required_str(&imported, "/receipt/sha256")?;
+    if import_sha256 != artifact_sha256(ARTIFACT_FILE_PAYLOAD) {
+        return Err("client-roots import did not verify the exact fixture bytes".to_owned());
+    }
+    if run.snapshots.load(Ordering::Acquire) != mode.expected_snapshots() {
+        return Err("client-roots import took an unexpected snapshot count".to_owned());
+    }
+
+    let export_name = format!("client-roots-export-{suffix}.bin");
+    let export_arguments = json!({
+        "space": space_id,
+        "file_id": file_id,
+        "destination": local_destination(ArtifactPolicyFixture::EXPORT_ROOT, &export_name),
+        "idempotency_key": format!("client-roots-export-{suffix}"),
+    });
+    let export = if mode.export_authorized() {
+        let exported = driver.call_tool("file_export", export_arguments).await?;
+        if !run.policy.export_exists(&export_name) {
+            return Err("static-root fallback did not publish the authorized export".to_owned());
+        }
+        let bytes = run.policy.read_export(&export_name)?;
+        let receipt_sha256 = required_str(&exported, "/receipt/sha256")?;
+        if bytes != ARTIFACT_FILE_PAYLOAD || receipt_sha256 != import_sha256 {
+            return Err("static-root fallback export did not republish exact bytes".to_owned());
+        }
+        ArtifactClientRootsExport::Published(receipt_sha256)
+    } else {
+        adversarial_refusal(
+            driver,
+            "file_export",
+            export_arguments,
+            ExpectedToolErrorKind::NotFound,
+            &[&export_name, ArtifactPolicyFixture::EXPORT_ROOT],
+        )
+        .await?;
+        if run.policy.export_snapshot()? != export_before {
+            return Err("a narrowed export root was written anyway".to_owned());
+        }
+        ArtifactClientRootsExport::RefusedNotFound
+    };
+
+    // A second local operation must reuse the frozen session decision: it
+    // neither re-queries the client nor observes a widened authority.
+    let repeated = driver
+        .call_tool(
+            "file_import",
+            file_import_arguments(
+                space_id,
+                local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    ArtifactPolicyFixture::FILE_SOURCE,
+                ),
+                &format!("client-roots-repeat-{suffix}.bin"),
+                Some(ARTIFACT_FILE_MEDIA_TYPE),
+            ),
+        )
+        .await?;
+    let repeated_id = required_str(&repeated, "/file_id")?;
+    run.ctx.register_file(&repeated_id);
+    let snapshot_requests = run.snapshots.load(Ordering::Acquire);
+    if snapshot_requests != mode.expected_snapshots() {
+        return Err("a frozen client-root decision was re-queried".to_owned());
+    }
+
+    let status_after = ArtifactStatusEvidence::from_status(
+        &driver.call_tool("artifact_status", json!({})).await?,
+    )?;
+    if status_after != status {
+        return Err("client-root narrowing changed the status projection".to_owned());
+    }
+    import_before.assert_unchanged()?;
+
+    Ok(ArtifactClientRootsEvidence {
+        mode: mode.as_str(),
+        catalog,
+        status,
+        snapshot_requests,
+        import_sha256,
+        export,
+    })
+}
+
+/// Compares the complete closed client-roots row inventory.
+///
+/// The rows must advertise one identical catalog and one identical status
+/// projection: client-root narrowing is a per-session authority decision and
+/// must never be observable in the advertised surface.
+///
+/// # Errors
+///
+/// Returns a fixed category when a row is missing, duplicated, out of order,
+/// or diverges from its posture.
+pub fn assert_artifact_client_roots_parity(
+    evidence: &[ArtifactClientRootsEvidence],
+) -> Result<(), String> {
+    let observed = evidence.iter().map(|row| row.mode).collect::<Vec<_>>();
+    let expected = ArtifactClientRootsMode::ALL
+        .iter()
+        .map(|mode| mode.as_str())
+        .collect::<Vec<_>>();
+    if observed != expected {
+        return Err("client-roots rows did not cover the closed inventory".to_owned());
+    }
+    let Some(first) = evidence.first() else {
+        return Err("client-roots rows produced no evidence".to_owned());
+    };
+    for (row, mode) in evidence.iter().zip(ArtifactClientRootsMode::ALL) {
+        if row.catalog != first.catalog || row.status != first.status {
+            return Err("client-roots rows advertised divergent surfaces".to_owned());
+        }
+        if row.snapshot_requests != mode.expected_snapshots()
+            || row.import_sha256 != artifact_sha256(ARTIFACT_FILE_PAYLOAD)
+        {
+            return Err("client-roots row diverged from its declared posture".to_owned());
+        }
+        let expected_export = if mode.export_authorized() {
+            ArtifactClientRootsExport::Published(row.import_sha256.clone())
+        } else {
+            ArtifactClientRootsExport::RefusedNotFound
+        };
+        if row.export != expected_export {
+            return Err("client-roots row reported the wrong export authority".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Encodes one absolute local directory as a canonical `file:` URI.
+///
+/// The production snapshot decoder rejects non-canonical spellings, encoded
+/// separators, and host forms, so the harness emits exactly the canonical
+/// empty-authority form and percent-encodes every byte outside the unreserved
+/// path set.
+///
+/// # Errors
+///
+/// Returns a fixed category when the path is not absolute or cannot be
+/// represented on this platform.
+#[cfg(unix)]
+pub fn client_root_uri(path: &Path) -> Result<String, String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    if !path.is_absolute() {
+        return Err("client root URI requires an absolute path".to_owned());
+    }
+    let mut uri = String::from("file://");
+    for byte in path.as_os_str().as_bytes() {
+        push_uri_byte(*byte, &mut uri);
+    }
+    Ok(uri)
+}
+
+/// Encodes one absolute local directory as a canonical `file:` URI.
+///
+/// # Errors
+///
+/// Returns a fixed category when the path is not a drive-absolute Unicode path
+/// this encoder can represent canonically.
+#[cfg(windows)]
+pub fn client_root_uri(path: &Path) -> Result<String, String> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| "client root URI requires a Unicode path".to_owned())?;
+    if !path.is_absolute() || text.starts_with(r"\\") {
+        return Err("client root URI requires a drive-absolute path".to_owned());
+    }
+    let mut uri = String::from("file:///");
+    for byte in text.bytes() {
+        if byte == b'\\' {
+            uri.push('/');
+        } else {
+            push_uri_byte(byte, &mut uri);
+        }
+    }
+    Ok(uri)
+}
+
+/// Appends one path byte in canonical URI form.
+#[cfg(any(unix, windows))]
+fn push_uri_byte(byte: u8, uri: &mut String) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    // Unreserved characters plus the two delimiters a canonical local file URI
+    // path may carry literally.
+    const LITERAL: &[u8] = b"-._~/:";
+    if byte.is_ascii_alphanumeric() || LITERAL.contains(&byte) {
+        uri.push(char::from(byte));
+        return;
+    }
+    uri.push('%');
+    uri.push(char::from(HEX[usize::from(byte >> 4)]));
+    uri.push(char::from(HEX[usize::from(byte & 0x0f)]));
 }
 
 /// Executes the default-policy alias cases. ALIAS-07 owns a deliberately

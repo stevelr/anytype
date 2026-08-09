@@ -9,7 +9,11 @@ use std::{
     any::Any,
     io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -51,8 +55,24 @@ pub struct ProcessFailureEvidence {
     pub output: ProcessOutput,
 }
 
+/// Method of the only server-initiated request this driver answers.
+const CLIENT_ROOTS_METHOD: &str = "roots/list";
+
+/// Terminal client-roots answer for one spawned production session.
+///
+/// A stable stdio server may take exactly one bounded `roots/list` snapshot
+/// before its first local artifact operation. The service holds the exact
+/// answer frames and counts how often production asked, so an acceptance
+/// scenario can prove both the lazy first request and the frozen decision
+/// without inspecting server internals.
+struct ClientRootsService {
+    roots: Vec<Value>,
+    requests: Arc<AtomicU64>,
+}
+
 /// A portable line-framed JSON-RPC driver for the real `any-mcp` binary.
 pub struct ProtocolProcess {
+    client_roots: Option<ClientRootsService>,
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     frames: mpsc::Receiver<Vec<u8>>,
@@ -120,6 +140,7 @@ impl ProtocolProcess {
             transcript: Vec::new(),
             deadline,
             failure: None,
+            client_roots: None,
             #[cfg(feature = "acceptance-harness")]
             stdout_release: None,
         }
@@ -168,6 +189,7 @@ impl ProtocolProcess {
                 transcript: Vec::new(),
                 deadline,
                 failure: None,
+                client_roots: None,
                 stdout_release: Some(release),
             },
             MidFramePause { ready },
@@ -208,10 +230,67 @@ impl ProtocolProcess {
             "method": method,
             "params": params
         }));
-        let response = self.read_frame();
+        let response = loop {
+            let frame = self.read_frame();
+            if frame.get("method").is_none() {
+                break frame;
+            }
+            self.answer_server_request(&frame);
+        };
         assert_eq!(response["id"], id, "response id for {method}");
         self.record_response(&response);
         response
+    }
+
+    /// Installs the terminal `roots/list` answer for this session.
+    ///
+    /// The answer frames are supplied verbatim, so a scenario may prove how
+    /// production treats an exact snapshot. The returned counter advances once
+    /// per served request, which is how a scenario proves a session took at
+    /// most one bounded snapshot. Installing an answer does not advertise the
+    /// client roots capability: the caller decides that in `initialize`, so an
+    /// unadvertised session that is nevertheless asked fails loudly.
+    #[allow(dead_code)]
+    pub fn install_client_roots(&mut self, roots: Vec<Value>) -> Arc<AtomicU64> {
+        let requests = Arc::new(AtomicU64::new(0));
+        self.client_roots = Some(ClientRootsService {
+            roots,
+            requests: Arc::clone(&requests),
+        });
+        requests
+    }
+
+    /// Answers one server-initiated request from the installed services.
+    ///
+    /// Only `roots/list` is answerable. Any other server-initiated frame is a
+    /// contract violation for these suites and fails the scenario instead of
+    /// being silently discarded.
+    fn answer_server_request(&mut self, frame: &Value) {
+        let method = frame
+            .get("method")
+            .and_then(Value::as_str)
+            .expect("server-initiated frame carries a method");
+        assert_eq!(
+            method, CLIENT_ROOTS_METHOD,
+            "unexpected server-initiated method"
+        );
+        let id = frame
+            .get("id")
+            .cloned()
+            .expect("server-initiated request carries an id");
+        let service = self
+            .client_roots
+            .as_ref()
+            .expect("server requested client roots without an installed service");
+        service.requests.fetch_add(1, Ordering::AcqRel);
+        let roots = Value::Array(service.roots.clone());
+        self.transcript
+            .push(format!("<- id={} {method}", display_id(&id)));
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {"roots": roots}
+        }));
     }
 
     /// Records a response read after a caller constructed and sent its request.

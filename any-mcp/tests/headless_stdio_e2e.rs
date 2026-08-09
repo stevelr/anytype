@@ -18,6 +18,9 @@ use std::{
 };
 
 #[cfg(feature = "acceptance-harness")]
+use std::sync::atomic::AtomicU64;
+
+#[cfg(feature = "acceptance-harness")]
 use any_mcp::body_toolset::BodyAcceptanceDirect;
 #[cfg(feature = "acceptance-harness")]
 use any_mcp::collection_member_toolset::{
@@ -53,20 +56,22 @@ use support::live_scenario::{
     ACCEPTANCE_TRANSFER_CHUNK_BYTES, ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS,
     ADVERSARIAL_STDIO_SENTINEL_IDS, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD,
     ARTIFACT_FRAME_CEILING_BYTES, ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution,
-    ArtifactAdversarialRun, ArtifactConfigStartupCase, ArtifactConfigStartupObservation,
-    ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario, ArtifactControlPlane,
-    ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks, ArtifactGateLease,
-    ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture,
-    ArtifactPolicyOptions, ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit,
-    ArtifactServerLogBaseline, ArtifactSmokeFixture, ArtifactStageAllocation,
-    ArtifactStartupCaseOutcome, ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome,
-    FixtureValidatorPolicy, ObservedOutcome, allocate_stage_upload, artifact_catalog_snapshot,
-    artifact_sha256, assert_artifact_content_parity, assert_artifact_parity,
+    ArtifactAdversarialRun, ArtifactClientRootsMode, ArtifactClientRootsRun,
+    ArtifactConfigStartupCase, ArtifactConfigStartupObservation, ArtifactContentEvidence,
+    ArtifactContentRun, ArtifactContentScenario, ArtifactControlPlane, ArtifactDataPlane,
+    ArtifactFrameMeasurement, ArtifactGateHooks, ArtifactGateLease, ArtifactLifecycleScenario,
+    ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyOptions, ArtifactPolicyRun,
+    ArtifactPolicyScenario, ArtifactServerLogAudit, ArtifactServerLogBaseline,
+    ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStartupCaseOutcome,
+    ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome, FixtureValidatorPolicy,
+    ObservedOutcome, allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
+    assert_artifact_client_roots_parity, assert_artifact_content_parity, assert_artifact_parity,
     assert_artifact_policy_parity, assert_payload_frame_independence, audit_server_log,
-    classify_collision_frames, measure_artifact_frame, prepare_artifact_symlink_startup_case,
-    record_artifact_config_startup_cases, record_artifact_dynamic_filesystem_startup_cases,
-    reject_oversized_stage_chunk, release_stage_upload, require_completed,
-    run_artifact_adversarial_stdio_sentinels, run_artifact_content_scenario,
+    classify_collision_frames, client_root_uri, measure_artifact_frame,
+    prepare_artifact_symlink_startup_case, record_artifact_config_startup_cases,
+    record_artifact_dynamic_filesystem_startup_cases, reject_oversized_stage_chunk,
+    release_stage_upload, require_completed, run_artifact_adversarial_stdio_sentinels,
+    run_artifact_client_roots_scenario, run_artifact_content_scenario,
     run_artifact_dynamic_filesystem_stdio_sentinels, run_artifact_policy_scenario,
     run_artifact_race01, run_artifact_race04, run_artifact_smoke_scenario, server_log_baseline,
     stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
@@ -560,6 +565,55 @@ impl StdioDriver {
             self.process
                 .notification("notifications/initialized", json!({}));
         }
+    }
+
+    /// Initializes a stable stdio session that advertises MCP client roots.
+    ///
+    /// The exact snapshot answer is installed before `initialize`, so a server
+    /// that requests it earlier than its first local artifact operation is
+    /// still answered and the returned counter still proves when it asked.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when a root cannot be encoded canonically.
+    #[cfg(feature = "acceptance-harness")]
+    fn initialize_with_client_roots(&mut self, roots: &[&Path]) -> Result<Arc<AtomicU64>, String> {
+        let requests = self.install_client_roots(roots)?;
+        let initialized = self.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"roots": {}},
+                "clientInfo": {"name": "any-mcp-headless-e2e", "version": "1"}
+            }),
+        );
+        if initialized["result"]["protocolVersion"] != "2025-11-25" {
+            return Err("client-roots session did not negotiate stable stdio".to_owned());
+        }
+        self.process
+            .notification("notifications/initialized", json!({}));
+        Ok(requests)
+    }
+
+    /// Installs a client-root answer that this session must never be asked for.
+    ///
+    /// The static-root fallback row advertises no roots capability. Installing
+    /// an answer anyway turns a spurious server request into observable
+    /// evidence instead of a transport deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when a root cannot be encoded canonically.
+    #[cfg(feature = "acceptance-harness")]
+    fn install_client_roots(&mut self, roots: &[&Path]) -> Result<Arc<AtomicU64>, String> {
+        if self.options.preview {
+            return Err("client roots narrow stable stdio sessions only".to_owned());
+        }
+        let mut answer = Vec::with_capacity(roots.len());
+        for root in roots {
+            answer.push(json!({"uri": client_root_uri(root)?}));
+        }
+        Ok(self.process.install_client_roots(answer))
     }
 
     fn request(&mut self, method: &str, mut params: Value) -> Value {
@@ -1911,16 +1965,20 @@ struct ArtifactChildProcessEvidence {
     cancelled_operations: u64,
     stdout_bytes: u64,
     stderr_bytes: u64,
+    /// Server-initiated `roots/list` request frames observed on stdout.
+    client_root_requests: u64,
 }
 
 #[cfg(feature = "acceptance-harness")]
 fn artifact_child_process_evidence(
     output: &ProcessOutput,
     forbidden_response_id: Option<u64>,
+    allow_client_root_requests: bool,
 ) -> Result<ArtifactChildProcessEvidence, String> {
     if output.stdout != output.consumed_stdout {
         return Err("artifact child emitted unconsumed protocol output".to_owned());
     }
+    let mut client_root_requests = 0_u64;
     for line in output.stdout.split_inclusive(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -1933,6 +1991,25 @@ fn artifact_child_process_evidence(
         let object = frame
             .as_object()
             .ok_or_else(|| "artifact child stdout frame was not an object".to_owned())?;
+        // The only server-initiated frame production may emit is the single
+        // bounded client-root snapshot request of a stable stdio session, and
+        // only a session that advertised the roots capability may emit it at
+        // all: every other child must keep stdout response-only.
+        if frame.get("method").is_some() {
+            if !allow_client_root_requests
+                || frame["jsonrpc"] != Value::String("2.0".to_owned())
+                || frame["method"] != Value::String("roots/list".to_owned())
+                || !frame.get("id").is_some_and(Value::is_number)
+                || object
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "jsonrpc" | "id" | "method" | "params"))
+                || contains_forbidden_diagnostic_field(&frame)
+            {
+                return Err("artifact child emitted an unexpected server request".to_owned());
+            }
+            client_root_requests = client_root_requests.saturating_add(1);
+            continue;
+        }
         if frame["jsonrpc"] != Value::String("2.0".to_owned())
             || !frame.get("id").is_some_and(Value::is_number)
             || frame.get("result").is_some() == frame.get("error").is_some()
@@ -1955,6 +2032,7 @@ fn artifact_child_process_evidence(
             .map_err(|_| "artifact child stdout exceeds the addressable range".to_owned())?,
         stderr_bytes: u64::try_from(output.stderr.len())
             .map_err(|_| "artifact child stderr exceeds the addressable range".to_owned())?,
+        client_root_requests,
         ..ArtifactChildProcessEvidence::default()
     };
     for line in stderr.lines() {
@@ -2290,7 +2368,23 @@ fn finish_registered_artifact_child(
         .take()
         .ok_or_else(|| "registered artifact child disappeared".to_owned())?;
     let (_, output) = driver.try_finish()?;
-    artifact_child_process_evidence(&output, forbidden_response_id)
+    artifact_child_process_evidence(&output, forbidden_response_id, false)
+}
+
+/// Stops a registered artifact child that advertised the MCP roots capability.
+///
+/// Unlike [`finish_registered_artifact_child`], the returned evidence may carry
+/// server-initiated `roots/list` request frames; the caller must still compare
+/// `client_root_requests` against the exact count its posture allows.
+#[cfg(feature = "acceptance-harness")]
+fn finish_registered_artifact_child_with_client_roots(
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+) -> Result<ArtifactChildProcessEvidence, String> {
+    let driver = lock_driver(child)
+        .take()
+        .ok_or_else(|| "registered artifact child disappeared".to_owned())?;
+    let (_, output) = driver.try_finish()?;
+    artifact_child_process_evidence(&output, None, true)
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -2301,7 +2395,7 @@ fn terminate_registered_artifact_child(
         .take()
         .ok_or_else(|| "registered artifact child disappeared".to_owned())?;
     let (_, output) = driver.terminate()?;
-    artifact_child_process_evidence(&output, None)
+    artifact_child_process_evidence(&output, None, false)
 }
 
 fn spawn_disposable_standard_driver(
@@ -6397,14 +6491,103 @@ fn assert_artifact_server_log_clean(
     audit
 }
 
+/// Runs the two client-root protocol rows on production stable stdio children.
+///
+/// The rows share the spawned artifact matrix's disposable space, fixture
+/// discipline, and server-log audit, so a divergence between a narrowed and an
+/// unnarrowed session is a contract failure rather than a fixture difference.
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_client_roots_rows(
+    ctx: &TestContext,
+    cleanup: &[Arc<Mutex<ChildCleanupRecord>>],
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<()> {
+    let mut evidence = Vec::with_capacity(ArtifactClientRootsMode::ALL.len());
+    for (index, mode) in ArtifactClientRootsMode::ALL.into_iter().enumerate() {
+        eprintln!("artifact client roots row={}", mode.as_str());
+        // Client roots govern the local data plane only, so these rows keep
+        // the staging service out of the fixture.
+        let policy = Arc::new(
+            ArtifactPolicyFixture::create_with(
+                &ctx.space_id,
+                ArtifactPolicyOptions {
+                    staging: false,
+                    ..ArtifactPolicyOptions::default()
+                },
+            )
+            .map_err(|_| sentinel_assertion("create client-roots acceptance policy"))?,
+        );
+        record_artifact_fixture_log_needle(&policy, audit_needles)?;
+        let record = cleanup
+            .get(index)
+            .ok_or_else(|| sentinel_assertion("client-roots cleanup record missing"))?;
+        let child = spawn_disposable_artifact_driver(
+            ctx,
+            Arc::clone(record),
+            Arc::clone(&policy),
+            DriverOptions::STANDARD,
+        )?;
+        let snapshots = {
+            let mut guard = lock_driver(&child);
+            let driver = guard
+                .as_mut()
+                .ok_or_else(|| sentinel_assertion("registered client-roots child disappeared"))?;
+            let roots = [policy.import_root()];
+            match mode {
+                ArtifactClientRootsMode::ImportIntersection => {
+                    driver.initialize_with_client_roots(&roots)
+                }
+                ArtifactClientRootsMode::StaticFallback => {
+                    let installed = driver.install_client_roots(&roots);
+                    driver.initialize();
+                    installed
+                }
+            }
+            .map_err(|_| sentinel_assertion("initialize client-roots session"))?
+        };
+        let observed = {
+            let mut driver = OwnedStdioDriver {
+                driver: Arc::clone(&child),
+            };
+            let run = ArtifactClientRootsRun {
+                mode,
+                policy: policy.as_ref(),
+                ctx,
+                snapshots: snapshots.as_ref(),
+            };
+            Box::pin(run_artifact_client_roots_scenario(&mut driver, &run))
+                .await
+                .map_err(|error| {
+                    eprintln!(
+                        "artifact client roots row={} failure={error}",
+                        mode.as_str()
+                    );
+                    sentinel_assertion("client-roots acceptance row failed")
+                })?
+        };
+        let process = finish_registered_artifact_child_with_client_roots(&child)
+            .map_err(|_| sentinel_assertion("stop client-roots artifact child"))?;
+        if process.client_root_requests != mode.expected_snapshots() {
+            return Err(sentinel_assertion(
+                "client-roots stdout snapshot inventory diverged",
+            ));
+        }
+        evidence.push(observed);
+    }
+    assert_artifact_client_roots_parity(&evidence)
+        .map_err(|_| sentinel_assertion("client-roots protocol rows diverged"))
+}
+
 /// Runs the complete spawned artifact acceptance matrix in one disposable space.
 ///
 /// Each spawned control plane owns a private strict policy, exports through
 /// both data planes, and contributes one content-free evidence record. The
-/// records are compared for exact parity after every child has stopped.
+/// records are compared for exact parity after every child has stopped. The
+/// same disposable space then carries the two client-root protocol rows.
 #[cfg(feature = "acceptance-harness")]
 async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
-    let cleanup: [Arc<Mutex<ChildCleanupRecord>>; SPAWNED_ARTIFACT_CONTROLS.len()] =
+    let cleanup: [Arc<Mutex<ChildCleanupRecord>>;
+        SPAWNED_ARTIFACT_CONTROLS.len() + ArtifactClientRootsMode::ALL.len()] =
         std::array::from_fn(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)));
     let callback_cleanup = cleanup.clone();
     let log_baseline = artifact_server_log_baseline();
@@ -6456,9 +6639,9 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                             };
                             Box::pin(run_artifact_smoke_scenario(&mut driver, &fixture)).await
                         };
-                        evidence.push(observed.map_err(|_| {
+                        evidence.push(observed.map_err(|error| {
                             eprintln!(
-                                "artifact acceptance transport={} outcome=failed",
+                                "artifact acceptance transport={} outcome=failed failure={error}",
                                 transport.id()
                             );
                             sentinel_assertion("artifact acceptance transport failed")
@@ -6472,6 +6655,18 @@ async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
                         sentinel_assertion("spawned artifact transports diverged")
                     },
                 )?;
+
+                let client_root_records = callback_cleanup
+                    .get(SPAWNED_ARTIFACT_CONTROLS.len()..)
+                    .ok_or_else(|| {
+                    sentinel_assertion("client-roots cleanup records missing")
+                })?;
+                Box::pin(run_artifact_client_roots_rows(
+                    ctx.as_ref(),
+                    client_root_records,
+                    &callback_audit_needles,
+                ))
+                .await?;
                 Ok(())
             })
         },
@@ -6997,7 +7192,7 @@ async fn run_spawned_artifact_gated_race(
             String::from_utf8_lossy(&finished.1.stderr)
         );
     }
-    artifact_child_process_evidence(&finished.1, None)
+    artifact_child_process_evidence(&finished.1, None, false)
         .map_err(|_| sentinel_assertion("gated artifact child evidence"))?;
     observed
         .inspect_err(|error| {

@@ -1838,6 +1838,18 @@ the reviewed `tests/snapshots/artifact-catalog.snap` fixture and then compares
 the complete executed matrix for exact parity, so a divergence between the wire
 envelope, the router, and either protocol revision fails the suite.
 
+The spawned matrix owner also carries the two client-root protocol rows. One
+stable stdio session advertises the MCP roots capability and answers the single
+bounded `roots/list` snapshot with the physical import root only: the retained
+import root still imports real bytes, the configured export root is refused
+with the uniform hidden-resource rejection, and a second local operation proves
+the session decision is frozen rather than re-queried. The other session
+advertises no roots capability and must never be asked, so both configured
+roots stay effective and the child emits no server-initiated frame at all. Both
+rows must report the same advertised catalog and the same `artifact_status`
+projection, because narrowing is a per-session authority decision that must not
+be observable in the advertised surface.
+
 Two further scenario families reuse the same harness. The policy family
 executes a complete server configuration — no selected file, space policy
 omitted, empty, or restricted elsewhere, read-only mode, and disabled staging

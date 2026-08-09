@@ -27,6 +27,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Accept client-root narrowing on stable stdio with two live protocol rows in
+  the spawned artifact matrix owner. The intersecting row advertises the MCP
+  roots capability, answers exactly one bounded `roots/list` snapshot with the
+  physical import root, imports real bytes through the retained root, receives
+  the uniform hidden-resource refusal for the excluded export root, and proves
+  the session decision is frozen rather than re-queried. The static-fallback
+  row advertises no roots capability, is never asked, and keeps both
+  configured roots effective. Both rows must report the same advertised
+  catalog and the same `artifact_status` projection, and every other spawned
+  child must still keep stdout response-only.
+
 - Prove the artifact configuration-selection contract end to end. The policy
   scenario family gains a no-selected-file compatibility row: the fixture
   renders a complete policy that no server selects, and every control plane —
