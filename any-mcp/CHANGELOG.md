@@ -6,6 +6,20 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Changed
+
+- Map the new anytype-api HTTP deadline errors onto existing MCP error
+  classes. Mutation-scoped deadline expirations and explicitly indeterminate
+  mutation outcomes return `mutation_indeterminate`; other deadline
+  expirations classify as upstream failures with dedicated
+  `http_deadline` and `http_mutation_indeterminate` diagnostic categories.
+  Collection-member adds treat the new indeterminate acknowledgement outcome
+  as an indeterminate membership operation.
+- Classify a rate-limited (429) mutation as indeterminate instead of a
+  definitive upstream rejection, matching the HTTP timeout policy: the server
+  may have applied the write before rate-limiting the response, so the fixed
+  conflict error now directs callers to observe fresh state before retrying.
+
 ### Added
 
 - Add closed real-server adversarial artifact coverage for 43 traversal,

@@ -180,7 +180,9 @@ fn describe(error: &AnytypeError) -> String {
         }
 
         // Remaining variants already render every value they retain.
-        AnytypeError::ResponseTooLarge { .. }
+        AnytypeError::HttpTimeout { .. }
+        | AnytypeError::HttpMutationIndeterminate { .. }
+        | AnytypeError::ResponseTooLarge { .. }
         | AnytypeError::FileHeaderEvidenceTooLarge { .. }
         | AnytypeError::InvalidFileResponseHeader { .. }
         | AnytypeError::ChatSseEventTooLarge { .. }

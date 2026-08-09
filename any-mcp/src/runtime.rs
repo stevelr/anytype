@@ -75,6 +75,9 @@ pub struct RuntimeContext {
     settlement_active: Arc<AtomicUsize>,
     settlement_notify: Arc<Notify>,
     settlement_gate: Arc<Mutex<SettlementAdmissionGate>>,
+    // Read only through the cfg-gated test/acceptance-harness accessors, so
+    // dependency builds without that feature see the field as unread.
+    #[cfg_attr(not(any(test, feature = "acceptance-harness")), allow(dead_code))]
     artifact_acceptance_gates: ArtifactAcceptanceGates,
     client_roots: Arc<ClientRootsGate>,
 }
@@ -1145,6 +1148,10 @@ impl UpstreamDiagnostic {
             }
             AnytypeError::BodyMutationIndeterminate { .. } => {
                 Self::new("body_mutation_indeterminate")
+            }
+            AnytypeError::HttpTimeout { .. } => Self::new("http_deadline"),
+            AnytypeError::HttpMutationIndeterminate { .. } => {
+                Self::new("http_mutation_indeterminate")
             }
             AnytypeError::VerifyTimeout { .. } => Self::new("verification"),
             AnytypeError::Other { .. } => Self::new("other"),

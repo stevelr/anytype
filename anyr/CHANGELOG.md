@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Changed
+
+- Render the new anytype-api HTTP deadline and indeterminate-mutation errors
+  through their typed, secret-safe display output.
+
 ### Fixed
 
 - Require the protected live gate to run the ignored type-property preservation

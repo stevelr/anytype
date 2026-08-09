@@ -1859,7 +1859,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn patch_429_is_sent_once_and_maps_as_an_ordinary_definitive_rejection() {
+    async fn patch_429_is_sent_once_and_maps_as_terminal_indeterminate() {
+        // A mutation 429 is indeterminate under the HTTP timeout policy: the
+        // server may have applied the update before rate-limiting the
+        // response, so the fixed conflict error demands a fresh observation.
         let current = object(SPACE_ID, OBJECT_ID, "Before", "body", "page");
         let (base_url, server) = fixture(vec![
             FixtureReply::json(current),
@@ -1875,8 +1878,8 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert_eq!(result_code(&result), "upstream");
-        assert_eq!(result_message(&result), ToolError::upstream().message());
+        assert_eq!(result_code(&result), "conflict");
+        assert_eq!(result_message(&result), ToolError::mutation_indeterminate().message());
         assert!(
             !serde_json::to_string(&result)
                 .unwrap()

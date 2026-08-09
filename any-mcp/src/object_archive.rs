@@ -1158,11 +1158,15 @@ mod tests {
 
     #[tokio::test]
     async fn definitive_delete_rejections_use_fixed_errors_without_replay() {
+        // The 403/404/401 statuses are definitive rejections. A mutation 429
+        // is indeterminate under the HTTP timeout policy — the server may
+        // have applied the delete before rate-limiting the response — so it
+        // maps to the fixed mutation-indeterminate conflict error instead.
         for (status, expected_code) in [
             ("403 Forbidden", "authentication"),
             ("404 Not Found", "not_found"),
             ("401 Unauthorized", "authentication"),
-            ("429 Too Many Requests", "upstream"),
+            ("429 Too Many Requests", "conflict"),
         ] {
             let (base_url, server) = fixture(vec![
                 preflight_reply(),

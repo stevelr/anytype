@@ -1245,7 +1245,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn patch_429_is_ordinary_and_sent_exactly_once() {
+    async fn patch_429_is_terminal_indeterminate_and_sent_exactly_once() {
+        // A mutation 429 is indeterminate under the HTTP timeout policy: the
+        // server may have applied the patch before rate-limiting the
+        // response, so the fixed conflict error demands a fresh observation.
         let current = object(SPACE_ID, OBJECT_ID, "old");
         let (base_url, server) = fixture(vec![
             FixtureReply::json(current),
@@ -1260,7 +1263,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert_eq!(result_code(&result), "upstream");
+        assert_eq!(result_code(&result), "conflict");
         assert!(
             !serde_json::to_string(&result)
                 .unwrap()

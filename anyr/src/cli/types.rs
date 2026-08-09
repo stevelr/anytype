@@ -413,81 +413,87 @@ mod tests {
             },
         };
 
-        let run = with_disposable_space_context("anyr-type-add-property", |ctx| {
-            Box::pin(async move {
-                let suffix = unique_suffix();
-                let initial_key = format!("anyr_initial_{suffix}");
-                let added_key = format!("anyr_added_{suffix}");
-                let typ = retry_definitive_rate_limit("anyr type fixture", || async {
-                    ctx.client
-                        .new_type(&ctx.space_id, "Anyr Property Merge")
-                        .key(format!("anyr_property_merge_{suffix}"))
-                        .property("Initial Property", &initial_key, PropertyFormat::Text)
-                        .create()
-                        .await
-                })
-                .await?;
-                ctx.register_type(&typ.id);
-
-                let added = retry_definitive_rate_limit("anyr property fixture", || async {
-                    ctx.client
-                        .new_property(&ctx.space_id, "Added Property", PropertyFormat::Number)
-                        .key(&added_key)
-                        .create()
-                        .await
-                })
-                .await?;
-                ctx.register_property(&added.id);
-
-                let before = ctx
-                    .client
-                    .get_type(&ctx.space_id, &typ.id)
-                    .classify_properties()
+        let run = Box::pin(with_disposable_space_context(
+            "anyr-type-add-property",
+            |ctx| {
+                Box::pin(async move {
+                    let suffix = unique_suffix();
+                    let initial_key = format!("anyr_initial_{suffix}");
+                    let added_key = format!("anyr_added_{suffix}");
+                    let typ = retry_definitive_rate_limit("anyr type fixture", || async {
+                        ctx.client
+                            .new_type(&ctx.space_id, "Anyr Property Merge")
+                            .key(format!("anyr_property_merge_{suffix}"))
+                            .property("Initial Property", &initial_key, PropertyFormat::Text)
+                            .create()
+                            .await
+                    })
                     .await?;
-                let expected_featured_ids = before.featured_ids;
+                    ctx.register_type(&typ.id);
 
-                let app = crate::cli::AppContext {
-                    client: ctx.client.clone(),
-                    output: crate::output::Output::new(crate::output::OutputFormat::Quiet, None),
-                    date_format: "%Y-%m-%d".to_string(),
-                };
-                let args = crate::cli::TypeArgs {
-                    command: crate::cli::TypeCommands::Update {
-                        space: ctx.space_id.clone(),
-                        type_id: typ.id.clone(),
-                        key: None,
-                        name: None,
-                        plural: None,
-                        icon_emoji: None,
-                        layout: None,
-                        add_properties: vec![added.id.clone(), added.id.clone()],
-                        set_properties: Vec::new(),
-                        clear_properties: false,
-                    },
-                };
-                super::handle(&app, args)
-                    .await
-                    .map_err(|_| TestError::Assertion {
-                        message: "anyr type add-property handler failed".to_string(),
-                    })?;
-
-                let after = ctx
-                    .client
-                    .get_type(&ctx.space_id, &typ.id)
-                    .classify_properties()
+                    let added = retry_definitive_rate_limit("anyr property fixture", || async {
+                        ctx.client
+                            .new_property(&ctx.space_id, "Added Property", PropertyFormat::Number)
+                            .key(&added_key)
+                            .create()
+                            .await
+                    })
                     .await?;
-                assert_eq!(after.featured_ids, expected_featured_ids);
-                assert_eq!(
-                    after
-                        .replaceable()
-                        .iter()
-                        .map(|property| property.key.as_str())
-                        .collect::<Vec<_>>(),
-                    vec![initial_key.as_str(), added_key.as_str()]
-                );
-                Ok::<(), TestError>(())
-            })
-        })
+                    ctx.register_property(&added.id);
+
+                    let before = ctx
+                        .client
+                        .get_type(&ctx.space_id, &typ.id)
+                        .classify_properties()
+                        .await?;
+                    let expected_featured_ids = before.featured_ids;
+
+                    let app = crate::cli::AppContext {
+                        client: ctx.client.clone(),
+                        output: crate::output::Output::new(
+                            crate::output::OutputFormat::Quiet,
+                            None,
+                        ),
+                        date_format: "%Y-%m-%d".to_string(),
+                    };
+                    let args = crate::cli::TypeArgs {
+                        command: crate::cli::TypeCommands::Update {
+                            space: ctx.space_id.clone(),
+                            type_id: typ.id.clone(),
+                            key: None,
+                            name: None,
+                            plural: None,
+                            icon_emoji: None,
+                            layout: None,
+                            add_properties: vec![added.id.clone(), added.id.clone()],
+                            set_properties: Vec::new(),
+                            clear_properties: false,
+                        },
+                    };
+                    super::handle(&app, args)
+                        .await
+                        .map_err(|_| TestError::Assertion {
+                            message: "anyr type add-property handler failed".to_string(),
+                        })?;
+
+                    let after = ctx
+                        .client
+                        .get_type(&ctx.space_id, &typ.id)
+                        .classify_properties()
+                        .await?;
+                    assert_eq!(after.featured_ids, expected_featured_ids);
+                    assert_eq!(
+                        after
+                            .replaceable()
+                            .iter()
+                            .map(|property| property.key.as_str())
+                            .collect::<Vec<_>>(),
+                        vec![initial_key.as_str(), added_key.as_str()]
+                    );
+                    Ok::<(), TestError>(())
+                })
+            },
+        ))
         .await
         .expect("disposable-space property merge run");
 

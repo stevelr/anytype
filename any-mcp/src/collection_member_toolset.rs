@@ -1177,6 +1177,9 @@ impl CollectionMemberMutationHandlers {
                     }
                     return Err(indeterminate_membership_operation());
                 }
+                Ok(CollectionMemberAddOutcome::Indeterminate { .. }) => {
+                    return Err(indeterminate_membership_operation());
+                }
                 Err(_) => return Err(indeterminate_membership_operation()),
             }
 

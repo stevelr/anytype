@@ -154,6 +154,9 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         | AnytypeError::KeyStore { .. }
         | AnytypeError::GrpcUnavailable { .. }
         | AnytypeError::CacheDisabled => true,
+        // 408, 429, 504, and other server statuses are absent: the HTTP
+        // client already classifies them as indeterminate for mutations, and
+        // a rate-limited or timed-out mutation may have been applied.
         AnytypeError::ApiError { code, .. } => matches!(
             code,
             400 | 401
@@ -170,14 +173,17 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
                 | 416
                 | 417
                 | 422
-                | 429
         ),
 
         // A transport failure, partial/oversized/malformed response, exhausted
         // retry sequence, verification timeout, or unclassified failure does
-        // not prove whether a dispatched mutation took effect.
+        // not prove whether a dispatched mutation took effect. An expired
+        // HTTP deadline or an explicitly indeterminate mutation outcome is
+        // ambiguous by definition.
         AnytypeError::Grpc { .. } => error.is_authentication(),
-        AnytypeError::Http { .. }
+        AnytypeError::HttpTimeout { .. }
+        | AnytypeError::HttpMutationIndeterminate { .. }
+        | AnytypeError::Http { .. }
         | AnytypeError::ResponseTooLarge { .. }
         | AnytypeError::FileHeaderEvidenceTooLarge { .. }
         | AnytypeError::InvalidFileResponseHeader { .. }
@@ -307,6 +313,11 @@ impl ToolError {
         if matches!(
             error,
             AnytypeError::BodyMutationIndeterminate { .. }
+                | AnytypeError::HttpMutationIndeterminate { .. }
+                | AnytypeError::HttpTimeout {
+                    outcome: anytype::prelude::TimeoutOutcome::MutationIndeterminate,
+                    ..
+                }
                 | AnytypeError::AttachedDiscussion {
                     kind: anytype::attached_discussions::AttachedDiscussionErrorKind::MutationIndeterminate,
                 }
@@ -357,7 +368,12 @@ impl ToolError {
                 code: 409 | 412, ..
             }
             | AnytypeError::BodyMutationIndeterminate { .. } => ToolErrorCode::Conflict,
-            AnytypeError::Http { .. }
+            // Non-mutation deadline expiries (read aborted, open aborted,
+            // stream terminated) are upstream availability failures; the
+            // mutation-indeterminate outcome returned early above.
+            AnytypeError::HttpTimeout { .. }
+            | AnytypeError::HttpMutationIndeterminate { .. }
+            | AnytypeError::Http { .. }
             | AnytypeError::InvalidFileResponseHeader { .. }
             | AnytypeError::ChatSseTransport { .. }
             | AnytypeError::ChatTimestamp { .. }
@@ -479,7 +495,9 @@ mod tests {
             (423, false),
             (425, false),
             (428, false),
-            (429, true),
+            // A mutation 429 is indeterminate: the server may have applied
+            // the write before rate-limiting the response.
+            (429, false),
             (430, false),
             (499, false),
             (500, false),

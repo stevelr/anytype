@@ -1919,7 +1919,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_429_is_definitive_once_and_post_408_is_terminal_indeterminate() {
+    async fn post_429_and_408_are_terminal_indeterminate_and_sent_once() {
+        // The HTTP timeout policy classifies a mutation 429 as indeterminate:
+        // the server may have applied the write before rate-limiting the
+        // response, so recovery starts with a fresh observation.
         let (base_url, server) = fixture(vec![
             FixtureReply::json(type_value()),
             FixtureReply::error("429 Too Many Requests", "private rate-limit body"),
@@ -1934,10 +1937,10 @@ mod tests {
                 &CancellationToken::new(),
             )
             .await;
-        assert_eq!(result_code(&rejected), "upstream");
+        assert_eq!(result_code(&rejected), "conflict");
         assert_eq!(
             rejected.structured_content.as_ref().unwrap()["message"],
-            ToolError::upstream().message()
+            ToolError::mutation_indeterminate().message()
         );
         let requests = server.await.expect("429 create fixture");
         assert_eq!(requests.len(), 2);
