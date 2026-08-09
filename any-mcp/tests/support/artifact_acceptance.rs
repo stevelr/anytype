@@ -219,6 +219,11 @@ macro_rules! adversarial_case_ids {
                     | Self::Hlink06 => dynamic_filesystem_status(self),
                     Self::Alias03 | Self::Alias04 | Self::Alias05 => alias_windows_status(),
                     Self::Mal13 => validator_platform_status(),
+                    Self::Hand01 | Self::Hand02 | Self::Hand06 | Self::Hand07 | Self::Hand08
+                    | Self::Hand09 | Self::Hand10 | Self::Hand11 | Self::Hand12 | Self::Hand13
+                    | Self::Hand14 | Self::Hand15 | Self::Flood06 | Self::Clean05 => {
+                        AdversarialCaseStatus::Executed
+                    }
                     _ => AdversarialCaseStatus::Pending,
                 }
             }
@@ -422,6 +427,204 @@ pub const ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS: &[AdversarialCaseId] = &[
     AdversarialCaseId::Race01,
     AdversarialCaseId::Race04,
 ];
+
+/// Exact protocol and failure-robustness cases owned by the final batch.
+pub const ADVERSARIAL_ROBUSTNESS_CASE_IDS: &[AdversarialCaseId] = &[
+    AdversarialCaseId::Hand01,
+    AdversarialCaseId::Hand02,
+    AdversarialCaseId::Hand03,
+    AdversarialCaseId::Hand04,
+    AdversarialCaseId::Hand05,
+    AdversarialCaseId::Hand06,
+    AdversarialCaseId::Hand07,
+    AdversarialCaseId::Hand08,
+    AdversarialCaseId::Hand09,
+    AdversarialCaseId::Hand10,
+    AdversarialCaseId::Hand11,
+    AdversarialCaseId::Hand12,
+    AdversarialCaseId::Hand13,
+    AdversarialCaseId::Hand14,
+    AdversarialCaseId::Hand15,
+    AdversarialCaseId::Hand16,
+    AdversarialCaseId::Part01,
+    AdversarialCaseId::Part02,
+    AdversarialCaseId::Part03,
+    AdversarialCaseId::Part04,
+    AdversarialCaseId::Part05,
+    AdversarialCaseId::Part06,
+    AdversarialCaseId::Part07,
+    AdversarialCaseId::Part08,
+    AdversarialCaseId::Part09,
+    AdversarialCaseId::Part10,
+    AdversarialCaseId::Part11,
+    AdversarialCaseId::Part12,
+    AdversarialCaseId::Crash01,
+    AdversarialCaseId::Crash02,
+    AdversarialCaseId::Crash03,
+    AdversarialCaseId::Crash04,
+    AdversarialCaseId::Crash05,
+    AdversarialCaseId::Crash06,
+    AdversarialCaseId::Crash07,
+    AdversarialCaseId::Flood01,
+    AdversarialCaseId::Flood02,
+    AdversarialCaseId::Flood03,
+    AdversarialCaseId::Flood04,
+    AdversarialCaseId::Flood05,
+    AdversarialCaseId::Flood06,
+    AdversarialCaseId::Flood07,
+    AdversarialCaseId::Clean01,
+    AdversarialCaseId::Clean02,
+    AdversarialCaseId::Clean03,
+    AdversarialCaseId::Clean04,
+    AdversarialCaseId::Clean05,
+    AdversarialCaseId::Clean06,
+    AdversarialCaseId::Clean07,
+    AdversarialCaseId::Clean08,
+];
+
+/// Executable regression owner for one final-batch case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdversarialRobustnessWitness {
+    /// Private staging unit tests exercise the HTTP and handle state machine.
+    StagingProtocol,
+    /// Spawned lifecycle acceptance exercises cancellation and process restart.
+    SpawnedLifecycle,
+    /// Spawned crash acceptance kills production children and proves recovery.
+    SpawnedCrashRestart,
+    /// Spawned mid-frame capture proves bounded truncated-frame evidence.
+    SpawnedMidFrameCapture,
+    /// Validator unit tests exercise bounded drains and process teardown.
+    ValidatorContainment,
+    /// Direct adversarial acceptance proves exact Anytype and root cleanup.
+    DirectTeardown,
+    /// Read-only catalog acceptance proves mutation methods are absent.
+    ReadOnlyCatalog,
+}
+
+impl AdversarialRobustnessWitness {
+    /// Returns the executable regression surface that owns the case.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StagingProtocol => "artifact_staging::tests",
+            Self::SpawnedLifecycle => "headless_artifact_lifecycle_and_payload_scenarios",
+            Self::SpawnedCrashRestart => "headless_artifact_crash_restart_scenarios",
+            Self::SpawnedMidFrameCapture => "headless_artifact_crash06_mid_frame_scenario",
+            Self::ValidatorContainment => "artifact_validators::tests",
+            Self::DirectTeardown => "headless_artifact_adversarial_direct_scenarios",
+            Self::ReadOnlyCatalog => "headless_artifact_policy_scenario",
+        }
+    }
+
+    /// Returns whether this owner surface runs offline in ordinary CI.
+    #[must_use]
+    pub const fn is_offline(self) -> bool {
+        matches!(self, Self::StagingProtocol | Self::ValidatorContainment)
+    }
+}
+
+/// How an `Executed` robustness row is proven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdversarialRobustnessEvidence {
+    /// An offline unit test in the owner surface executes the case in CI.
+    OfflineUnit,
+    /// The owner surface recorded the case in a verified live server run.
+    LiveOwner,
+}
+
+impl AdversarialCaseId {
+    /// Returns the executable owner for every protocol/robustness case.
+    ///
+    /// A closed mapping keeps inventory status coupled to a concrete test
+    /// surface. Adding an ID to the final batch without assigning an owner is
+    /// therefore a compile-time non-exhaustive match instead of silent
+    /// coverage drift.
+    #[must_use]
+    pub const fn robustness_witness(self) -> Option<AdversarialRobustnessWitness> {
+        match self {
+            Self::Hand01
+            | Self::Hand02
+            | Self::Hand03
+            | Self::Hand05
+            | Self::Hand06
+            | Self::Hand07
+            | Self::Hand08
+            | Self::Hand09
+            | Self::Hand10
+            | Self::Hand11
+            | Self::Hand12
+            | Self::Hand13
+            | Self::Hand14
+            | Self::Hand15
+            | Self::Hand16
+            | Self::Part01
+            | Self::Part02
+            | Self::Part03
+            | Self::Part04
+            | Self::Part05
+            | Self::Part06
+            | Self::Part07
+            | Self::Part11
+            | Self::Flood06
+            | Self::Clean03
+            | Self::Clean04
+            | Self::Clean05 => Some(AdversarialRobustnessWitness::StagingProtocol),
+            Self::Part08
+            | Self::Part09
+            | Self::Part10
+            | Self::Part12
+            | Self::Flood04
+            | Self::Flood05
+            | Self::Flood07 => Some(AdversarialRobustnessWitness::SpawnedLifecycle),
+            Self::Hand04
+            | Self::Crash01
+            | Self::Crash02
+            | Self::Crash03
+            | Self::Crash04
+            | Self::Crash05
+            | Self::Crash07 => Some(AdversarialRobustnessWitness::SpawnedCrashRestart),
+            Self::Crash06 => Some(AdversarialRobustnessWitness::SpawnedMidFrameCapture),
+            Self::Flood01 | Self::Flood02 | Self::Flood03 => {
+                Some(AdversarialRobustnessWitness::ValidatorContainment)
+            }
+            Self::Clean01 | Self::Clean02 | Self::Clean06 => {
+                Some(AdversarialRobustnessWitness::DirectTeardown)
+            }
+            Self::Clean07 | Self::Clean08 => Some(AdversarialRobustnessWitness::ReadOnlyCatalog),
+            _ => None,
+        }
+    }
+
+    /// Returns the proof backing an `Executed` robustness row.
+    ///
+    /// `None` marks a row that must still be `Pending`. The inventory test
+    /// requires exact agreement between this table and `status()`, and an
+    /// [`AdversarialRobustnessEvidence::OfflineUnit`] entry must name an
+    /// offline owner surface, so a row cannot be promoted without stating
+    /// checkable evidence and a live-only row cannot claim offline proof.
+    /// `LiveOwner` entries are added only after the named owner test has
+    /// recorded the case against a live headless server.
+    #[must_use]
+    pub const fn robustness_executed_evidence(self) -> Option<AdversarialRobustnessEvidence> {
+        match self {
+            Self::Hand01
+            | Self::Hand02
+            | Self::Hand06
+            | Self::Hand07
+            | Self::Hand08
+            | Self::Hand09
+            | Self::Hand10
+            | Self::Hand11
+            | Self::Hand12
+            | Self::Hand13
+            | Self::Hand14
+            | Self::Hand15
+            | Self::Flood06
+            | Self::Clean05 => Some(AdversarialRobustnessEvidence::OfflineUnit),
+            _ => None,
+        }
+    }
+}
 
 /// Fixture root replaced by a directory symlink before a startup probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2338,6 +2541,40 @@ fn raw_content_range(start: u64, end: u64, total: u64) -> Result<HeaderValue, St
         .map_err(|_| "encode raw staging content range".to_owned())
 }
 
+fn verbatim_stage_request(
+    allocation: &ArtifactStageAllocation,
+    method: &str,
+    headers: &[(&str, String)],
+    body: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, String> {
+    if !matches!(method, "PUT" | "GET" | "HEAD") {
+        return Err("verbatim staging method was outside the closed test set".to_owned());
+    }
+    let parsed =
+        url::Url::parse(allocation.url()).map_err(|_| "parse verbatim staging URL".to_owned())?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "verbatim staging URL omitted its host".to_owned())?;
+    let port = parsed
+        .port()
+        .ok_or_else(|| "verbatim staging URL omitted its port".to_owned())?;
+    let mut request = format!(
+        "{method} {} HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: Bearer {}\r\n",
+        parsed.path(),
+        allocation.handle()
+    )
+    .into_bytes();
+    for (name, value) in headers {
+        request.extend_from_slice(name.as_bytes());
+        request.extend_from_slice(b": ");
+        request.extend_from_slice(value.as_bytes());
+        request.extend_from_slice(b"\r\n");
+    }
+    request.extend_from_slice(b"Connection: close\r\n\r\n");
+    request.extend_from_slice(body);
+    Ok(Zeroizing::new(request))
+}
+
 async fn raw_stage_head_offset(
     client: &RawStagingClient,
     allocation: &ArtifactStageAllocation,
@@ -2987,6 +3224,506 @@ pub async fn run_artifact_dynamic_filesystem_stdio_sentinels(
     if artifact_object_ids(run.ctx).await? != objects_before {
         return Err("dynamic stdio refusals changed the object inventory".to_owned());
     }
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
+    Ok(execution)
+}
+
+/// Executes the HTTP partial-write cases that require malformed framing or
+/// staged state transitions rather than filesystem race gates.
+///
+/// # Errors
+///
+/// Returns a fixed category when a response classification, committed offset,
+/// verified hash, Anytype inventory, or staging quota differs from the closed
+/// PART matrix.
+pub async fn run_artifact_partial_write_protocol_cases(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let client = RawStagingClient::new()?;
+    let payload = b"hello";
+    let expected = artifact_sha256(payload);
+    let mut execution = AdversarialExecution::default();
+
+    let allocation = allocate_stage_upload(
+        driver,
+        &run.ctx.space_id,
+        payload.len() as u64,
+        "text/plain",
+        Some(&expected),
+    )
+    .await?;
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let ahead = client
+        .send(
+            Method::PUT,
+            allocation.url(),
+            allocation.handle(),
+            &[
+                (CONTENT_TYPE, HeaderValue::from_static("text/plain")),
+                (CONTENT_RANGE, raw_content_range(1, 1, 5)?),
+            ],
+            b"e".to_vec(),
+        )
+        .await?;
+    ExpectedOutcome::Http {
+        status: 409,
+        body: b"conflict\n",
+    }
+    .assert_matches(ObservedOutcome::Http {
+        status: ahead.status,
+        body: &ahead.body,
+    })?;
+    if raw_stage_head_offset(&client, &allocation).await? != 0 {
+        return Err("PART-01 advanced the committed offset".to_owned());
+    }
+    release_stage_upload(driver, &allocation).await?;
+    execution.record_executed(AdversarialCaseId::Part01)?;
+
+    let allocation = allocate_stage_upload(
+        driver,
+        &run.ctx.space_id,
+        payload.len() as u64,
+        "text/plain",
+        Some(&expected),
+    )
+    .await?;
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let mismatch = client
+        .send_verbatim(
+            allocation.url(),
+            verbatim_stage_request(
+                &allocation,
+                "PUT",
+                &[
+                    ("Content-Type", "text/plain".to_owned()),
+                    ("Content-Range", "bytes 0-4/5".to_owned()),
+                    ("Content-Length", "5".to_owned()),
+                ],
+                b"hel",
+            )?,
+        )
+        .await?;
+    ExpectedOutcome::Http {
+        status: 400,
+        body: b"invalid request\n",
+    }
+    .assert_matches(ObservedOutcome::Http {
+        status: mismatch.status,
+        body: &mismatch.body,
+    })?;
+    if raw_stage_head_offset(&client, &allocation).await? != 0 {
+        return Err("PART-02 advanced the committed offset".to_owned());
+    }
+    release_stage_upload(driver, &allocation).await?;
+    execution.record_executed(AdversarialCaseId::Part02)?;
+
+    let allocation = allocate_stage_upload(
+        driver,
+        &run.ctx.space_id,
+        payload.len() as u64,
+        "text/plain",
+        Some(&expected),
+    )
+    .await?;
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let _disconnect = client
+        .send_verbatim(
+            allocation.url(),
+            verbatim_stage_request(
+                &allocation,
+                "PUT",
+                &[
+                    ("Content-Type", "text/plain".to_owned()),
+                    ("Content-Range", "bytes 0-4/5".to_owned()),
+                    ("Content-Length", "5".to_owned()),
+                ],
+                b"he",
+            )?,
+        )
+        .await?;
+    let offset = raw_stage_head_offset(&client, &allocation).await?;
+    if offset > 2 {
+        return Err("PART-03 committed bytes the client did not send".to_owned());
+    }
+    let remaining = &payload[offset as usize..];
+    let resumed = client
+        .send(
+            Method::PUT,
+            allocation.url(),
+            allocation.handle(),
+            &[
+                (CONTENT_TYPE, HeaderValue::from_static("text/plain")),
+                (CONTENT_RANGE, raw_content_range(offset, 4, 5)?),
+            ],
+            remaining.to_vec(),
+        )
+        .await?;
+    if resumed.status != 201 || resumed.upload_offset != Some(5) {
+        return Err("PART-03 did not resume to the declared final offset".to_owned());
+    }
+    let imported = driver
+        .call_tool(
+            "file_import",
+            json!({
+                "space": run.ctx.space_id,
+                "source": {"staged_handle": allocation.handle()},
+                "name": "part03.bin",
+                "media_type": "text/plain",
+                "idempotency_key": format!("part03-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    run.ctx.register_file(&required_str(&imported, "/file_id")?);
+    if imported.pointer("/receipt/sha256").and_then(Value::as_str) != Some(expected.as_str()) {
+        return Err("PART-03 resumed bytes failed final hash verification".to_owned());
+    }
+    let consumed = driver
+        .call_tool_error(
+            "file_import",
+            json!({
+                "space": run.ctx.space_id,
+                "source": {"staged_handle": allocation.handle()},
+                "name": "hand05.bin",
+                "media_type": "text/plain",
+                "idempotency_key": format!("hand05-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    if consumed.code() != "not_found" {
+        return Err("HAND-05 did not uniformly refuse the consumed handle".to_owned());
+    }
+    release_stage_upload(driver, &allocation).await?;
+    execution.record_executed(AdversarialCaseId::Part03)?;
+    execution.record_executed(AdversarialCaseId::Hand05)?;
+    let objects_after_resume = artifact_object_ids(run.ctx).await?;
+    if objects_after_resume.len() != objects_before.len().saturating_add(1) {
+        return Err("PART-03 did not create exactly one verified file".to_owned());
+    }
+
+    let allocation = allocate_stage_upload(
+        driver,
+        &run.ctx.space_id,
+        payload.len() as u64,
+        "text/plain",
+        None,
+    )
+    .await?;
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let oversized = client
+        .send(
+            Method::PUT,
+            allocation.url(),
+            allocation.handle(),
+            &[
+                (CONTENT_TYPE, HeaderValue::from_static("text/plain")),
+                (CONTENT_RANGE, raw_content_range(0, 5, 5)?),
+            ],
+            b"helloo".to_vec(),
+        )
+        .await?;
+    ExpectedOutcome::Http {
+        status: 413,
+        body: b"payload too large\n",
+    }
+    .assert_matches(ObservedOutcome::Http {
+        status: oversized.status,
+        body: &oversized.body,
+    })?;
+    if artifact_object_ids(run.ctx).await? != objects_after_resume {
+        return Err("PART-04 changed the Anytype inventory".to_owned());
+    }
+    release_stage_upload(driver, &allocation).await?;
+    execution.record_executed(AdversarialCaseId::Part04)?;
+
+    let allocation = allocate_stage_upload(
+        driver,
+        &run.ctx.space_id,
+        payload.len() as u64,
+        "text/plain",
+        None,
+    )
+    .await?;
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let first = client
+        .send(
+            Method::PUT,
+            allocation.url(),
+            allocation.handle(),
+            &[
+                (CONTENT_TYPE, HeaderValue::from_static("text/plain")),
+                (CONTENT_RANGE, raw_content_range(0, 1, 5)?),
+            ],
+            b"he".to_vec(),
+        )
+        .await?;
+    if first.status != 204 || first.upload_offset != Some(2) {
+        return Err("PART-05 fixture did not commit its short prefix".to_owned());
+    }
+    let incomplete = driver
+        .call_tool_error(
+            "file_import",
+            json!({
+                "space": run.ctx.space_id,
+                "source": {"staged_handle": allocation.handle()},
+                "name": "part05.bin",
+                "media_type": "text/plain",
+                "idempotency_key": format!("part05-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    if !matches!(incomplete.code(), "not_found" | "conflict")
+        || artifact_object_ids(run.ctx).await? != objects_after_resume
+    {
+        return Err("PART-05 did not refuse the incomplete staged source".to_owned());
+    }
+    let replay = client
+        .send(
+            Method::PUT,
+            allocation.url(),
+            allocation.handle(),
+            &[
+                (CONTENT_TYPE, HeaderValue::from_static("text/plain")),
+                (CONTENT_RANGE, raw_content_range(0, 1, 5)?),
+            ],
+            b"he".to_vec(),
+        )
+        .await?;
+    ExpectedOutcome::Http {
+        status: 409,
+        body: b"conflict\n",
+    }
+    .assert_matches(ObservedOutcome::Http {
+        status: replay.status,
+        body: &replay.body,
+    })?;
+    if raw_stage_head_offset(&client, &allocation).await? != 2 {
+        return Err("PART-06 changed the committed offset".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Part05)?;
+    execution.record_executed(AdversarialCaseId::Part06)?;
+    release_stage_upload(driver, &allocation).await?;
+
+    let file_id = adversarial_seed_file(driver, run, "part11-source.bin").await?;
+    let exported = driver
+        .call_tool(
+            "file_export",
+            json!({
+                "space": run.ctx.space_id,
+                "file_id": file_id,
+                "destination": {"remote": true},
+                "idempotency_key": format!("part11-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    let export_handle = required_str(&exported, "/receipt/staging_handle")?;
+    let export_url = required_str(&exported, "/receipt/staging_url")?;
+    execution.record_forbidden_log_needle(export_handle.as_bytes())?;
+    let unsatisfiable = client
+        .send(
+            Method::GET,
+            &export_url,
+            &export_handle,
+            &[(RANGE, HeaderValue::from_static("bytes=999999-"))],
+            Vec::new(),
+        )
+        .await?;
+    ExpectedOutcome::Http {
+        status: 416,
+        body: b"invalid range\n",
+    }
+    .assert_matches(ObservedOutcome::Http {
+        status: unsatisfiable.status,
+        body: &unsatisfiable.body,
+    })?;
+    let malformed = client
+        .send(
+            Method::GET,
+            &export_url,
+            &export_handle,
+            &[
+                (RANGE, HeaderValue::from_static("bytes=0-0")),
+                (RANGE, HeaderValue::from_static("bytes=1-1")),
+            ],
+            Vec::new(),
+        )
+        .await?;
+    ExpectedOutcome::Http {
+        status: 400,
+        body: b"invalid request\n",
+    }
+    .assert_matches(ObservedOutcome::Http {
+        status: malformed.status,
+        body: &malformed.body,
+    })?;
+    if [unsatisfiable.body.as_slice(), malformed.body.as_slice()]
+        .iter()
+        .any(|body| {
+            body.windows(ARTIFACT_FILE_PAYLOAD.len())
+                .any(|window| window == ARTIFACT_FILE_PAYLOAD)
+        })
+    {
+        return Err("PART-11 emitted artifact payload bytes on a range refusal".to_owned());
+    }
+    driver
+        .call_tool("artifact_release", json!({"handle": export_handle}))
+        .await?;
+    execution.record_executed(AdversarialCaseId::Part11)?;
+
+    let quota_guard = allocate_stage_upload(
+        driver,
+        &run.ctx.space_id,
+        400 * 1024,
+        "application/octet-stream",
+        None,
+    )
+    .await?;
+    execution.record_forbidden_log_needle(quota_guard.handle().as_bytes())?;
+    let staging_before_refusal = run.policy.staging_snapshot()?;
+    let status_before_refusal = adversarial_quota_snapshot(driver).await?;
+    let quota_refusal = driver
+        .call_tool_error(
+            "artifact_stage_upload",
+            json!({
+                "space": run.ctx.space_id,
+                "size_bytes": 700 * 1024,
+                "media_type": "application/octet-stream",
+            }),
+        )
+        .await?;
+    adversarial_tool_error(ExpectedToolErrorKind::BoundedResult)
+        .assert_tool_error(&quota_refusal)?;
+    if run.policy.staging_snapshot()? != staging_before_refusal
+        || adversarial_quota_snapshot(driver).await? != status_before_refusal
+    {
+        return Err("PART-07 changed quota or staging state after allocation refusal".to_owned());
+    }
+    release_stage_upload(driver, &quota_guard).await?;
+    execution.record_executed(AdversarialCaseId::Part07)?;
+
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
+    Ok(execution)
+}
+
+/// Executes the failed-import and failed-export cleanup rows against a
+/// writable artifact runtime.
+///
+/// # Errors
+///
+/// Returns a fixed category if either refusal changes Anytype inventory,
+/// export-root bytes, staging quota, or private staging state.
+pub async fn run_artifact_failed_operation_cleanup_cases(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    let quota_before = adversarial_quota_snapshot(driver).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let staging_before = run.policy.staging_snapshot()?;
+    let mut execution = AdversarialExecution::default();
+
+    let missing = format!("clean01-missing-{}", unique_suffix());
+    let refusal = driver
+        .call_tool_error(
+            "file_import",
+            file_import_arguments(
+                &run.ctx.space_id,
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &missing),
+                "clean01.bin",
+                Some(ARTIFACT_FILE_MEDIA_TYPE),
+            ),
+        )
+        .await?;
+    adversarial_tool_error(ExpectedToolErrorKind::NotFound).assert_tool_error(&refusal)?;
+    if artifact_object_ids(run.ctx).await? != objects_before
+        || run.policy.staging_snapshot()? != staging_before
+    {
+        return Err("CLEAN-01 retained state after a failed import".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Clean01)?;
+
+    let file_id = adversarial_seed_file(driver, run, "clean02-source.bin").await?;
+    let destination = format!("clean02-existing-{}", unique_suffix());
+    let competing = b"CLEAN-02 existing destination";
+    let destination_path = run.policy.export_root().join(&destination);
+    fs::write(&destination_path, competing)
+        .map_err(|_| "seed CLEAN-02 existing destination".to_owned())?;
+    secure_files(std::slice::from_ref(&destination_path))?;
+    let export_before = RootInventory::capture(run.policy.export_root())?;
+    let refusal = driver
+        .call_tool_error(
+            "file_export",
+            json!({
+                "space": run.ctx.space_id,
+                "file_id": file_id,
+                "destination": local_destination(
+                    ArtifactPolicyFixture::EXPORT_ROOT,
+                    &destination,
+                ),
+                "idempotency_key": format!("clean02-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    adversarial_tool_error(ExpectedToolErrorKind::Conflict).assert_tool_error(&refusal)?;
+    export_before.assert_unchanged()?;
+    if fs::read(&destination_path).ok().as_deref() != Some(competing)
+        || run.policy.staging_snapshot()? != staging_before
+    {
+        return Err("CLEAN-02 retained a temp file or changed the destination".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Clean02)?;
+    finish_adversarial_quota(driver, quota_before, &mut execution).await?;
+    Ok(execution)
+}
+
+/// Executes CLEAN-06 with a required validator that is unavailable at launch
+/// time (or unsupported by the current platform).
+///
+/// # Errors
+///
+/// Returns a fixed category if the import is not refused with validation or
+/// if the refusal retains Anytype, export, staging, or quota state.
+pub async fn run_artifact_required_validator_cleanup_case(
+    driver: &mut impl McpDriver,
+    run: &ArtifactAdversarialRun<'_>,
+) -> Result<AdversarialExecution, String> {
+    if run.policy.options().validators != FixtureValidatorPolicy::Required {
+        return Err("CLEAN-06 requires the required-validator policy".to_owned());
+    }
+    let quota_before = adversarial_quota_snapshot(driver).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let staging_before = run.policy.staging_snapshot()?;
+    let export_before = RootInventory::capture(run.policy.export_root())?;
+    if VALIDATOR_PLATFORM_ACTIVATES {
+        run.policy
+            .validator()
+            .ok_or_else(|| "CLEAN-06 fixture omitted its validator".to_owned())?
+            .invalidate_after_activation()?;
+    }
+    let refusal = driver
+        .call_tool_error(
+            "file_import",
+            file_import_arguments(
+                &run.ctx.space_id,
+                local_source(
+                    ArtifactPolicyFixture::IMPORT_ROOT,
+                    ArtifactPolicyFixture::FILE_SOURCE,
+                ),
+                "clean06.txt",
+                Some("text/plain"),
+            ),
+        )
+        .await?;
+    adversarial_tool_error(ExpectedToolErrorKind::Validation).assert_tool_error(&refusal)?;
+    if artifact_object_ids(run.ctx).await? != objects_before
+        || run.policy.staging_snapshot()? != staging_before
+    {
+        return Err("CLEAN-06 retained object or staging state".to_owned());
+    }
+    export_before.assert_unchanged()?;
+    let mut execution = AdversarialExecution::default();
+    execution.record_executed(AdversarialCaseId::Clean06)?;
     finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     Ok(execution)
 }
@@ -4777,6 +5514,79 @@ impl RawStagingClient {
         })
     }
 
+    /// Sends one complete verbatim HTTP/1.1 request over a fresh loopback
+    /// connection. This is reserved for framing errors that `reqwest`
+    /// normalizes before transmission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when the request is not loopback HTTP, the
+    /// response exceeds its fixed bound, or the exchange misses its deadline.
+    pub async fn send_verbatim(
+        &self,
+        url: &str,
+        mut request: Zeroizing<Vec<u8>>,
+    ) -> Result<RawStagingOutcome, String> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let parsed = url::Url::parse(url).map_err(|_| "parse raw staging URL".to_owned())?;
+        if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1") {
+            return Err("raw staging URL was not loopback HTTP".to_owned());
+        }
+        let port = parsed
+            .port()
+            .ok_or_else(|| "raw staging URL omitted its port".to_owned())?;
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        .map_err(|_| "raw staging connect exceeded its deadline".to_owned())?
+        .map_err(|_| "connect raw staging request".to_owned())?;
+        stream
+            .write_all(request.as_slice())
+            .await
+            .map_err(|_| "write raw staging request".to_owned())?;
+        request.zeroize();
+        stream
+            .shutdown()
+            .await
+            .map_err(|_| "finish raw staging request".to_owned())?;
+        let mut response = Vec::with_capacity(4_096);
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
+            .await
+            .map_err(|_| "raw staging response exceeded its deadline".to_owned())?
+            .map_err(|_| "read raw staging response".to_owned())?;
+        if response.len() > 4_096 {
+            return Err("raw staging response exceeded its fixed bound".to_owned());
+        }
+        let (head, body) = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|offset| (&response[..offset], response[offset + 4..].to_vec()))
+            .ok_or_else(|| "raw staging response omitted its header terminator".to_owned())?;
+        let status = head
+            .split(|byte| *byte == b' ')
+            .nth(1)
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .and_then(|value| value.parse::<u16>().ok())
+            .ok_or_else(|| "raw staging response omitted its status".to_owned())?;
+        let upload_offset = head
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| std::str::from_utf8(line).ok())
+            .find_map(|line| {
+                line.trim_end_matches('\r')
+                    .strip_prefix("upload-offset: ")
+                    .or_else(|| line.trim_end_matches('\r').strip_prefix("Upload-Offset: "))
+                    .and_then(|value| value.parse::<u64>().ok())
+            });
+        Ok(RawStagingOutcome {
+            status,
+            body,
+            upload_offset,
+        })
+    }
+
     /// Starts a raw request whose sole body chunk waits at two test-owned
     /// barriers. Callers wait for both body streams to reach `arrived` before
     /// releasing `release`, which establishes a real overlapping-body race
@@ -5352,6 +6162,40 @@ impl PinnedValidatorExecutable {
         Err("artifact validator fixture requires a hash-pinnable file(1) executable".to_owned())
     }
 
+    /// Copies one admitted host detector into the private fixture tree and
+    /// pins the copy used by the production runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category if the executable cannot be copied, frozen,
+    /// or pinned under the same boundary as production.
+    pub fn discover_private(base: &Path) -> Result<Self, String> {
+        let host = Self::discover()?;
+        Self::copy_private(host.path(), base)
+    }
+
+    /// Copies and pins one exact native candidate under the private fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category if the source cannot be resolved and copied or
+    /// its private copy cannot be frozen and pinned.
+    pub fn copy_private(candidate: &Path, base: &Path) -> Result<Self, String> {
+        let source = fs::canonicalize(candidate)
+            .map_err(|_| "resolve artifact validator source executable".to_owned())?;
+        if !fs::symlink_metadata(&source)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
+            return Err("resolve artifact validator source executable".to_owned());
+        }
+        let target = base.join("validator-bin");
+        fs::copy(source, &target)
+            .map_err(|_| "copy artifact validator into private fixture".to_owned())?;
+        freeze_validator_fixture(&target)?;
+        Self::pin(&target).ok_or_else(|| "pin private artifact validator fixture".to_owned())
+    }
+
     /// Absolute path declared in the rendered policy.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -5362,6 +6206,24 @@ impl PinnedValidatorExecutable {
     #[must_use]
     pub fn sha256(&self) -> &str {
         &self.sha256
+    }
+
+    /// Changes the pinned fixture inode after runtime activation so the
+    /// production launch-time hash recheck reports it unavailable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category when the private executable cannot be changed
+    /// and frozen again.
+    pub fn invalidate_after_activation(&self) -> Result<(), String> {
+        permit_validator_fixture_write(&self.path)?;
+        let result = fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, b"invalidated"))
+            .map_err(|_| "invalidate private artifact validator fixture".to_owned());
+        let frozen = freeze_validator_fixture(&self.path);
+        result.and(frozen)
     }
 
     /// Pins one candidate, mirroring the production executable boundary.
@@ -5388,6 +6250,42 @@ impl PinnedValidatorExecutable {
             sha256: artifact_sha256(&bytes),
         })
     }
+}
+
+#[cfg(unix)]
+fn freeze_validator_fixture(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o500))
+        .map_err(|_| "freeze private artifact validator fixture".to_owned())
+}
+
+#[cfg(not(unix))]
+fn freeze_validator_fixture(path: &Path) -> Result<(), String> {
+    let mut permissions = fs::metadata(path)
+        .map_err(|_| "inspect private artifact validator fixture".to_owned())?
+        .permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions)
+        .map_err(|_| "freeze private artifact validator fixture".to_owned())
+}
+
+#[cfg(unix)]
+fn permit_validator_fixture_write(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|_| "permit private artifact validator fixture mutation".to_owned())
+}
+
+#[cfg(not(unix))]
+fn permit_validator_fixture_write(path: &Path) -> Result<(), String> {
+    let mut permissions = fs::metadata(path)
+        .map_err(|_| "inspect private artifact validator fixture".to_owned())?
+        .permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+        .map_err(|_| "permit private artifact validator fixture mutation".to_owned())
 }
 
 /// Candidate validator executables in priority order.
@@ -5745,6 +6643,29 @@ impl ArtifactPolicyFixture {
     /// Returns a fixed message when a directory, source, or policy file cannot
     /// be created with private permissions.
     pub fn create_with(space_id: &str, options: ArtifactPolicyOptions) -> Result<Self, String> {
+        Self::create_with_validator_candidate(space_id, options, None)
+    }
+
+    /// Creates a fixture whose declared validator is a private copy of one
+    /// exact acceptance executable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed category if the executable or ordinary fixture policy
+    /// cannot satisfy the production boundary.
+    pub fn create_with_validator_executable(
+        space_id: &str,
+        options: ArtifactPolicyOptions,
+        executable: &Path,
+    ) -> Result<Self, String> {
+        Self::create_with_validator_candidate(space_id, options, Some(executable))
+    }
+
+    fn create_with_validator_candidate(
+        space_id: &str,
+        options: ArtifactPolicyOptions,
+        executable: Option<&Path>,
+    ) -> Result<Self, String> {
         if space_id.is_empty() || space_id.len() > 512 {
             return Err("artifact fixture requires an exact space identity".to_owned());
         }
@@ -5777,7 +6698,10 @@ impl ArtifactPolicyFixture {
             None
         };
         let validator = if options.validators.is_declared() {
-            Some(PinnedValidatorExecutable::discover()?)
+            Some(match executable {
+                Some(executable) => PinnedValidatorExecutable::copy_private(executable, &base)?,
+                None => PinnedValidatorExecutable::discover_private(&base)?,
+            })
         } else {
             None
         };
@@ -8463,16 +9387,28 @@ impl ArtifactLifecycleScenario {
     /// Strict policy options realizing this scenario.
     #[must_use]
     pub const fn policy_options(self) -> ArtifactPolicyOptions {
-        let limits = match self {
-            Self::Quota => ArtifactLimitProfile::Quota,
-            Self::TtlCleanup => ArtifactLimitProfile::TtlCleanup,
-            Self::Cancellation | Self::PayloadCeiling => ArtifactLimitProfile::PayloadCeiling,
-            Self::Collision | Self::RestartStaleGeneration => ArtifactLimitProfile::Default,
+        let (limits, spaces) = match self {
+            Self::Quota => (
+                ArtifactLimitProfile::Quota,
+                FixtureSpacePolicy::AllowedUnderTest,
+            ),
+            Self::TtlCleanup => (
+                ArtifactLimitProfile::TtlCleanup,
+                FixtureSpacePolicy::Omitted,
+            ),
+            Self::Cancellation | Self::PayloadCeiling => (
+                ArtifactLimitProfile::PayloadCeiling,
+                FixtureSpacePolicy::AllowedUnderTest,
+            ),
+            Self::Collision | Self::RestartStaleGeneration => (
+                ArtifactLimitProfile::Default,
+                FixtureSpacePolicy::AllowedUnderTest,
+            ),
         };
         ArtifactPolicyOptions {
             staging: true,
             read_only: false,
-            spaces: FixtureSpacePolicy::AllowedUnderTest,
+            spaces,
             validators: FixtureValidatorPolicy::Absent,
             limits,
         }
@@ -9853,6 +10789,50 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn required_validator_fixture_uses_an_invalidatable_private_copy() {
+        let fixture = ArtifactPolicyFixture::create_with(
+            "bafyrei-validator-cleanup",
+            ArtifactPolicyOptions {
+                validators: FixtureValidatorPolicy::Required,
+                ..ArtifactPolicyOptions::default()
+            },
+        )
+        .expect("required-validator fixture");
+        let validator = fixture.validator().expect("private validator");
+        assert!(validator.path().starts_with(&fixture.base));
+        let pinned = validator.sha256().to_owned();
+        validator
+            .invalidate_after_activation()
+            .expect("invalidate private validator inode");
+        let changed = fs::read(validator.path()).expect("read invalidated validator");
+        assert_ne!(artifact_sha256(&changed), pinned);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "acceptance-harness"))]
+    #[test]
+    fn acceptance_validator_fixture_freezes_the_selected_build_executable() {
+        let Some(executable) = option_env!("CARGO_BIN_EXE_any-mcp-process-test") else {
+            return;
+        };
+        let executable = PathBuf::from(executable);
+        let fixture = ArtifactPolicyFixture::create_with_validator_executable(
+            "bafyrei-validator-flood",
+            ArtifactPolicyOptions {
+                validators: FixtureValidatorPolicy::Optional,
+                ..ArtifactPolicyOptions::default()
+            },
+            &executable,
+        )
+        .expect("acceptance-validator fixture");
+        let validator = fixture.validator().expect("private validator");
+        assert!(validator.path().starts_with(&fixture.base));
+        let bytes = fs::read(validator.path()).expect("read copied validator");
+        assert_eq!(artifact_sha256(&bytes), validator.sha256());
+        assert_ne!(validator.path(), executable);
+    }
+
     #[test]
     fn policy_expectations_cover_every_scenario_and_probe_exactly() {
         let refused = |code, message| ArtifactProbeExpectation::Refused { code, message };
@@ -10530,7 +11510,7 @@ mod tests {
 
         let partition = adversarial_case_partition().collect::<Vec<_>>();
         assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
-        let implemented = 72;
+        let implemented = 86;
         assert_eq!(
             partition
                 .iter()
@@ -10545,6 +11525,51 @@ mod tests {
                 .count(),
             122 - implemented
         );
+        assert_eq!(ADVERSARIAL_ROBUSTNESS_CASE_IDS.len(), 50);
+        let robustness = ADVERSARIAL_ROBUSTNESS_CASE_IDS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(robustness.len(), ADVERSARIAL_ROBUSTNESS_CASE_IDS.len());
+        assert_eq!(
+            robustness,
+            AdversarialCaseId::ALL
+                .iter()
+                .copied()
+                .filter(|case| {
+                    matches!(
+                        case.family(),
+                        AdversarialFamily::HandleReplay
+                            | AdversarialFamily::PartialWrites
+                            | AdversarialFamily::ProcessCrash
+                            | AdversarialFamily::OutputFlood
+                            | AdversarialFamily::Cleanup
+                    )
+                })
+                .collect()
+        );
+        for case in ADVERSARIAL_ROBUSTNESS_CASE_IDS {
+            let witness = case
+                .robustness_witness()
+                .unwrap_or_else(|| panic!("{} has no executable robustness owner", case.as_str()));
+            assert!(!witness.as_str().is_empty());
+            let executed = case.status() == AdversarialCaseStatus::Executed;
+            let evidence = case.robustness_executed_evidence();
+            assert_eq!(
+                executed,
+                evidence.is_some(),
+                "{} must be Executed exactly when it states checkable evidence",
+                case.as_str()
+            );
+            if evidence == Some(AdversarialRobustnessEvidence::OfflineUnit) {
+                assert!(
+                    witness.is_offline(),
+                    "{} claims offline proof but its owner {} is live-only",
+                    case.as_str(),
+                    witness.as_str()
+                );
+            }
+        }
         assert_eq!(
             AdversarialCaseId::Hlink06.status(),
             AdversarialCaseStatus::Executed

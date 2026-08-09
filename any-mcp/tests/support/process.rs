@@ -28,7 +28,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const REAP_GRACE: Duration = Duration::from_secs(1);
 pub const FRAME_QUEUE_CAPACITY: usize = 32;
 pub const MAX_STDOUT_LINE_BYTES: usize = 2 * 1024 * 1024;
-const MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
 pub const MAX_STDERR_BYTES: usize = 1024 * 1024;
 
@@ -62,6 +62,28 @@ pub struct ProtocolProcess {
     transcript: Vec<String>,
     deadline: Duration,
     failure: Option<ProcessFailureEvidence>,
+    #[cfg(feature = "acceptance-harness")]
+    stdout_release: Option<mpsc::SyncSender<()>>,
+}
+
+/// Notification that the bounded stdout reader stopped after observing the
+/// first byte of a selected response frame.
+#[cfg(feature = "acceptance-harness")]
+#[allow(dead_code)]
+pub struct MidFramePause {
+    ready: mpsc::Receiver<()>,
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[allow(dead_code)]
+impl MidFramePause {
+    /// Waits until production has emitted at least one byte of the frame that
+    /// the crash scenario will interrupt.
+    pub fn wait_ready(self, deadline: Duration) -> Result<(), String> {
+        self.ready
+            .recv_timeout(deadline)
+            .map_err(|_| "production stdout did not reach the mid-frame pause".to_owned())
+    }
 }
 
 impl ProtocolProcess {
@@ -98,7 +120,58 @@ impl ProtocolProcess {
             transcript: Vec::new(),
             deadline,
             failure: None,
+            #[cfg(feature = "acceptance-harness")]
+            stdout_release: None,
         }
+    }
+
+    /// Spawns a child whose stdout reader stops after the first complete frame
+    /// and the first byte of the following frame.
+    ///
+    /// The reader is released only after [`Self::terminate`] has killed the
+    /// child, and its capture ends exactly at the pause point: it never drains
+    /// bytes the child flushed after the pause, so the captured tail is
+    /// deterministically one truncated fragment of the interrupted frame.
+    #[cfg(feature = "acceptance-harness")]
+    #[allow(dead_code)]
+    pub fn spawn_paused_in_second_frame(
+        mut command: Command,
+        deadline: Duration,
+    ) -> (Self, MidFramePause) {
+        assert!(!deadline.is_zero(), "process deadline must be positive");
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn production any-mcp binary");
+        let stdin = child.stdin.take().expect("child stdin");
+        let stdout = child.stdout.take().expect("child stdout");
+        let stderr = child.stderr.take().expect("child stderr");
+        let (frame_tx, frames) = mpsc::sync_channel(FRAME_QUEUE_CAPACITY);
+        let (ready_tx, ready) = mpsc::sync_channel(0);
+        let (release, release_rx) = mpsc::sync_channel(0);
+        let stdout_thread = thread::spawn(move || {
+            read_stdout_paused_in_second_frame(stdout, &frame_tx, ready_tx, release_rx)
+        });
+        let stderr_thread = thread::spawn(move || {
+            read_bounded_stream(stderr, MAX_STDERR_LINE_BYTES, MAX_STDERR_BYTES)
+        });
+        (
+            Self {
+                child: Some(child),
+                stdin: Some(stdin),
+                frames,
+                stdout_thread: Some(stdout_thread),
+                stderr_thread: Some(stderr_thread),
+                consumed_stdout: Vec::new(),
+                transcript: Vec::new(),
+                deadline,
+                failure: None,
+                stdout_release: Some(release),
+            },
+            MidFramePause { ready },
+        )
     }
 
     /// Sends one JSON-RPC value as an LF-delimited frame.
@@ -342,6 +415,11 @@ impl ProtocolProcess {
                 .kill()
                 .map_err(|_| "terminate production any-mcp child".to_owned())?;
         }
+        if let Some(release) = self.stdout_release.take() {
+            release
+                .send(())
+                .map_err(|_| "release paused production stdout reader".to_owned())?;
+        }
         self.shutdown(false, false)
     }
 
@@ -431,6 +509,72 @@ pub fn read_stdout(
                         "bounded stdout frame queue unavailable: {error}"
                     ))
                 })?;
+        }
+    }
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[allow(dead_code)]
+fn read_stdout_paused_in_second_frame(
+    stdout: impl Read,
+    frames: &mpsc::SyncSender<Vec<u8>>,
+    ready: mpsc::SyncSender<()>,
+    release: mpsc::Receiver<()>,
+) -> std::io::Result<Vec<u8>> {
+    let mut reader = BufReader::with_capacity(8 * 1024, stdout);
+    let mut all = Vec::new();
+    let mut line = Vec::new();
+    let mut complete_frames = 0_usize;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(all);
+        }
+        let chunk_len = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        let chunk_len = if complete_frames == 1 { 1 } else { chunk_len };
+        let next_line_len = line
+            .len()
+            .checked_add(chunk_len)
+            .ok_or_else(|| std::io::Error::other("stdout line length overflow"))?;
+        if next_line_len > MAX_STDOUT_LINE_BYTES {
+            return Err(std::io::Error::other(
+                "stdout protocol frame exceeds byte cap",
+            ));
+        }
+        let next_total = all
+            .len()
+            .checked_add(chunk_len)
+            .ok_or_else(|| std::io::Error::other("stdout aggregate length overflow"))?;
+        if next_total > MAX_STDOUT_BYTES {
+            return Err(std::io::Error::other("stdout exceeds aggregate byte cap"));
+        }
+        let complete = available[chunk_len - 1] == b'\n';
+        line.extend_from_slice(&available[..chunk_len]);
+        all.extend_from_slice(&available[..chunk_len]);
+        reader.consume(chunk_len);
+        if complete {
+            complete_frames = complete_frames.saturating_add(1);
+            frames
+                .try_send(std::mem::take(&mut line))
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "bounded stdout frame queue unavailable: {error}"
+                    ))
+                })?;
+        } else if complete_frames == 1 {
+            ready
+                .send(())
+                .map_err(|_| std::io::Error::other("mid-frame observer unavailable"))?;
+            release
+                .recv()
+                .map_err(|_| std::io::Error::other("mid-frame release unavailable"))?;
+            // The capture deliberately ends at the pause point. Draining after
+            // the kill could pick up the flushed remainder of the interrupted
+            // frame from the pipe and destroy the truncated-fragment evidence.
+            return Ok(all);
         }
     }
 }

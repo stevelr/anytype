@@ -1863,8 +1863,30 @@ most 128 bytes/32 tokens, and an `artifact_bytes + 1` reservation is refused as
 or diagnostic.
 
 The adversarial family owns a closed 122-case inventory. Its case-status map
-records 72 nonpending rows, either executed or explicitly unsupported for a
-required platform primitive, and keeps the remaining 50 rows pending.
+keeps unproved rows pending until their executable owner passes, while
+implemented rows are executed or explicitly unsupported for a required
+platform primitive. Pending closure owners include raw-listener assertions for
+partial offsets, short bodies, resumable disconnects, overruns, incomplete
+imports, replayed chunks, allocation-time quota refusal, and rejected download
+ranges, plus a spawned kill-mid-frame assertion that
+accepts only complete JSON-RPC frames followed by one bounded, truncated final
+fragment. Their inventory status advances only after the live owner passes.
+Cleanup owners likewise assert failed import/export rollback, single-use
+release, TTL invalidation, required-validator refusal, and read-only catalog
+isolation without promoting those rows before live execution. A cleanup pass
+is separately proven offline to never remove an entry absent from the staging
+state index. A spawned crash-restart owner kills production children
+mid-upload, during the Anytype import dispatch, and inside the atomic export
+commit, then requires byte-uniform `not_found` for every previous-generation
+handle, at most one dispatched candidate object, an absent or hash-correct
+export destination, startup rejection of a second process on an owned staging
+root, and a complete happy-path import after recovery. Every executed
+failure-robustness row must additionally state its checkable evidence — an
+offline unit owner or a recorded live-owner run — and the inventory test
+rejects a promotion without evidence or an offline claim on a live-only
+owner.
+Flood owners measure aggregate status at maximum staged-record occupancy and
+bound/redact the spawned child's diagnostic burst.
 Implemented coverage exercises traversal and native-path grammar,
 capability-indistinguishable root refusals, volume case and normalization
 aliases, Windows device names, staging-record case sensitivity, bounded names
@@ -1887,17 +1909,42 @@ retained-root access and successful-open counters, while every live owner binds
 its log audit to one opened owner-private descriptor and rejects bounded-window
 matches for fixture paths, transient handles, or credentials.
 
+The final protocol and robustness families cover handle guessing, expiry,
+restart, replay, direction, route, and space binding; malformed and partial
+HTTP transfers; abrupt process loss and private-state reconciliation;
+validator and response floods; and cleanup after every refusal class. Each of
+the 50 `HAND`, `PART`, `CRASH`, `FLOOD`, and `CLEAN` rows names one executable
+staging, spawned-lifecycle, validator, direct-teardown, or read-only-catalog
+owner. The case partition checks that these owners cover the exact closed set
+once; a row leaves the pending partition only with its executable assertion.
+The TTL owner proves an expired handle is uniformly unavailable and restores
+quota. It also compares the complete normalized MCP not-found payload for
+unknown, expired, and cross-space handles, and separately compares staging HTTP
+status and body for expired and wrong-route requests. The partial-write owner
+reuses a consumed upload handle with a new operation key and requires one object
+plus a fixed not-found refusal. The payload owner constructs a document above
+the configured Markdown ceiling and requires a bounded error frame without
+publication.
+Four private child gates make cancellation timing explicit: before and during
+file-export publication, after file-import dispatch, and after document-update
+dispatch. Their owners require a conflict result, no partial destination or
+spliced document, at most one imported object, idempotent retry settlement, and
+complete child cleanup.
+
 The hard-link cleanup case retains the staging reservation after a hostile-link
 conflict, including after the outside link is removed. That stable conflict
 prevents a later pathname-based deletion from changing the staged record.
 
-The validator scenarios declare one real host `file(1)`-compatible executable
-pinned by absolute path and SHA-256; nothing is shipped or synthesized, and the
+The content validator scenarios declare one real host `file(1)`-compatible
+executable pinned by absolute path and SHA-256; nothing is shipped, and the
 fixture admits exactly the ownership and mode that the production validator
 boundary admits. Set `ANY_MCP_ACCEPTANCE_VALIDATOR` to an exact executable path
-when the host keeps one outside `PATH`. Validator execution is Linux-only, so
-other platforms keep the validated declaration and expect zero available
-validators.
+when the host keeps one outside `PATH`. The validator-flood scenarios instead
+copy the acceptance process binary into the same private, immutable boundary,
+where it produces oversized stdout or stderr, exceeds the configured deadline,
+and leaves a descendant for the process-group cleanup assertion. Validator
+execution is Linux-only, so other platforms keep the validated declaration and
+expect zero available validators.
 
 Fixture discipline is part of the harness rather than each scenario: a
 prefix-authorized disposable space, a private `0700` policy tree with `0600`

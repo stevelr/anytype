@@ -22,6 +22,23 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Extend the closed artifact adversarial inventory with production staging
+  regressions for uniform bearer refusal, route, direction, and space binding,
+  cross-transport not-found equivalence classes, strict request grammar, rate
+  recovery, and request-permit shedding. The
+  partial-write owner now drives malformed raw HTTP, disconnect/resume, offset,
+  hash, consumed-handle replay, inventory, quota-allocation, and download-range
+  assertions. Four spawned cancellation owners pause before export publication,
+  inside atomic publication, after file-import dispatch, and after document
+  update dispatch; the
+  process-crash owner captures a deterministic kill during a JSON-RPC frame.
+  Cleanup owners cover failed import/export rollback, release and TTL
+  invalidation, required-validator refusal, and read-only catalog isolation.
+  Flood owners measure maximum-occupancy aggregate status, oversized validator
+  output, validator deadline enforcement, descendant cleanup, oversized
+  document-export refusal, and bounded spawned diagnostics.
+  These and the remaining handle, process-crash, output-flood, and
+  failure-cleanup rows stay pending until their live case-specific owners pass.
 - Add closed real-server adversarial artifact coverage for 43 traversal,
   filesystem-alias, filename, MIME, and metadata cases. Direct-router and
   stable/preview stdio owners enforce exact case partitions, fixed refusal
@@ -65,8 +82,43 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Verified authenticated Streamable HTTP interoperability with MCP Inspector
   2.1.0 and Claude Code 2.1.220, including lifecycle, SSE, catalog parity, and
   session termination.
+- Add a spawned crash-restart acceptance owner that kills production children
+  mid-upload, mid-import-dispatch, and mid-export-commit, then proves restart
+  recovery: previous-generation handles return the byte-uniform `not_found`,
+  the space holds at most one dispatched candidate, an interrupted export
+  destination is absent or hash-correct, a second process on an owned staging
+  root is rejected at startup without disturbing the first, and a full
+  happy-path import succeeds after recovery. Three acceptance-only production
+  points pause inside atomic export publication and after import and document
+  dispatch to make the kill and cancellation windows exact.
+- Prove offline that a staging cleanup pass never removes an unindexed entry,
+  that the request-rate ceiling sheds a real wire burst and resumes, that the
+  listener refuses duplicated and whitespace-bearing `Authorization` headers,
+  and that query, prefix, oversized-path, and percent-encoded rejections all
+  precede authentication. A dedicated failing-call burst now backs the
+  diagnostic-flood row, asserting byte-uniform bounded refusals.
+- Require every executed failure-robustness inventory row to state checkable
+  evidence: an offline unit owner or a recorded live-owner run. A row cannot
+  be promoted without evidence, and a live-only row cannot claim offline
+  proof, so the implemented count can no longer drift from executable tests.
 
 ### Fixed
+
+- Send env-configured acceptance gate nonces at the full 64-hex-character
+  length production requires, so spawned child gates arm instead of rejecting
+  their configuration at startup.
+- End the kill-mid-frame stdout capture exactly at its pause point instead of
+  draining the pipe after the kill, so the truncated-fragment evidence is
+  deterministic rather than dependent on flush timing.
+- Signal a validator's process group only while its leader is still unreaped,
+  observing exit with a no-reap wait first. The previous order signalled the
+  group after the leader was reaped, leaving a window where a recycled pid
+  could route the kill to an unrelated process group.
+
+- Keep configured validator process groups under the kill-on-drop guard until
+  stdout, stderr, exit status, and result-shape validation all succeed. A
+  validator that leaves a descendant behind after oversized output or another
+  refusal can no longer leak that process beyond the request boundary.
 
 - Reject ASCII control bytes and units in native artifact paths before I/O,
   and classify Windows reserved device components as invalid path syntax with

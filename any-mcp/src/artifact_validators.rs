@@ -391,6 +391,9 @@ async fn run_validator(
         read_bounded(stderr, stderr_limit),
         wait_for_validator(&mut child, child_id, validator.config.timeout),
     );
+    // Every `wait_for_validator` branch signals the process group before it
+    // reaps the leader, so once the join settles the leader pid may already
+    // be recycled and must never be signalled again.
     process_group.disarm();
     input_result?;
     let stdout = stdout?;
@@ -406,6 +409,26 @@ async fn run_validator(
     Ok(media_type)
 }
 
+#[cfg(unix)]
+async fn wait_for_validator(
+    child: &mut tokio::process::Child,
+    child_id: Option<u32>,
+    timeout: std::time::Duration,
+) -> Result<std::process::ExitStatus, ValidatorExecutionError> {
+    // Observe leader exit without reaping so its pid — and therefore the
+    // private process-group id — stays reserved while descendants are
+    // signalled. Signalling after the reap could hit a recycled pid.
+    let exited = wait_for_leader_exit_without_reap(child_id, timeout).await;
+    terminate_process_group(child_id);
+    if exited {
+        return child.wait().await.map_err(|_| ValidatorExecutionError);
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    Err(ValidatorExecutionError)
+}
+
+#[cfg(not(unix))]
 async fn wait_for_validator(
     child: &mut tokio::process::Child,
     child_id: Option<u32>,
@@ -420,6 +443,36 @@ async fn wait_for_validator(
             Err(ValidatorExecutionError)
         }
     }
+}
+
+/// Waits until the leader has exited, leaving it unreaped, or until the
+/// bounded deadline elapses. Returns whether an exit was observed.
+#[cfg(unix)]
+async fn wait_for_leader_exit_without_reap(
+    child_id: Option<u32>,
+    timeout: std::time::Duration,
+) -> bool {
+    let Some(child_id) = child_id.and_then(|value| libc::id_t::try_from(value).ok()) else {
+        return false;
+    };
+    let waited = tokio::task::spawn_blocking(move || {
+        // SAFETY: `info` is written by the kernel before use; `WNOWAIT` keeps
+        // the child waitable for the owning tokio `Child` to reap afterwards.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                child_id,
+                &raw mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            ) == 0
+        }
+    });
+    // On timeout the blocking wait stays parked until the subsequent group
+    // and direct kills make the child exit, then ends with the detached task.
+    tokio::time::timeout(timeout, waited)
+        .await
+        .is_ok_and(|joined| joined.unwrap_or(false))
 }
 
 struct ProcessGroupGuard {
@@ -777,5 +830,47 @@ mod tests {
             Some("text/plain")
         );
         std::fs::remove_file(source_path).expect("remove source");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn process_group_guard_reaps_a_descendant_after_parent_exit() {
+        let shell = find_fixture_executable("sh").expect("platform shell executable");
+        let mut command = Command::new(shell);
+        command
+            .args(["-c", "sleep 30 >/dev/null 2>&1 & echo $!"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        configure_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn process-group parent");
+        let child_id = child.id();
+        let mut stdout = child.stdout.take().expect("parent stdout");
+        let mut pid_bytes = Vec::new();
+        stdout
+            .read_to_end(&mut pid_bytes)
+            .await
+            .expect("read descendant pid");
+        child.wait().await.expect("wait for process-group parent");
+        let descendant = std::str::from_utf8(&pid_bytes)
+            .expect("descendant pid UTF-8")
+            .trim()
+            .parse::<i32>()
+            .expect("descendant pid integer");
+        let guard = ProcessGroupGuard::new(child_id);
+        drop(guard);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            // SAFETY: signal zero performs an existence check without changing
+            // the process, and `descendant` came from the owned fixture group.
+            if unsafe { libc::kill(descendant, 0) } != 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "process-group descendant survived guard cleanup"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 }

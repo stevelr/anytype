@@ -39,7 +39,10 @@ use anytype::{
         with_disposable_space_context,
     },
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD},
+};
 use futures_util::FutureExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -50,22 +53,23 @@ mod support;
 use support::live_scenario::{
     ACCEPTANCE_TRANSFER_CHUNK_BYTES, ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS,
     ADVERSARIAL_STDIO_SENTINEL_IDS, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD,
-    ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution, ArtifactAdversarialRun,
-    ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario, ArtifactControlPlane,
-    ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks, ArtifactGateLease,
-    ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture, ArtifactPolicyRun,
-    ArtifactPolicyScenario, ArtifactServerLogAudit, ArtifactServerLogBaseline,
-    ArtifactSmokeFixture, ArtifactStageAllocation, ArtifactStartupCaseOutcome,
-    ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome, ObservedOutcome,
-    allocate_stage_upload, artifact_catalog_snapshot, artifact_sha256,
-    assert_artifact_content_parity, assert_artifact_parity, assert_artifact_policy_parity,
-    assert_payload_frame_independence, audit_server_log, classify_collision_frames,
-    measure_artifact_frame, prepare_artifact_symlink_startup_case,
+    ARTIFACT_FRAME_CEILING_BYTES, ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution,
+    ArtifactAdversarialRun, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
+    ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks,
+    ArtifactGateLease, ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture,
+    ArtifactPolicyOptions, ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit,
+    ArtifactServerLogBaseline, ArtifactSmokeFixture, ArtifactStageAllocation,
+    ArtifactStartupCaseOutcome, ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome,
+    FixtureValidatorPolicy, ObservedOutcome, allocate_stage_upload, artifact_catalog_snapshot,
+    artifact_sha256, assert_artifact_content_parity, assert_artifact_parity,
+    assert_artifact_policy_parity, assert_payload_frame_independence, audit_server_log,
+    classify_collision_frames, measure_artifact_frame, prepare_artifact_symlink_startup_case,
     record_artifact_dynamic_filesystem_startup_cases, reject_oversized_stage_chunk,
-    release_stage_upload, run_artifact_adversarial_stdio_sentinels, run_artifact_content_scenario,
-    run_artifact_dynamic_filesystem_stdio_sentinels, run_artifact_policy_scenario,
-    run_artifact_race01, run_artifact_race04, run_artifact_smoke_scenario, server_log_baseline,
-    stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
+    release_stage_upload, require_completed, run_artifact_adversarial_stdio_sentinels,
+    run_artifact_content_scenario, run_artifact_dynamic_filesystem_stdio_sentinels,
+    run_artifact_policy_scenario, run_artifact_race01, run_artifact_race04,
+    run_artifact_smoke_scenario, server_log_baseline, stage_head_status, upload_stage_bytes,
+    validate_tool_frame, wait_for_stage_reaped,
 };
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
@@ -77,6 +81,8 @@ use support::live_scenario::{
     BodyDriverMetrics, OPTIONAL_LIVE_OWNERSHIP, OptionalEvidenceTier, OptionalExecutableWorkflow,
     OptionalFastWorkflow, OptionalOperation, OptionalRealWorkflow, OptionalRegistry,
 };
+#[cfg(feature = "acceptance-harness")]
+use support::process::{MAX_STDOUT_BYTES, MidFramePause};
 use support::{
     live_scenario::{
         ChatsRegistryEvidence, ChatsRegistryFixture, McpDriver, ScenarioEvidence, ScenarioId,
@@ -514,6 +520,25 @@ impl StdioDriver {
         }
     }
 
+    #[cfg(feature = "acceptance-harness")]
+    fn spawn_paused_in_second_frame(
+        command: Command,
+        options: DriverOptions,
+    ) -> (Self, MidFramePause) {
+        let (process, pause) =
+            ProtocolProcess::spawn_paused_in_second_frame(command, Duration::from_secs(30));
+        (
+            Self {
+                process,
+                next_id: 1,
+                options,
+                body_tool_error_frames: Vec::new(),
+                _keystore: None,
+            },
+            pause,
+        )
+    }
+
     fn initialize(&mut self) {
         if self.options.preview {
             let discovered = self.request("server/discover", json!({}));
@@ -736,6 +761,73 @@ impl StdioDriver {
             return Err("artifact child did not respond after cancellation".to_owned());
         }
         Ok(id)
+    }
+
+    /// Sends one `tools/call` frame without reading a response, for crash
+    /// scenarios that kill the child while the call is paused at a gate.
+    #[cfg(feature = "acceptance-harness")]
+    fn send_tool_call_only(&mut self, name: &'static str, arguments: Value) {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.process.send(json!({
+            "jsonrpc":"2.0",
+            "id":id,
+            "method":"tools/call",
+            "params":{"name":name,"arguments":arguments}
+        }));
+    }
+
+    /// Cancels one gated call and requires both its exact conflict result and
+    /// a subsequent ping response.
+    #[cfg(feature = "acceptance-harness")]
+    fn cancel_tool_call_exact(
+        &mut self,
+        name: &'static str,
+        arguments: Value,
+        gate: &ChildArtifactGate,
+    ) -> Result<ToolErrorEvidence, String> {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.process.send(json!({
+            "jsonrpc":"2.0",
+            "id":id,
+            "method":"tools/call",
+            "params":{"name":name,"arguments":arguments}
+        }));
+        gate.wait_ready()
+            .map_err(|_| "exact artifact cancellation never reached its gate".to_owned())?;
+        self.process.notification(
+            "notifications/cancelled",
+            json!({"requestId": id, "reason": "exact artifact acceptance cancellation"}),
+        );
+        gate.release()
+            .map_err(|_| "exact artifact cancellation did not release its gate".to_owned())?;
+        gate.wait_done()
+            .map_err(|_| "exact artifact cancellation did not settle its gate".to_owned())?;
+        let ping_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.process.send(json!({
+            "jsonrpc":"2.0",
+            "id":ping_id,
+            "method":"ping",
+            "params":{}
+        }));
+        let first = self.process.read_frame();
+        self.process.record_response(&first);
+        let second = self.process.read_frame();
+        self.process.record_response(&second);
+        let [cancelled, ping] = correlate_response_pair([id, ping_id], [first, second])?;
+        if ping["result"] != json!({}) {
+            return Err("artifact child did not respond after exact cancellation".to_owned());
+        }
+        let result = cancelled
+            .get("result")
+            .ok_or_else(|| "exact artifact cancellation omitted its tool result".to_owned())?;
+        let evidence = ToolErrorEvidence::from_result(result, false)?;
+        if evidence.code() != "conflict" {
+            return Err("exact artifact cancellation did not return conflict".to_owned());
+        }
+        Ok(evidence)
     }
 
     fn list_tool_descriptors_sync(&mut self) -> Result<Vec<Value>, String> {
@@ -1861,6 +1953,79 @@ fn artifact_child_process_evidence(
 }
 
 #[cfg(feature = "acceptance-harness")]
+fn crash06_mid_frame_evidence(output: &ProcessOutput) -> Result<AdversarialExecution, String> {
+    if output.exit_category != "signal"
+        || output.stdout.len() > MAX_STDOUT_BYTES
+        || output.stderr.len() > support::process::MAX_STDERR_BYTES
+    {
+        return Err("CRASH-06 process capture was not bounded termination evidence".to_owned());
+    }
+    if output.consumed_stdout.is_empty()
+        || !output.consumed_stdout.ends_with(b"\n")
+        || !output.stdout.starts_with(&output.consumed_stdout)
+    {
+        return Err("CRASH-06 lost the complete pre-crash frame prefix".to_owned());
+    }
+    let fragment = &output.stdout[output.consumed_stdout.len()..];
+    if fragment.is_empty()
+        || fragment.contains(&b'\n')
+        || fragment.first() != Some(&b'{')
+        || serde_json::from_slice::<Value>(fragment).is_ok()
+    {
+        return Err("CRASH-06 did not capture one truncated final JSON frame".to_owned());
+    }
+    for line in output
+        .consumed_stdout
+        .split_inclusive(|byte| *byte == b'\n')
+    {
+        let frame: Value = serde_json::from_slice(&line[..line.len().saturating_sub(1)])
+            .map_err(|_| "CRASH-06 complete stdout prefix was not JSON".to_owned())?;
+        if frame["jsonrpc"] != "2.0" || frame.get("id").is_none() {
+            return Err("CRASH-06 complete stdout prefix was not JSON-RPC".to_owned());
+        }
+    }
+    for diagnostic in output.stderr.split(|byte| *byte == b'\n') {
+        if !diagnostic.is_empty()
+            && output
+                .stdout
+                .windows(diagnostic.len())
+                .any(|window| window == diagnostic)
+        {
+            return Err("CRASH-06 copied a diagnostic line to stdout".to_owned());
+        }
+    }
+    let mut execution = AdversarialExecution::default();
+    execution.record_executed(AdversarialCaseId::Crash06)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[test]
+fn crash06_evidence_accepts_only_one_truncated_final_frame() {
+    let complete = br#"{"jsonrpc":"2.0","id":1,"result":{}}
+"#;
+    let fragment = br#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"file_"#;
+    let output = ProcessOutput {
+        stdout: [complete.as_slice(), fragment.as_slice()].concat(),
+        consumed_stdout: complete.to_vec(),
+        stderr: b"2026-08-08T00:00:00Z INFO authenticated Anytype runtime ready\n".to_vec(),
+        exit_category: "signal",
+    };
+    let execution = crash06_mid_frame_evidence(&output).expect("bounded truncated frame evidence");
+    execution
+        .assert_exact(&[AdversarialCaseId::Crash06])
+        .expect("CRASH-06 is the only recorded row");
+
+    let mut complete_tail = output;
+    complete_tail.stdout.push(b'\n');
+    assert!(
+        crash06_mid_frame_evidence(&complete_tail).is_err(),
+        "the interrupted frame must remain the sole final fragment"
+    );
+}
+
+#[cfg(feature = "acceptance-harness")]
 fn contains_forbidden_diagnostic_field(value: &Value) -> bool {
     match value {
         Value::Object(fields) => fields.iter().any(|(name, value)| {
@@ -1877,6 +2042,71 @@ fn contains_forbidden_diagnostic_field(value: &Value) -> bool {
         Value::Array(values) => values.iter().any(contains_forbidden_diagnostic_field),
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
     }
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn run_spawned_read_only_cleanup_cases(
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+) -> Result<AdversarialExecution, String> {
+    const NOT_FOUND_MESSAGE: &str =
+        "The requested Anytype entity was not found. Verify its identifier and space.";
+    let staging_before = policy.staging_snapshot()?;
+    let export_before = policy.export_snapshot()?;
+    let mut execution = AdversarialExecution::default();
+    let mut guard = lock_driver(child);
+    let driver = guard
+        .as_mut()
+        .ok_or_else(|| "registered read-only artifact child disappeared".to_owned())?;
+    for name in ARTIFACT_TOOL_NAMES
+        .into_iter()
+        .filter(|name| *name != "artifact_status")
+    {
+        let response = driver.request("tools/call", json!({"name": name, "arguments": {}}));
+        let object = response
+            .as_object()
+            .ok_or_else(|| "CLEAN-07 response was not an object".to_owned())?;
+        let error = response
+            .get("error")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "CLEAN-07 mutation was routed in read-only mode".to_owned())?;
+        if object.len() != 3
+            || response["jsonrpc"] != "2.0"
+            || error.len() != 2
+            || error.get("code") != Some(&json!(-32601))
+            || error.get("message") != Some(&json!("Method not found"))
+        {
+            return Err("CLEAN-07 did not return exact method-not-found".to_owned());
+        }
+    }
+    execution.record_executed(AdversarialCaseId::Clean07)?;
+
+    let handle = format!("clean08-{}", unique_suffix());
+    execution.record_forbidden_log_needle(handle.as_bytes())?;
+    let response = driver.request(
+        "tools/call",
+        json!({"name": "artifact_status", "arguments": {"handle": handle}}),
+    );
+    let result = response
+        .get("result")
+        .ok_or_else(|| "CLEAN-08 did not return a bounded tool result".to_owned())?;
+    let refusal = ToolErrorEvidence::from_result(result, driver.options.preview)?;
+    if refusal.code() != "not_found"
+        || refusal
+            .normalized_result()
+            .pointer("/structuredContent/message")
+            .and_then(Value::as_str)
+            != Some(NOT_FOUND_MESSAGE)
+    {
+        return Err("CLEAN-08 did not return the uniform not-found result".to_owned());
+    }
+    drop(guard);
+    if policy.staging_snapshot()? != staging_before || policy.export_snapshot()? != export_before {
+        return Err("spawned read-only cleanup cases changed private artifact state".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Clean08)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -2104,6 +2334,51 @@ fn spawn_disposable_artifact_driver(
     options: DriverOptions,
 ) -> TestResult<Arc<Mutex<Option<StdioDriver>>>> {
     spawn_disposable_artifact_driver_configured(ctx, cleanup_record, policy, options, None)
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn spawn_disposable_mid_frame_crash_driver(
+    ctx: &TestContext,
+    cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
+    policy: Arc<ArtifactPolicyFixture>,
+) -> TestResult<(Arc<Mutex<Option<StdioDriver>>>, MidFramePause)> {
+    let child_environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| sentinel_assertion("disposable callback omitted its child environment"))?
+        .clone();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    child_environment.configure(&mut command)?;
+    configure_stdio_command(&mut command, DriverOptions::STANDARD, None);
+    command.env("ANY_MCP_CONFIG", policy.config_path());
+    ctx.spawn_owned_child(move || {
+        let mut retained_policy = Some(policy);
+        let (driver, pause) =
+            StdioDriver::spawn_paused_in_second_frame(command, DriverOptions::STANDARD);
+        let driver = Arc::new(Mutex::new(Some(driver)));
+        let stopped = Arc::clone(&driver);
+        ((driver, pause), move || {
+            *cleanup_record.lock().expect("child cleanup record lock") =
+                ChildCleanupRecord::Attempted;
+            let result = lock_driver(&stopped)
+                .take()
+                .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
+            drop(retained_policy.take());
+            match result {
+                Ok(()) => {
+                    *cleanup_record.lock().expect("child cleanup record lock") =
+                        ChildCleanupRecord::Stopped;
+                    Ok(())
+                }
+                Err(_) => {
+                    *cleanup_record.lock().expect("child cleanup record lock") =
+                        ChildCleanupRecord::Failed;
+                    Err(sentinel_assertion(
+                        "registered crash-frame child did not stop cleanly",
+                    ))
+                }
+            }
+        })
+    })
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -5821,7 +6096,9 @@ struct ChildArtifactGate {
 impl ChildArtifactGate {
     fn create(base: &Path, point: &str, key: &str) -> TestResult<Self> {
         let digest = Sha256::digest(format!("{}:{}:{}", point, key, unique_suffix()).as_bytes());
-        let nonce = digest[..16]
+        // Production requires exactly 64 lowercase hex characters; the full
+        // 32-byte digest encodes to exactly that.
+        let nonce = digest
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
@@ -6189,6 +6466,263 @@ async fn headless_artifact_spawned_transport_matrix_scenario() {
 }
 
 #[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_crash06_mid_frame_scenario() {
+    let cleanup_record = Arc::new(Mutex::new(ChildCleanupRecord::NotRun));
+    let callback_cleanup = Arc::clone(&cleanup_record);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-crash06",
+        move |ctx| {
+            Box::pin(async move {
+                let policy = Arc::new(
+                    ArtifactPolicyFixture::create(&ctx.space_id)
+                        .map_err(|_| sentinel_assertion("create CRASH-06 artifact fixture"))?,
+                );
+                let (child, pause) = spawn_disposable_mid_frame_crash_driver(
+                    ctx.as_ref(),
+                    callback_cleanup,
+                    policy,
+                )?;
+                {
+                    let mut guard = lock_driver(&child);
+                    let driver = guard.as_mut().ok_or_else(|| {
+                        sentinel_assertion("registered CRASH-06 child disappeared")
+                    })?;
+                    driver.initialize();
+                    let request_id = driver.next_id;
+                    driver.next_id = driver.next_id.saturating_add(1);
+                    driver.process.send(json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "tools/list",
+                        "params": {}
+                    }));
+                }
+                pause
+                    .wait_ready(Duration::from_secs(30))
+                    .map_err(|_| sentinel_assertion("CRASH-06 never reached a stdout frame"))?;
+                let driver = lock_driver(&child)
+                    .take()
+                    .ok_or_else(|| sentinel_assertion("registered CRASH-06 child disappeared"))?;
+                let (_, output) = driver
+                    .terminate()
+                    .map_err(|_| sentinel_assertion("terminate CRASH-06 child"))?;
+                let execution = crash06_mid_frame_evidence(&output)
+                    .map_err(|_| sentinel_assertion("validate CRASH-06 stdout capture"))?;
+                execution
+                    .assert_exact(&[AdversarialCaseId::Crash06])
+                    .map_err(|_| sentinel_assertion("CRASH-06 owner inventory diverged"))?;
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe CRASH-06 acceptance");
+    require_completed(outcome, "CRASH-06 acceptance")
+        .expect("prefix-authorized disposable admission");
+    assert_eq!(
+        *cleanup_record.lock().expect("CRASH-06 cleanup record"),
+        ChildCleanupRecord::Stopped
+    );
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_spawned_validator_flood_cases(
+    ctx: &TestContext,
+    cleanup: [Arc<Mutex<ChildCleanupRecord>>; 2],
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<AdversarialExecution> {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    let optional = Arc::new(
+        ArtifactPolicyFixture::create_with_validator_executable(
+            &ctx.space_id,
+            ArtifactPolicyOptions {
+                validators: FixtureValidatorPolicy::Optional,
+                ..ArtifactPolicyOptions::default()
+            },
+            &executable,
+        )
+        .map_err(|_| sentinel_assertion("create optional validator-flood fixture"))?,
+    );
+    record_artifact_fixture_log_needle(&optional, audit_needles)?;
+    let optional_child = spawn_disposable_artifact_driver(
+        ctx,
+        Arc::clone(&cleanup[0]),
+        Arc::clone(&optional),
+        DriverOptions::STANDARD,
+    )?;
+    lock_driver(&optional_child)
+        .as_mut()
+        .ok_or_else(|| sentinel_assertion("optional validator-flood child disappeared"))?
+        .initialize();
+    let staging_before = optional
+        .staging_snapshot()
+        .map_err(|_| sentinel_assertion("capture validator-flood staging state"))?;
+    let export_before = optional
+        .export_snapshot()
+        .map_err(|_| sentinel_assertion("capture validator-flood export state"))?;
+    let mut execution = AdversarialExecution::default();
+    for (case, label) in [
+        (AdversarialCaseId::Flood01, "FLOOD-01"),
+        (AdversarialCaseId::Flood03, "FLOOD-03"),
+    ] {
+        let source = format!("{}-{}.txt", label.to_ascii_lowercase(), unique_suffix());
+        optional
+            .seed_import(&source, label.as_bytes())
+            .map_err(|_| sentinel_assertion("seed validator-flood source"))?;
+        let mut driver = OwnedStdioDriver {
+            driver: Arc::clone(&optional_child),
+        };
+        let imported = driver
+            .call_tool(
+                "file_import",
+                json!({
+                    "space": ctx.space_id,
+                    "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": source}},
+                    "name": format!("{label}.txt"),
+                    "media_type": "text/plain",
+                    "idempotency_key": format!("{label}-{}", unique_suffix()),
+                }),
+            )
+            .await
+            .map_err(|_| sentinel_assertion("optional validator flood import failed"))?;
+        let file_id = imported
+            .get("file_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| sentinel_assertion("validator-flood import omitted file id"))?;
+        ctx.register_file(file_id);
+        let expected = [json!({"id": "mime", "status": "failed"})];
+        if imported
+            .get("validators")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            != Some(expected.as_slice())
+            || serde_json::to_vec(&imported)
+                .map_err(|_| sentinel_assertion("serialize validator-flood result"))?
+                .len()
+                > ARTIFACT_FRAME_CEILING_BYTES as usize
+        {
+            return Err(sentinel_assertion(
+                "validator flood result was not one bounded finding",
+            ));
+        }
+        execution
+            .record_executed(case)
+            .map_err(|_| sentinel_assertion("record validator-flood case"))?;
+    }
+    if optional.staging_snapshot().ok() != Some(staging_before)
+        || optional.export_snapshot().ok() != Some(export_before)
+    {
+        return Err(sentinel_assertion(
+            "validator flood changed artifact private state",
+        ));
+    }
+    finish_registered_artifact_child(&optional_child, None)
+        .map_err(|_| sentinel_assertion("stop optional validator-flood child"))?;
+
+    let required = Arc::new(
+        ArtifactPolicyFixture::create_with_validator_executable(
+            &ctx.space_id,
+            ArtifactPolicyOptions {
+                validators: FixtureValidatorPolicy::Required,
+                ..ArtifactPolicyOptions::default()
+            },
+            &executable,
+        )
+        .map_err(|_| sentinel_assertion("create required validator-flood fixture"))?,
+    );
+    record_artifact_fixture_log_needle(&required, audit_needles)?;
+    required
+        .seed_import("flood02.txt", b"FLOOD-02")
+        .map_err(|_| sentinel_assertion("seed validator-timeout source"))?;
+    let required_child = spawn_disposable_artifact_driver(
+        ctx,
+        Arc::clone(&cleanup[1]),
+        Arc::clone(&required),
+        DriverOptions::STANDARD,
+    )?;
+    lock_driver(&required_child)
+        .as_mut()
+        .ok_or_else(|| sentinel_assertion("required validator-flood child disappeared"))?
+        .initialize();
+    let started = std::time::Instant::now();
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(&required_child),
+    };
+    let refusal = driver
+        .call_tool_error(
+            "file_import",
+            json!({
+                "space": ctx.space_id,
+                "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": "flood02.txt"}},
+                "name": "FLOOD-02.txt",
+                "media_type": "text/plain",
+                "idempotency_key": format!("FLOOD-02-{}", unique_suffix()),
+            }),
+        )
+        .await
+        .map_err(|_| sentinel_assertion("required validator timeout omitted tool error"))?;
+    if refusal.code() != "validation" || started.elapsed() > Duration::from_secs(25) {
+        return Err(sentinel_assertion(
+            "FLOOD-02 did not return bounded validator timeout",
+        ));
+    }
+    finish_registered_artifact_child(&required_child, None)
+        .map_err(|_| sentinel_assertion("stop required validator-flood child"))?;
+    execution
+        .record_executed(AdversarialCaseId::Flood02)
+        .map_err(|_| sentinel_assertion("record validator timeout case"))?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_validator_flood_spawned_scenarios() {
+    let cleanup = std::array::from_fn(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)));
+    let callback_cleanup = cleanup.clone();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-validator-flood",
+        move |ctx| {
+            Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
+                let execution = run_spawned_validator_flood_cases(
+                    ctx.as_ref(),
+                    callback_cleanup,
+                    &callback_audit_needles,
+                )
+                .await?;
+                execution
+                    .assert_exact(&[
+                        AdversarialCaseId::Flood01,
+                        AdversarialCaseId::Flood02,
+                        AdversarialCaseId::Flood03,
+                    ])
+                    .map_err(|_| sentinel_assertion("validator-flood owner inventory diverged"))
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe spawned validator-flood acceptance");
+    require_completed(outcome, "spawned validator-flood acceptance")
+        .expect("prefix-authorized disposable admission");
+    for record in &cleanup {
+        assert_eq!(
+            *record.lock().expect("validator-flood cleanup record"),
+            ChildCleanupRecord::Stopped
+        );
+    }
+    assert_artifact_server_log_clean(&log_baseline, &audit_needles, "validator-flood");
+}
+
+#[cfg(feature = "acceptance-harness")]
 async fn run_spawned_artifact_adversarial_default(
     ctx: &TestContext,
     cleanup_record: Arc<Mutex<ChildCleanupRecord>>,
@@ -6229,6 +6763,7 @@ async fn run_spawned_artifact_adversarial_default(
                 execution.merge(
                     run_artifact_dynamic_filesystem_stdio_sentinels(&mut driver, &run).await?,
                 )?;
+                run_artifact_diagnostic_flood_burst(&mut driver).await?;
             }
             Ok::<_, String>(execution)
         })
@@ -6257,6 +6792,10 @@ async fn run_spawned_artifact_adversarial_default(
     })?;
     if control == ArtifactControlPlane::SpawnedStableStdio {
         execution
+            .record_executed(AdversarialCaseId::Flood07)
+            .map_err(|_| sentinel_assertion("record stable FLOOD-07 evidence"))?;
+        execution.record_quota_not_applicable();
+        execution
             .merge(
                 run_spawned_artifact_gated_race(
                     ctx,
@@ -6284,6 +6823,7 @@ async fn run_spawned_artifact_adversarial_default(
     let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
     if control == ArtifactControlPlane::SpawnedStableStdio {
         expected.extend(ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS);
+        expected.push(AdversarialCaseId::Flood07);
     }
     execution
         .assert_exact(&expected)
@@ -6292,6 +6832,32 @@ async fn run_spawned_artifact_adversarial_default(
         record_artifact_log_needle(audit_needles, needle)?;
     }
     Ok(execution)
+}
+
+/// FLOOD-07: a rapid burst of failing calls must produce byte-uniform bounded
+/// refusals that never echo the offered handle. The caller separately asserts
+/// the aggregate child diagnostic ceiling and the redaction audit after
+/// shutdown, so the burst plus those checks form the complete case evidence.
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_diagnostic_flood_burst(driver: &mut OwnedStdioDriver) -> Result<(), String> {
+    let mut expected: Option<Value> = None;
+    for index in 0..48_u32 {
+        let error = driver
+            .call_tool_error(
+                "artifact_release",
+                json!({"handle": format!("flood07-burst-{index}-{}", unique_suffix())}),
+            )
+            .await?;
+        if error.code() != "not_found" {
+            return Err("FLOOD-07 burst produced a non-uniform error class".to_owned());
+        }
+        match &expected {
+            None => expected = Some(error.normalized_result().clone()),
+            Some(first) if first == error.normalized_result() => {}
+            Some(_) => return Err("FLOOD-07 burst responses diverged".to_owned()),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -6622,7 +7188,11 @@ async fn headless_artifact_adversarial_spawned_stdio_scenarios() {
                     let mut expected = ADVERSARIAL_STDIO_SENTINEL_IDS.to_vec();
                     if control == ArtifactControlPlane::SpawnedStableStdio {
                         expected.extend(ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS);
-                        expected.extend([AdversarialCaseId::Sym11, AdversarialCaseId::Sym12]);
+                        expected.extend([
+                            AdversarialCaseId::Sym11,
+                            AdversarialCaseId::Sym12,
+                            AdversarialCaseId::Flood07,
+                        ]);
                     }
                     expected.push(AdversarialCaseId::Alias07);
                     execution
@@ -6727,6 +7297,14 @@ async fn run_spawned_artifact_policy_scenario(
         };
         Box::pin(run_artifact_policy_scenario(&mut driver, &run)).await
     };
+
+    if scenario == ArtifactPolicyScenario::ReadOnly {
+        run_spawned_read_only_cleanup_cases(&child, &policy)
+            .and_then(|execution| {
+                execution.assert_exact(&[AdversarialCaseId::Clean07, AdversarialCaseId::Clean08])
+            })
+            .map_err(|_| sentinel_assertion("spawned read-only cleanup cases failed"))?;
+    }
 
     // Stop this scenario's child before reporting, so a failure never leaves a
     // production process holding the fixture policy.
@@ -6984,11 +7562,12 @@ async fn run_artifact_quota_acceptance(
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
     audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
-) -> Result<(), String> {
+) -> Result<AdversarialExecution, String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
     };
     let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let mut execution = AdversarialExecution::default();
     let first = allocate_stage_upload(
         &mut driver,
         &ctx.space_id,
@@ -7011,6 +7590,25 @@ async fn run_artifact_quota_acceptance(
     if reserved.temporary_files != 2 || reserved.unexpected_entries != 0 {
         return Err("quota reservations did not produce the exact staging snapshot".to_owned());
     }
+    let maximum_status = lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered quota child disappeared".to_owned())?
+        .measured_tool_frame("artifact_status", json!({}))?;
+    if maximum_status.frame_bytes > ARTIFACT_FRAME_CEILING_BYTES
+        || maximum_status
+            .structured_content
+            .get("staging_available_entries")
+            .and_then(Value::as_u64)
+            != Some(0)
+        || maximum_status
+            .structured_content
+            .get("staging_available_bytes")
+            .and_then(Value::as_u64)
+            != Some(224 * 1024)
+    {
+        return Err("FLOOD-04 maximum-record status was not a bounded aggregate".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Flood04)?;
     let entry_refusal = driver
         .call_tool_error(
             "artifact_stage_upload",
@@ -7026,6 +7624,13 @@ async fn run_artifact_quota_acceptance(
     }
 
     release_stage_upload(&mut driver, &first).await?;
+    let released_again = driver
+        .call_tool_error("artifact_release", json!({"handle": first.handle()}))
+        .await?;
+    if released_again.code() != "not_found" || policy.staging_snapshot()?.temporary_files != 1 {
+        return Err("CLEAN-03 did not remove and invalidate the released record".to_owned());
+    }
+    execution.record_executed(AdversarialCaseId::Clean03)?;
     let third = allocate_stage_upload(
         &mut driver,
         &ctx.space_id,
@@ -7053,7 +7658,25 @@ async fn run_artifact_quota_acceptance(
     if !policy.staging_snapshot()?.is_reaped() {
         return Err("quota scenario did not release its exact staging state".to_owned());
     }
-    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)
+    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
+fn well_formed_unknown_stage_handle() -> String {
+    let record = [0x55_u8; 16];
+    let secret = [0x77_u8; 32];
+    let mut checksum = Sha256::new();
+    checksum.update(b"any-mcp/artifact-handle/v1");
+    checksum.update(record);
+    checksum.update(secret);
+    let mut bytes = Vec::with_capacity(57);
+    bytes.push(1);
+    bytes.extend_from_slice(&record);
+    bytes.extend_from_slice(&secret);
+    bytes.extend(checksum.finalize().iter().copied().take(8));
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -7062,11 +7685,13 @@ async fn run_artifact_ttl_acceptance(
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
     audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
-) -> Result<(), String> {
+) -> Result<AdversarialExecution, String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
     };
     let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let quota_before = driver.call_tool("artifact_status", json!({})).await?;
+    let mut execution = AdversarialExecution::default();
     let allocation = allocate_stage_upload(
         &mut driver,
         &ctx.space_id,
@@ -7091,7 +7716,81 @@ async fn run_artifact_ttl_acceptance(
     if !reaped.is_reaped() {
         return Err("TTL cleanup did not produce the exact reaped snapshot".to_owned());
     }
-    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)
+    let expired = driver
+        .call_tool_error("artifact_release", json!({"handle": allocation.handle()}))
+        .await?;
+    if expired.code() != "not_found"
+        || driver.call_tool("artifact_status", json!({})).await? != quota_before
+    {
+        return Err("CLEAN-04 did not invalidate the expired handle and restore quota".to_owned());
+    }
+    let unknown_handle = well_formed_unknown_stage_handle();
+    record_artifact_stage_log_needle(audit_needles, unknown_handle.as_bytes())?;
+    let unknown = driver
+        .call_tool_error("artifact_release", json!({"handle": unknown_handle}))
+        .await?;
+    let uniform = allocate_stage_upload(
+        &mut driver,
+        &ctx.space_id,
+        1,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    record_artifact_stage_log_needle(audit_needles, uniform.handle().as_bytes())?;
+    let wrong_space = driver
+        .call_tool_error(
+            "file_import",
+            json!({
+                "space": "any-mcp-acceptance-uniform-other-space",
+                "source": {"staged_handle": uniform.handle()},
+                "name": "hand07.bin",
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+                "idempotency_key": format!("HAND-07-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    if unknown.normalized_result() != expired.normalized_result()
+        || wrong_space.normalized_result() != expired.normalized_result()
+    {
+        return Err("HAND-16 MCP not-found payloads were distinguishable".to_owned());
+    }
+    let client = reqwest::Client::new();
+    let expired_http = client
+        .head(allocation.url())
+        .bearer_auth(allocation.handle())
+        .send()
+        .await
+        .map_err(|_| "HAND-16 expired HTTP request failed".to_owned())?;
+    let wrong_route = uniform
+        .url()
+        .replace(uniform.record(), "00000000000000000000000000000000");
+    let wrong_route_http = client
+        .head(wrong_route)
+        .bearer_auth(uniform.handle())
+        .send()
+        .await
+        .map_err(|_| "HAND-16 wrong-route HTTP request failed".to_owned())?;
+    if expired_http.status() != reqwest::StatusCode::NOT_FOUND
+        || wrong_route_http.status() != expired_http.status()
+        || wrong_route_http
+            .bytes()
+            .await
+            .map_err(|_| "read HAND-16 wrong-route body".to_owned())?
+            != expired_http
+                .bytes()
+                .await
+                .map_err(|_| "read HAND-16 expired body".to_owned())?
+    {
+        return Err("HAND-16 HTTP not-found payloads were distinguishable".to_owned());
+    }
+    release_stage_upload(&mut driver, &uniform).await?;
+    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
+    execution.record_executed(AdversarialCaseId::Hand03)?;
+    execution.record_executed(AdversarialCaseId::Hand16)?;
+    execution.record_executed(AdversarialCaseId::Clean04)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -7258,6 +7957,856 @@ async fn run_artifact_cancellation_acceptance(
 }
 
 #[cfg(feature = "acceptance-harness")]
+async fn cancellation_object_ids(
+    ctx: &TestContext,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    ctx.client
+        .objects(&ctx.space_id)
+        .limit(200)
+        .list()
+        .await
+        .map_err(|_| "capture exact cancellation object inventory".to_owned())?
+        .collect_all()
+        .await
+        .map_err(|_| "capture exact cancellation object inventory".to_owned())
+        .map(|objects| objects.into_iter().map(|object| object.id).collect())
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn seed_cancellation_file(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+    label: &str,
+) -> Result<String, String> {
+    let source = format!("{label}-source.bin");
+    policy.seed_import(&source, ARTIFACT_FILE_PAYLOAD)?;
+    let imported = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    }
+    .call_tool(
+        "file_import",
+        json!({
+            "space": ctx.space_id,
+            "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": source}},
+            "name": format!("{label}.bin"),
+            "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+            "idempotency_key": format!("{label}-seed-{}", unique_suffix()),
+        }),
+    )
+    .await?;
+    let file_id = imported
+        .get("file_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "cancellation file seed omitted file_id".to_owned())?
+        .to_owned();
+    ctx.register_file(&file_id);
+    Ok(file_id)
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_file_export_cancellation_case(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+    gate: &ChildArtifactGate,
+    case: AdversarialCaseId,
+) -> Result<(), String> {
+    let label = case.as_str().to_ascii_lowercase();
+    let file_id = seed_cancellation_file(ctx, child, policy, &label).await?;
+    let destination = format!("{label}-destination.bin");
+    let before = policy.export_snapshot()?;
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    };
+    let quota_before = driver.call_tool("artifact_status", json!({})).await?;
+    let arguments = json!({
+        "space": ctx.space_id,
+        "file_id": file_id,
+        "destination": {"local": {"root": ArtifactPolicyFixture::EXPORT_ROOT, "path": destination}},
+        "idempotency_key": gate.key(),
+    });
+    lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered export-cancellation child disappeared".to_owned())?
+        .cancel_tool_call_exact("file_export", arguments, gate)?;
+    let path = policy.export_root().join(&destination);
+    let after = policy.export_snapshot()?;
+    if driver.call_tool("artifact_status", json!({})).await? != quota_before {
+        return Err("cancelled file export changed staging quota".to_owned());
+    }
+    match case {
+        AdversarialCaseId::Part08 => {
+            if path.exists() || after != before {
+                return Err("PART-08 published or retained a cancelled export".to_owned());
+            }
+        }
+        AdversarialCaseId::Part09 => {
+            if path.exists()
+                && std::fs::read(&path)
+                    .map(|bytes| bytes != ARTIFACT_FILE_PAYLOAD)
+                    .unwrap_or(true)
+            {
+                return Err("PART-09 published a partial or changed destination".to_owned());
+            }
+            let expected_ordinary = before.ordinary_files + u64::from(path.exists());
+            if after.ordinary_files != expected_ordinary
+                || after.temporary_files != before.temporary_files
+                || after.unexpected_entries != before.unexpected_entries
+            {
+                return Err("PART-09 left an invalid export-root inventory".to_owned());
+            }
+        }
+        _ => return Err("file-export cancellation received a non-export case".to_owned()),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_file_import_post_dispatch_cancellation_case(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+    gate: &ChildArtifactGate,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> Result<(), String> {
+    let before = cancellation_object_ids(ctx).await?;
+    let expected = artifact_sha256(ARTIFACT_FILE_PAYLOAD);
+    let mut driver = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    };
+    let allocation = allocate_stage_upload(
+        &mut driver,
+        &ctx.space_id,
+        ARTIFACT_FILE_PAYLOAD.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&expected),
+    )
+    .await?;
+    record_artifact_stage_log_needle(audit_needles, allocation.handle().as_bytes())?;
+    upload_stage_bytes(&allocation, ARTIFACT_FILE_PAYLOAD, ARTIFACT_FILE_MEDIA_TYPE).await?;
+    let arguments = json!({
+        "space": ctx.space_id,
+        "source": {"staged_handle": allocation.handle()},
+        "name": "part10.bin",
+        "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+        "idempotency_key": gate.key(),
+    });
+    lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered import-cancellation child disappeared".to_owned())?
+        .cancel_tool_call_exact("file_import", arguments.clone(), gate)?;
+    let after_cancel = cancellation_object_ids(ctx).await?;
+    if after_cancel.len() > before.len().saturating_add(1) || !before.is_subset(&after_cancel) {
+        return Err("PART-10 cancellation created more than one object".to_owned());
+    }
+    let imported = driver.call_tool("file_import", arguments).await?;
+    let file_id = imported
+        .get("file_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "PART-10 replay omitted file_id".to_owned())?;
+    ctx.register_file(file_id);
+    let after_retry = cancellation_object_ids(ctx).await?;
+    if after_retry.len() != before.len().saturating_add(1)
+        || !before.is_subset(&after_retry)
+        || !after_retry.contains(file_id)
+    {
+        return Err("PART-10 retry dispatched a duplicate or lost its candidate".to_owned());
+    }
+    release_stage_upload(&mut driver, &allocation).await?;
+    if !policy.staging_snapshot()?.is_reaped() {
+        return Err("PART-10 left staged private state".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_document_post_dispatch_cancellation_case(
+    ctx: &TestContext,
+    child: &Arc<Mutex<Option<StdioDriver>>>,
+    policy: &ArtifactPolicyFixture,
+    gate: &ChildArtifactGate,
+) -> Result<(), String> {
+    let object = ctx
+        .client
+        .new_object(&ctx.space_id, "page")
+        .name(format!("PART-12-{}", unique_suffix()))
+        .body("# PART-12 old\n")
+        .create()
+        .await
+        .map_err(|_| "create PART-12 document".to_owned())?;
+    ctx.register_object(&object.id);
+    let old = ctx
+        .client
+        .object(&ctx.space_id, &object.id)
+        .get()
+        .await
+        .map_err(|_| "read PART-12 old document".to_owned())?
+        .markdown
+        .ok_or_else(|| "PART-12 old document omitted markdown".to_owned())?;
+    let old_sha256 = artifact_sha256(old.as_bytes());
+    let source = format!("part12-{}.md", unique_suffix());
+    policy.seed_import(&source, b"# PART-12 new\n")?;
+    let arguments = json!({
+        "space": ctx.space_id,
+        "object_id": object.id,
+        "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": source}},
+        "source_format": "markdown",
+        "expected_body_sha256": old_sha256,
+        "idempotency_key": gate.key(),
+    });
+    lock_driver(child)
+        .as_mut()
+        .ok_or_else(|| "registered document-cancellation child disappeared".to_owned())?
+        .cancel_tool_call_exact("document_import_update", arguments.clone(), gate)?;
+    let after_cancel = ctx
+        .client
+        .object(&ctx.space_id, &object.id)
+        .get()
+        .await
+        .map_err(|_| "read PART-12 cancelled document".to_owned())?
+        .markdown
+        .ok_or_else(|| "PART-12 cancelled document omitted markdown".to_owned())?;
+    if after_cancel.contains("PART-12 old") == after_cancel.contains("PART-12 new") {
+        return Err("PART-12 produced a spliced or unrecognized body".to_owned());
+    }
+    let updated = OwnedStdioDriver {
+        driver: Arc::clone(child),
+    }
+    .call_tool("document_import_update", arguments)
+    .await?;
+    let new_sha256 = updated
+        .get("canonical_sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "PART-12 replay omitted canonical hash".to_owned())?;
+    if artifact_sha256(after_cancel.as_bytes()) != old_sha256
+        && artifact_sha256(after_cancel.as_bytes()) != new_sha256
+    {
+        return Err("PART-12 cancellation body was neither old nor new".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+async fn run_exact_cancellation_cases(
+    ctx: &TestContext,
+    cleanup: [Arc<Mutex<ChildCleanupRecord>>; 4],
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<AdversarialExecution> {
+    let specs = [
+        (AdversarialCaseId::Part08, "export-prepublication"),
+        (AdversarialCaseId::Part09, "export-atomic-publication"),
+        (AdversarialCaseId::Part10, "import-post-dispatch"),
+        (AdversarialCaseId::Part12, "document-post-dispatch"),
+    ];
+    let mut execution = AdversarialExecution::default();
+    for ((case, point), cleanup_record) in specs.into_iter().zip(cleanup) {
+        let policy = Arc::new(
+            ArtifactPolicyFixture::create_with(
+                &ctx.space_id,
+                ArtifactPolicyOptions {
+                    limits: support::live_scenario::ArtifactLimitProfile::PayloadCeiling,
+                    ..ArtifactPolicyOptions::default()
+                },
+            )
+            .map_err(|_| sentinel_assertion("create exact cancellation fixture"))?,
+        );
+        record_artifact_fixture_log_needle(&policy, audit_needles)?;
+        let key = format!("{}-{}", case.as_str(), unique_suffix());
+        let (child, gate) = spawn_disposable_gated_artifact_driver(
+            ctx,
+            cleanup_record,
+            Arc::clone(&policy),
+            DriverOptions::STANDARD,
+            point,
+            key,
+        )?;
+        lock_driver(&child)
+            .as_mut()
+            .ok_or_else(|| sentinel_assertion("exact cancellation child disappeared"))?
+            .initialize();
+        let result = match case {
+            AdversarialCaseId::Part08 | AdversarialCaseId::Part09 => {
+                run_file_export_cancellation_case(ctx, &child, &policy, &gate, case).await
+            }
+            AdversarialCaseId::Part10 => {
+                run_file_import_post_dispatch_cancellation_case(
+                    ctx,
+                    &child,
+                    &policy,
+                    &gate,
+                    audit_needles,
+                )
+                .await
+            }
+            AdversarialCaseId::Part12 => {
+                run_document_post_dispatch_cancellation_case(ctx, &child, &policy, &gate).await
+            }
+            _ => Err("exact cancellation inventory contained an unrelated case".to_owned()),
+        };
+        result.map_err(|_| sentinel_assertion("exact cancellation case failed"))?;
+        finish_registered_artifact_child(&child, None)
+            .map_err(|_| sentinel_assertion("stop exact cancellation child"))?;
+        execution
+            .record_executed(case)
+            .map_err(|_| sentinel_assertion("record exact cancellation case"))?;
+    }
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_exact_cancellation_spawned_scenarios() {
+    let cleanup = std::array::from_fn(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)));
+    let callback_cleanup = cleanup.clone();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-exact-cancellation",
+        move |ctx| {
+            Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
+                let execution = run_exact_cancellation_cases(
+                    ctx.as_ref(),
+                    callback_cleanup,
+                    &callback_audit_needles,
+                )
+                .await?;
+                execution
+                    .assert_exact(&[
+                        AdversarialCaseId::Part08,
+                        AdversarialCaseId::Part09,
+                        AdversarialCaseId::Part10,
+                        AdversarialCaseId::Part12,
+                    ])
+                    .map_err(|_| sentinel_assertion("exact cancellation inventory diverged"))
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe exact cancellation acceptance");
+    require_completed(outcome, "exact cancellation acceptance")
+        .expect("prefix-authorized disposable admission");
+    for record in &cleanup {
+        assert_eq!(
+            *record.lock().expect("exact cancellation cleanup record"),
+            ChildCleanupRecord::Stopped
+        );
+    }
+    assert_artifact_server_log_clean(&log_baseline, &audit_needles, "exact-cancellation");
+}
+
+/// Kills production children mid-operation and proves post-crash recovery:
+/// HAND-04 and CRASH-01/02/03/05/07 from the failure-robustness matrix.
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_crash_restart_cases(
+    ctx: &TestContext,
+    cleanup: [Arc<Mutex<ChildCleanupRecord>>; 6],
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<AdversarialExecution> {
+    let [
+        first,
+        restarted,
+        import_gated,
+        import_restarted,
+        export_gated,
+        export_restarted,
+    ] = cleanup;
+    let mut execution = AdversarialExecution::default();
+    run_crash_generation_cases(ctx, first, restarted, audit_needles, &mut execution)
+        .await
+        .map_err(|_| sentinel_assertion("crash generation cases failed"))?;
+    run_crash_import_dispatch_case(
+        ctx,
+        import_gated,
+        import_restarted,
+        audit_needles,
+        &mut execution,
+    )
+    .await
+    .map_err(|_| sentinel_assertion("crash import-dispatch case failed"))?;
+    run_crash_export_commit_case(
+        ctx,
+        export_gated,
+        export_restarted,
+        audit_needles,
+        &mut execution,
+    )
+    .await
+    .map_err(|_| sentinel_assertion("crash export-commit case failed"))?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
+/// CRASH-01 (kill mid-upload, restart, reuse every pre-kill handle), HAND-04
+/// (previous-generation handle payload uniformity), CRASH-05 (second process
+/// on the same staging root), and CRASH-07 (full happy-path import after
+/// recovery) against one shared policy fixture.
+#[cfg(feature = "acceptance-harness")]
+async fn run_crash_generation_cases(
+    ctx: &TestContext,
+    first_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    restarted_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    execution: &mut AdversarialExecution,
+) -> Result<(), String> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create(&ctx.space_id)
+            .map_err(|_| "create crash generation fixture".to_owned())?,
+    );
+    record_artifact_fixture_log_needle(&policy, audit_needles)
+        .map_err(|_| "record crash fixture needle".to_owned())?;
+    let first_child = spawn_disposable_artifact_driver(
+        ctx,
+        first_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+    )
+    .map_err(|_| "spawn crash generation child".to_owned())?;
+    lock_driver(&first_child)
+        .as_mut()
+        .ok_or_else(|| "crash generation child disappeared".to_owned())?
+        .initialize();
+    let mut first_driver = OwnedStdioDriver {
+        driver: Arc::clone(&first_child),
+    };
+
+    // CRASH-01 setup: one record paused mid-upload plus one untouched
+    // reservation, so the kill invalidates handles in different states.
+    let payload = vec![0x6d; 2 * ACCEPTANCE_TRANSFER_CHUNK_BYTES];
+    let mid_upload = allocate_stage_upload(
+        &mut first_driver,
+        &ctx.space_id,
+        payload.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    record_artifact_stage_log_needle(audit_needles, mid_upload.handle().as_bytes())
+        .map_err(|_| "record crash mid-upload needle".to_owned())?;
+    let first_chunk = &payload[..ACCEPTANCE_TRANSFER_CHUNK_BYTES];
+    let partial = reqwest::Client::new()
+        .put(mid_upload.url())
+        .bearer_auth(mid_upload.handle())
+        .header("content-type", ARTIFACT_FILE_MEDIA_TYPE)
+        .header(
+            "content-range",
+            format!(
+                "bytes 0-{}/{}",
+                ACCEPTANCE_TRANSFER_CHUNK_BYTES - 1,
+                payload.len()
+            ),
+        )
+        .body(first_chunk.to_vec())
+        .send()
+        .await
+        .map_err(|_| "send crash mid-upload chunk".to_owned())?;
+    if partial.status() != reqwest::StatusCode::NO_CONTENT {
+        return Err("crash mid-upload chunk was not committed".to_owned());
+    }
+    let untouched = allocate_stage_upload(
+        &mut first_driver,
+        &ctx.space_id,
+        1,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    record_artifact_stage_log_needle(audit_needles, untouched.handle().as_bytes())
+        .map_err(|_| "record crash untouched needle".to_owned())?;
+
+    // CRASH-05: a second production process on the same private staging root
+    // must be rejected at startup while the first keeps serving.
+    run_second_staging_owner_rejection(ctx, &policy, audit_needles).await?;
+    if stage_head_status(&mid_upload).await? != reqwest::StatusCode::OK {
+        return Err("first owner stopped serving after the rejected second owner".to_owned());
+    }
+    execution
+        .record_executed(AdversarialCaseId::Crash05)
+        .map_err(|_| "record CRASH-05".to_owned())?;
+
+    // CRASH-01: kill without cleanup and restart on the same staging root.
+    let _terminated = terminate_registered_artifact_child(&first_child)?;
+    let second_child = spawn_disposable_artifact_driver(
+        ctx,
+        restarted_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+    )
+    .map_err(|_| "spawn restarted crash child".to_owned())?;
+    lock_driver(&second_child)
+        .as_mut()
+        .ok_or_else(|| "restarted crash child disappeared".to_owned())?
+        .initialize();
+    let mut second_driver = OwnedStdioDriver {
+        driver: Arc::clone(&second_child),
+    };
+    let unknown = second_driver
+        .call_tool_error(
+            "artifact_release",
+            json!({"handle": format!("hand04-{}", unique_suffix())}),
+        )
+        .await?;
+    if unknown.code() != "not_found" {
+        return Err("fresh unknown handle did not return not_found".to_owned());
+    }
+    for stale in [&mid_upload, &untouched] {
+        if stage_head_status(stale).await? != reqwest::StatusCode::NOT_FOUND {
+            return Err("pre-kill staging handle survived the restart".to_owned());
+        }
+        let released = second_driver
+            .call_tool_error("artifact_release", json!({"handle": stale.handle()}))
+            .await?;
+        // HAND-04: a previous-generation handle is byte-uniform with an
+        // unknown handle, so restart leaks no generation oracle.
+        if released.code() != "not_found"
+            || released.normalized_result() != unknown.normalized_result()
+        {
+            return Err("previous-generation handle was distinguishable".to_owned());
+        }
+    }
+    if !policy
+        .staging_snapshot()
+        .map_err(|_| "inspect crash staging root".to_owned())?
+        .is_reaped()
+    {
+        return Err("restart did not reap the killed generation's staging state".to_owned());
+    }
+    execution
+        .record_executed(AdversarialCaseId::Crash01)
+        .map_err(|_| "record CRASH-01".to_owned())?;
+    execution
+        .record_executed(AdversarialCaseId::Hand04)
+        .map_err(|_| "record HAND-04".to_owned())?;
+
+    // CRASH-07: recovery is complete, not degraded - a full happy-path
+    // import through the restarted child succeeds.
+    let source = format!("crash07-{}.bin", unique_suffix());
+    policy
+        .seed_import(&source, ARTIFACT_FILE_PAYLOAD)
+        .map_err(|_| "seed CRASH-07 import".to_owned())?;
+    let imported = second_driver
+        .call_tool(
+            "file_import",
+            json!({
+                "space": ctx.space_id,
+                "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": source}},
+                "name": format!("crash07-{}.bin", unique_suffix()),
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+                "idempotency_key": format!("crash07-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    let file_id = imported
+        .get("file_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "CRASH-07 import omitted file_id".to_owned())?;
+    ctx.register_file(file_id);
+    execution
+        .record_executed(AdversarialCaseId::Crash07)
+        .map_err(|_| "record CRASH-07".to_owned())?;
+    finish_registered_artifact_child(&second_child, None)?;
+    Ok(())
+}
+
+/// CRASH-05 helper: spawns a second production child on an already-owned
+/// staging root and requires the exact bounded startup rejection.
+#[cfg(feature = "acceptance-harness")]
+async fn run_second_staging_owner_rejection(
+    ctx: &TestContext,
+    policy: &Arc<ArtifactPolicyFixture>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> Result<(), String> {
+    let fixture_needle = artifact_fixture_log_needle(policy)
+        .map_err(|_| "derive crash second-owner needle".to_owned())?;
+    record_artifact_log_needle(audit_needles, &fixture_needle)
+        .map_err(|_| "record crash second-owner needle".to_owned())?;
+    let credential_needles = disposable_child_credential_needles(ctx)
+        .map_err(|_| "derive crash second-owner credentials".to_owned())?;
+    let environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| "crash second owner omitted child environment".to_owned())?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    environment
+        .configure(&mut command)
+        .map_err(|_| "configure crash second owner".to_owned())?;
+    configure_stdio_command(&mut command, DriverOptions::STANDARD, Some("artifacts"));
+    command.env("ANY_MCP_CONFIG", policy.config_path());
+    let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(10));
+    let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
+        .err()
+        .ok_or_else(|| "second staging owner served a frame".to_owned())?;
+    let panic_text = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic");
+    if panic_text != "bounded protocol process failed: child_eof" {
+        return Err("second staging owner did not fail with bounded EOF".to_owned());
+    }
+    let failure = process
+        .take_failure()
+        .ok_or_else(|| "second staging owner omitted process evidence".to_owned())?;
+    if failure.category != "child_eof"
+        || failure.output.exit_category != "exit_code"
+        || !failure.output.stdout.is_empty()
+    {
+        return Err("second staging owner violated the startup output contract".to_owned());
+    }
+    let stderr = std::str::from_utf8(&failure.output.stderr)
+        .map_err(|_| "second staging owner stderr was not UTF-8".to_owned())?;
+    let lines = stderr
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let category = match lines.as_slice() {
+        [line]
+            if line
+                .strip_suffix(
+                    "any-mcp startup or service failure \
+                     reason=unable to initialize configured artifact staging",
+                )
+                .is_some_and(|prefix| {
+                    prefix
+                        .split_ascii_whitespace()
+                        .any(|field| field == "ERROR")
+                }) =>
+        {
+            "unable to initialize configured artifact staging"
+        }
+        _ => "unexpected startup category",
+    };
+    ExpectedOutcome::StartupRejected {
+        category: "unable to initialize configured artifact staging",
+    }
+    .assert_matches(ObservedOutcome::StartupRejected { category })
+    .map_err(|_| "second staging owner startup category diverged".to_owned())?;
+    if contains_bytes(&failure.output.stderr, &fixture_needle)
+        || credential_needles
+            .iter()
+            .any(|needle| contains_bytes(&failure.output.stderr, needle))
+    {
+        return Err("second staging owner diagnostics exposed private state".to_owned());
+    }
+    Ok(())
+}
+
+/// CRASH-02: kill during the Anytype import dispatch, restart, and prove the
+/// space holds at most one candidate object.
+#[cfg(feature = "acceptance-harness")]
+async fn run_crash_import_dispatch_case(
+    ctx: &TestContext,
+    gated_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    restarted_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    execution: &mut AdversarialExecution,
+) -> Result<(), String> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create(&ctx.space_id)
+            .map_err(|_| "create crash import fixture".to_owned())?,
+    );
+    record_artifact_fixture_log_needle(&policy, audit_needles)
+        .map_err(|_| "record crash import needle".to_owned())?;
+    let before = cancellation_object_ids(ctx).await?;
+    let key = format!("crash02-{}", unique_suffix());
+    let (child, gate) = spawn_disposable_gated_artifact_driver(
+        ctx,
+        gated_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+        "import-post-dispatch",
+        key.clone(),
+    )
+    .map_err(|_| "spawn crash import child".to_owned())?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| "crash import child disappeared".to_owned())?
+        .initialize();
+    let source = format!("crash02-{}.bin", unique_suffix());
+    policy
+        .seed_import(&source, ARTIFACT_FILE_PAYLOAD)
+        .map_err(|_| "seed CRASH-02 import".to_owned())?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| "crash import child disappeared".to_owned())?
+        .send_tool_call_only(
+            "file_import",
+            json!({
+                "space": ctx.space_id,
+                "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": source}},
+                "name": format!("crash02-{}.bin", unique_suffix()),
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+                "idempotency_key": key,
+            }),
+        );
+    gate.wait_ready()
+        .map_err(|_| "CRASH-02 dispatch never reached its gate".to_owned())?;
+    let _terminated = terminate_registered_artifact_child(&child)?;
+    let restarted = spawn_disposable_artifact_driver(
+        ctx,
+        restarted_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+    )
+    .map_err(|_| "spawn restarted import child".to_owned())?;
+    lock_driver(&restarted)
+        .as_mut()
+        .ok_or_else(|| "restarted import child disappeared".to_owned())?
+        .initialize();
+    let after = cancellation_object_ids(ctx).await?;
+    if !before.is_subset(&after) || after.len() > before.len().saturating_add(1) {
+        return Err("CRASH-02 dispatched more than one candidate object".to_owned());
+    }
+    for file_id in after.difference(&before) {
+        ctx.register_file(file_id);
+    }
+    if !policy
+        .staging_snapshot()
+        .map_err(|_| "inspect crash import staging root".to_owned())?
+        .is_reaped()
+    {
+        return Err("CRASH-02 restart left private staging state".to_owned());
+    }
+    execution
+        .record_executed(AdversarialCaseId::Crash02)
+        .map_err(|_| "record CRASH-02".to_owned())?;
+    finish_registered_artifact_child(&restarted, None)?;
+    Ok(())
+}
+
+/// CRASH-03: kill during the atomic export commit, restart, and prove the
+/// destination is absent or complete and hash-correct - never partial.
+#[cfg(feature = "acceptance-harness")]
+async fn run_crash_export_commit_case(
+    ctx: &TestContext,
+    gated_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    restarted_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    execution: &mut AdversarialExecution,
+) -> Result<(), String> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create(&ctx.space_id)
+            .map_err(|_| "create crash export fixture".to_owned())?,
+    );
+    record_artifact_fixture_log_needle(&policy, audit_needles)
+        .map_err(|_| "record crash export needle".to_owned())?;
+    let key = format!("crash03-{}", unique_suffix());
+    let (child, gate) = spawn_disposable_gated_artifact_driver(
+        ctx,
+        gated_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+        "export-atomic-publication",
+        key.clone(),
+    )
+    .map_err(|_| "spawn crash export child".to_owned())?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| "crash export child disappeared".to_owned())?
+        .initialize();
+    let file_id = seed_cancellation_file(ctx, &child, &policy, "crash03").await?;
+    let destination = format!("crash03-{}.bin", unique_suffix());
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| "crash export child disappeared".to_owned())?
+        .send_tool_call_only(
+            "file_export",
+            json!({
+                "space": ctx.space_id,
+                "file_id": file_id,
+                "destination": {
+                    "local": {"root": ArtifactPolicyFixture::EXPORT_ROOT, "path": destination}
+                },
+                "idempotency_key": key,
+            }),
+        );
+    gate.wait_ready()
+        .map_err(|_| "CRASH-03 commit never reached its gate".to_owned())?;
+    let _terminated = terminate_registered_artifact_child(&child)?;
+    let restarted = spawn_disposable_artifact_driver(
+        ctx,
+        restarted_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+    )
+    .map_err(|_| "spawn restarted export child".to_owned())?;
+    lock_driver(&restarted)
+        .as_mut()
+        .ok_or_else(|| "restarted export child disappeared".to_owned())?
+        .initialize();
+    let path = policy.export_root().join(&destination);
+    if path.exists() {
+        let published = std::fs::read(&path).map_err(|_| "read CRASH-03 destination".to_owned())?;
+        if published != ARTIFACT_FILE_PAYLOAD {
+            return Err("CRASH-03 destination was partial or changed".to_owned());
+        }
+    }
+    if !policy
+        .staging_snapshot()
+        .map_err(|_| "inspect crash export staging root".to_owned())?
+        .is_reaped()
+    {
+        return Err("CRASH-03 restart left private staging state".to_owned());
+    }
+    execution
+        .record_executed(AdversarialCaseId::Crash03)
+        .map_err(|_| "record CRASH-03".to_owned())?;
+    finish_registered_artifact_child(&restarted, None)?;
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_crash_restart_scenarios() {
+    let cleanup = std::array::from_fn(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)));
+    let callback_cleanup = cleanup.clone();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-crash-restart",
+        move |ctx| {
+            Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
+                let execution = run_artifact_crash_restart_cases(
+                    ctx.as_ref(),
+                    callback_cleanup,
+                    &callback_audit_needles,
+                )
+                .await?;
+                execution
+                    .assert_exact(&[
+                        AdversarialCaseId::Hand04,
+                        AdversarialCaseId::Crash01,
+                        AdversarialCaseId::Crash02,
+                        AdversarialCaseId::Crash03,
+                        AdversarialCaseId::Crash05,
+                        AdversarialCaseId::Crash07,
+                    ])
+                    .map_err(|_| sentinel_assertion("crash-restart inventory diverged"))
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe crash-restart acceptance");
+    require_completed(outcome, "crash-restart acceptance")
+        .expect("prefix-authorized disposable admission");
+    for record in &cleanup {
+        assert_eq!(
+            *record.lock().expect("crash-restart cleanup record"),
+            ChildCleanupRecord::Stopped
+        );
+    }
+    assert_artifact_server_log_clean(&log_baseline, &audit_needles, "crash-restart");
+}
+
+#[cfg(feature = "acceptance-harness")]
 async fn run_artifact_restart_acceptance(
     ctx: &TestContext,
     first_child: &Arc<Mutex<Option<StdioDriver>>>,
@@ -7406,11 +8955,44 @@ async fn run_artifact_payload_acceptance(
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
     audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
-) -> Result<(), String> {
+) -> Result<AdversarialExecution, String> {
     let mut driver = OwnedStdioDriver {
         driver: Arc::clone(child),
     };
     let catalog = artifact_catalog_snapshot(&mut driver).await?;
+    let large_markdown = (0..65)
+        .map(|index| format!("## FLOOD-05-{index}\n\n{}\n\n", "x".repeat(16 * 1024)))
+        .collect::<String>();
+    let large_document = ctx
+        .client
+        .new_object(&ctx.space_id, "page")
+        .name(format!("FLOOD-05-{}", unique_suffix()))
+        .body(&large_markdown)
+        .create()
+        .await
+        .map_err(|_| "create FLOOD-05 large document".to_owned())?;
+    ctx.register_object(&large_document.id);
+    let export_before = policy.export_snapshot()?;
+    let flood = driver
+        .call_tool_error(
+            "document_export",
+            json!({
+                "space": ctx.space_id,
+                "object_id": large_document.id,
+                "destination": {"local": {"root": ArtifactPolicyFixture::EXPORT_ROOT, "path": "flood05.md"}},
+                "idempotency_key": format!("FLOOD-05-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    if flood.code() != "bounded_result"
+        || serde_json::to_vec(flood.normalized_result())
+            .map_err(|_| "serialize FLOOD-05 refusal".to_owned())?
+            .len()
+            > ARTIFACT_FRAME_CEILING_BYTES as usize
+        || policy.export_snapshot()? != export_before
+    {
+        return Err("FLOOD-05 did not return a bounded refusal without publication".to_owned());
+    }
     let (small, small_stage) =
         measured_payload_import(ctx, child, b"payload-small", "small", audit_needles).await?;
     let large_payload = (0..1024 * 1024)
@@ -7437,7 +9019,11 @@ async fn run_artifact_payload_acceptance(
     if !policy.staging_snapshot()?.is_reaped() {
         return Err("payload scenario left private staging state".to_owned());
     }
-    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)
+    catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
+    let mut execution = AdversarialExecution::default();
+    execution.record_executed(AdversarialCaseId::Flood05)?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
 }
 
 /// Runs quota, TTL, collision, cancellation, restart, stale-generation, and
@@ -7507,6 +9093,12 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                                 &callback_audit_needles,
                             )
                             .await
+                            .and_then(|execution| {
+                                execution.assert_exact(&[
+                                    AdversarialCaseId::Flood04,
+                                    AdversarialCaseId::Clean03,
+                                ])
+                            })
                         }
                         ArtifactLifecycleScenario::TtlCleanup => {
                             run_artifact_ttl_acceptance(
@@ -7516,6 +9108,13 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                                 &callback_audit_needles,
                             )
                             .await
+                            .and_then(|execution| {
+                                execution.assert_exact(&[
+                                    AdversarialCaseId::Hand03,
+                                    AdversarialCaseId::Hand16,
+                                    AdversarialCaseId::Clean04,
+                                ])
+                            })
                         }
                         ArtifactLifecycleScenario::Collision => {
                             run_artifact_collision_acceptance(ctx.as_ref(), &child, &policy).await
@@ -7567,6 +9166,9 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                                 &callback_audit_needles,
                             )
                             .await
+                            .and_then(|execution| {
+                                execution.assert_exact(&[AdversarialCaseId::Flood05])
+                            })
                         }
                     };
                     result.map_err(|_| {
