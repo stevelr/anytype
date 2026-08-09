@@ -8,6 +8,31 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Make artifact staging durable across crashes and restarts. The staging root
+  is now a closed layout (`instance.lock`, `records/`, `payloads/`, `tmp/`,
+  `tombstones/`) in which every state transition is flushed before it becomes
+  visible, deletions publish identity-bound tombstones first, and startup
+  reconciliation resumes interrupted deletions, truncates uncommitted upload
+  bytes, reaps torn allocations, and revives retained import-reconciliation
+  uncertainty before the listener binds. Unknown entries, corrupt records, and
+  unproven cleanup barriers fail activation with the fixed
+  `artifact state reconciliation failed` category without deleting anything; a
+  runtime durability failure shuts the server down with the fixed
+  `artifact staging durability uncertain` category.
+- Migrate staging roots written by earlier releases on first activation:
+  the legacy `.any-mcp-staging.lock`, flat payload files, and legacy
+  temporaries are removed with the same owner-private single-link proof that
+  release applied, and activation fails closed if the legacy lock is still
+  held by a live older instance.
+
+### Changed
+
+- On Windows, staging single-instance exclusion now relies on the exclusively
+  locked `instance.lock` — which Windows refuses to unlink or replace while
+  held — instead of an undocumented directory lock, and directory-entry
+  durability is delegated to the NTFS metadata journal while file contents
+  remain explicitly flushed before every publication.
+
 - Add closed real-server adversarial artifact coverage for 43 traversal,
   filesystem-alias, filename, MIME, and metadata cases. Direct-router and
   stable/preview stdio owners enforce exact case partitions, fixed refusal
@@ -54,6 +79,32 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Reap staged records whose live payload handle was surrendered — failed
+  transfers, aborted writes, and shutdown racing an active upload — by
+  reopening the payload through its durable identity, and persist terminal
+  pathname-cleanup evidence only once an unlink target is in hand, so routine
+  failures can no longer strand startup-blocking reconciliation evidence.
+- Keep a failed staging allocation from poisoning the next startup: payload
+  creation removes its own partial file, the allocation path removes its
+  durable record after a payload failure, and restart reconciliation reaps an
+  allocated record whose crash left a same-named payload behind.
+- Leave expired staging records alone while a live import settlement or export
+  stream holds their state lock; cleanup claims them on a later pass instead
+  of persisting evidence underneath the active operation.
+- Self-heal a staging layout left partial by a crash during first activation
+  instead of refusing every later startup.
+- Validate durable staging records at runtime against process-controlled
+  invariants only. A stepped wall clock no longer closes staging authority,
+  and records outside a newly lowered `staging_ttl` or `artifact_bytes` are
+  reaped at restart instead of failing activation.
+- Shed only the probing request when a staging authority check fails
+  transiently (for example descriptor exhaustion under a connection flood);
+  proven namespace replacement still closes authority permanently.
+- Record a local file or document export whose waiter vanished as its proven
+  terminal outcome when the commit demonstrably succeeded, instead of blanket
+  indeterminate.
+- Drain artifact settlements during stdio runtime shutdown and report the
+  fixed durability category instead of a generic service-task failure.
 - Reject ASCII control bytes and units in native artifact paths before I/O,
   and classify Windows reserved device components as invalid path syntax with
   the fixed validation response.

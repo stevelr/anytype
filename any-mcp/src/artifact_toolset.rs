@@ -1131,6 +1131,10 @@ impl ArtifactOperationState {
     }
 
     async fn set_outcome(&self, key: [u8; 32], outcome: OperationOutcome) {
+        self.set_outcome_now(key, outcome);
+    }
+
+    fn set_outcome_now(&self, key: [u8; 32], outcome: OperationOutcome) {
         if let Some(entry) = self.entries().get_mut(&key) {
             entry.outcome = outcome;
         }
@@ -2555,16 +2559,48 @@ async fn file_export(
             #[cfg(any(test, feature = "acceptance-harness"))]
             let destination =
                 destination.with_acceptance_gate(runtime.artifact_acceptance_gates().clone(), key);
+            // A vanished waiter still owns this commit; a proven success is
+            // recorded as the terminal completed outcome rather than blanket
+            // indeterminate. The replay output below is exactly what the
+            // waiter would have recorded.
+            let abandoned_operations = runtime.artifact_operations().clone();
+            let abandoned_output = FileExportOutput {
+                file_id: file_id.as_str().to_owned(),
+                receipt: ArtifactReceipt {
+                    direction: ArtifactDirection::Export,
+                    state: ArtifactState::Available,
+                    space_id: space_id.as_str().to_owned(),
+                    size_bytes: size,
+                    sha256: sha256.clone(),
+                    declared_media_type: None,
+                    stored_media_type: stored_media_type.clone(),
+                    root_id: Some(root_id.clone()),
+                    staging_record: None,
+                    staging_handle: None,
+                    staging_url: None,
+                    validators: Vec::new(),
+                },
+            };
             let committed = match runtime
-                .supervise_artifact_blocking(key, move || {
-                    destination.commit().map_err(|error| {
-                        if error.kind() == RootAccessErrorKind::Indeterminate {
-                            ArtifactToolError::Indeterminate
-                        } else {
-                            classify_root_error(&error)
-                        }
-                    })
-                })
+                .supervise_artifact_blocking(
+                    move || {
+                        destination.commit().map_err(|error| {
+                            if error.kind() == RootAccessErrorKind::Indeterminate {
+                                ArtifactToolError::Indeterminate
+                            } else {
+                                classify_root_error(&error)
+                            }
+                        })
+                    },
+                    move |result| match result {
+                        Ok(committed) if committed == size => abandoned_operations
+                            .set_outcome_now(
+                                key,
+                                OperationOutcome::ExportComplete(abandoned_output),
+                            ),
+                        Ok(_) | Err(_) => abandoned_operations.mark_indeterminate(key),
+                    },
+                )
                 .await
             {
                 Ok(Ok(committed)) => committed,
@@ -3496,21 +3532,60 @@ async fn document_export(
             let bytes = body.into_bytes();
             #[cfg(any(test, feature = "acceptance-harness"))]
             let gates = runtime.artifact_acceptance_gates().clone();
+            // Mirror of the waiter's terminal recording for a commit whose
+            // waiter vanished: a proven full-length publication replays as
+            // completed, anything else as indeterminate.
+            let abandoned_operations = runtime.artifact_operations().clone();
+            let abandoned_space = space_id.as_str().to_owned();
+            let abandoned_object = object_id.as_str().to_owned();
+            let abandoned_sha256 = sha256.clone();
             let written = match runtime
-                .supervise_artifact_blocking(key, move || {
-                    let mut destination = roots
-                        .begin_atomic_export(&root_id, &path, maximum)
-                        .map_err(|error| classify_root_error(&error))?;
-                    destination
-                        .write_all(&bytes)
-                        .map_err(|_| ArtifactToolError::NotFound)?;
-                    #[cfg(any(test, feature = "acceptance-harness"))]
-                    let destination = destination.with_acceptance_gate(gates, key);
-                    let committed = destination
-                        .commit()
-                        .map_err(|error| classify_root_error(&error))?;
-                    Ok::<_, ArtifactToolError>((committed, root_id))
-                })
+                .supervise_artifact_blocking(
+                    move || {
+                        let mut destination = roots
+                            .begin_atomic_export(&root_id, &path, maximum)
+                            .map_err(|error| classify_root_error(&error))?;
+                        destination
+                            .write_all(&bytes)
+                            .map_err(|_| ArtifactToolError::NotFound)?;
+                        #[cfg(any(test, feature = "acceptance-harness"))]
+                        let destination = destination.with_acceptance_gate(gates, key);
+                        let committed = destination
+                            .commit()
+                            .map_err(|error| classify_root_error(&error))?;
+                        Ok::<_, ArtifactToolError>((committed, root_id))
+                    },
+                    move |result| match result {
+                        Ok((committed, root_id)) if committed == size => {
+                            abandoned_operations.set_outcome_now(
+                                key,
+                                OperationOutcome::DocumentExportComplete(DocumentExportOutput {
+                                    space_id: abandoned_space.clone(),
+                                    object_id: abandoned_object,
+                                    size_bytes: size,
+                                    chars,
+                                    sha256: abandoned_sha256.clone(),
+                                    receipt: ArtifactReceipt {
+                                        direction: ArtifactDirection::Export,
+                                        state: ArtifactState::Available,
+                                        space_id: abandoned_space,
+                                        size_bytes: size,
+                                        sha256: abandoned_sha256,
+                                        declared_media_type: None,
+                                        stored_media_type: Some("text/markdown".to_owned()),
+                                        root_id: Some(root_id),
+                                        staging_record: None,
+                                        staging_handle: None,
+                                        staging_url: None,
+                                        validators: Vec::new(),
+                                    },
+                                    reused: false,
+                                }),
+                            );
+                        }
+                        Ok(_) | Err(_) => abandoned_operations.mark_indeterminate(key),
+                    },
+                )
                 .await
             {
                 Ok(Ok(written)) => written,

@@ -417,6 +417,24 @@ URL. Staging requires activated local roots: it is a data plane on top of the
 policy, not a replacement for it, and `artifact_status` reports
 `staging_active: false` whenever roots are inactive.
 
+The staging root is a closed durable layout owned exclusively by one server
+instance: `instance.lock` plus the `records/`, `payloads/`, `tmp/`, and
+`tombstones/` directories. Every staging state transition is flushed to disk
+before it becomes visible, and startup reconciles the layout — resuming
+interrupted deletions, truncating uncommitted upload bytes, and reviving
+retained import-reconciliation evidence — before the listener binds. Roots
+written by releases before this layout are migrated automatically on first
+activation. Activation fails with the fixed `artifact state reconciliation
+failed` category when the root holds unknown entries or evidence that a prior
+cleanup crossed its deletion barrier without proof of completion; a runtime
+durability failure shuts the server down with the fixed `artifact staging
+durability uncertain` category. Both conditions require the operator to
+inspect the staging root (or point staging at a fresh empty directory) before
+restarting. On Windows, single-instance exclusion relies on the exclusively
+locked `instance.lock`, which Windows refuses to unlink or replace while
+held, and directory-entry durability is delegated to the NTFS metadata
+journal.
+
 #### Space policy
 
 `spaces.allowed` selects one of three shapes, checked by every space resolver

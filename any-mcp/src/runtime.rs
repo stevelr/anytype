@@ -534,16 +534,19 @@ impl RuntimeContext {
 
     /// Owns one blocking local artifact operation through completion even if
     /// its request waiter is cancelled. Shutdown drain observes the same task
-    /// counter used by import settlement, and a vanished waiter leaves a
-    /// terminal indeterminate ledger entry rather than an unowned commit.
-    pub(crate) fn supervise_artifact_blocking<T, F>(
+    /// counter used by import settlement. When the waiter vanished, the
+    /// caller-provided `abandoned` handler settles the ledger with the actual
+    /// outcome, so a commit that provably succeeded can be recorded as
+    /// success rather than blanket indeterminate.
+    pub(crate) fn supervise_artifact_blocking<T, F, A>(
         &self,
-        key: [u8; 32],
         operation: F,
+        abandoned: A,
     ) -> tokio::sync::oneshot::Receiver<Result<T, ArtifactToolError>>
     where
         T: Send + 'static,
         F: FnOnce() -> Result<T, ArtifactToolError> + Send + 'static,
+        A: FnOnce(Result<T, ArtifactToolError>) + Send + 'static,
     {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let gate = match self.settlement_gate.lock() {
@@ -558,14 +561,13 @@ impl RuntimeContext {
         drop(gate);
         let active = Arc::clone(&self.settlement_active);
         let notify = Arc::clone(&self.settlement_notify);
-        let operations = self.artifact_operations.clone();
         tokio::spawn(async move {
             let result = match tokio::task::spawn_blocking(operation).await {
                 Ok(result) => result,
                 Err(_) => Err(ArtifactToolError::Indeterminate),
             };
-            if sender.send(result).is_err() {
-                operations.mark_indeterminate(key);
+            if let Err(result) = sender.send(result) {
+                abandoned(result);
             }
             let _ = active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_sub(1)
@@ -1539,6 +1541,10 @@ pub enum ServeError {
     ServiceTask,
     /// The bounded stdio adapter could not read or write a frame.
     StdioTransport,
+    /// Artifact staging durability became uncertain and the runtime shut
+    /// itself down. The category is fixed and carries no operating-system
+    /// message, path, or caller value.
+    ArtifactDurability,
 }
 
 impl fmt::Display for ServeError {
@@ -1548,6 +1554,9 @@ impl fmt::Display for ServeError {
             Self::Initialization => formatter.write_str("MCP stdio initialization failed"),
             Self::ServiceTask => formatter.write_str("MCP stdio service task failed"),
             Self::StdioTransport => formatter.write_str("MCP stdio transport failed"),
+            Self::ArtifactDurability => {
+                formatter.write_str("artifact staging durability uncertain")
+            }
         }
     }
 }
@@ -1616,11 +1625,15 @@ mod tests {
         let release = Arc::new(std::sync::Barrier::new(2));
         let worker_entered = Arc::clone(&entered);
         let worker_release = Arc::clone(&release);
-        let receiver = runtime.supervise_artifact_blocking(key, move || {
-            worker_entered.wait();
-            worker_release.wait();
-            Ok::<_, ArtifactToolError>(())
-        });
+        let abandoned_operations = runtime.artifact_operations().clone();
+        let receiver = runtime.supervise_artifact_blocking(
+            move || {
+                worker_entered.wait();
+                worker_release.wait();
+                Ok::<_, ArtifactToolError>(())
+            },
+            move |_| abandoned_operations.mark_indeterminate(key),
+        );
         entered.wait();
         drop(receiver);
         release.wait();

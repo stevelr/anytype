@@ -542,6 +542,47 @@ pub(crate) struct StagingInventory {
     pub(crate) tombstones: Vec<StagingInventoryFile>,
 }
 
+/// Outcome category of one staging authority probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthorityProbe {
+    /// The probe could not run to completion (resource exhaustion). Identity
+    /// is unproven but not disproven; shed the request and retry later.
+    Transient,
+    /// The retained identity no longer names this staging generation.
+    Replaced,
+}
+
+fn probe_io(error: &io::Error) -> AuthorityProbe {
+    let transient = matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::OutOfMemory
+    ) || error.raw_os_error().is_some_and(transient_os_error);
+    if transient {
+        AuthorityProbe::Transient
+    } else {
+        AuthorityProbe::Replaced
+    }
+}
+
+#[cfg(unix)]
+fn transient_os_error(code: i32) -> bool {
+    matches!(
+        code,
+        libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::EAGAIN | libc::EINTR
+    )
+}
+
+#[cfg(windows)]
+fn transient_os_error(code: i32) -> bool {
+    // ERROR_TOO_MANY_OPEN_FILES, ERROR_NOT_ENOUGH_MEMORY, ERROR_NO_SYSTEM_RESOURCES
+    matches!(code, 4 | 8 | 1450)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn transient_os_error(_: i32) -> bool {
+    false
+}
+
 /// Stable native identity persisted beside one private staging payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StagingFileIdentity {
@@ -701,14 +742,15 @@ impl StagingDirectory {
             directory,
         };
         let root_lock = acquire_staging_root_lock(&root)?;
-        validate_staging_root(&root, maximum_entries)?;
+        migrate_legacy_staging_root(&root)?;
+        validate_staging_root(&root, maximum_entries, LayoutPhase::BeforeCreation)?;
         let (instance_lock, instance_lock_identity) = acquire_staging_lock(&root)?;
         let records = staging_child(&root, STAGING_RECORDS_DIRECTORY)?;
         let payloads = staging_child(&root, STAGING_PAYLOADS_DIRECTORY)?;
         let temporary = staging_child(&root, STAGING_TEMPORARY_DIRECTORY)?;
         let tombstones = staging_child(&root, STAGING_TOMBSTONES_DIRECTORY)?;
         sync_retained_directory(&root)?;
-        validate_staging_root(&root, maximum_entries)?;
+        validate_staging_root(&root, maximum_entries, LayoutPhase::AfterCreation)?;
         let staging = Self {
             root,
             records,
@@ -729,48 +771,64 @@ impl StagingDirectory {
     /// can unlink the locked pathname. The root-directory lock prevents a
     /// second activation while this generation is alive; this check also
     /// detects namespace replacement so the running server can fail closed.
-    pub(crate) fn authority_intact(&self) -> Result<(), RootAccessError> {
-        let directory = retained_directory(&self.records.directory)?;
+    ///
+    /// Probe I/O failures caused by resource exhaustion are reported as
+    /// [`AuthorityProbe::Transient`]: identity is unproven but not disproven,
+    /// so the caller sheds the current request instead of permanently closing
+    /// authority because an attacker exhausted process file descriptors.
+    pub(crate) fn authority_intact(&self) -> Result<(), AuthorityProbe> {
+        let directory = self
+            .records
+            .directory
+            .file
+            .try_clone()
+            .map_err(|error| probe_io(&error))?;
         drop(directory);
         let root_directory = self
             .root_lock
             .try_clone()
-            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            .map_err(|error| probe_io(&error))?;
         let root_metadata = root_directory
             .metadata()
-            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            .map_err(|error| probe_io(&error))?;
         if !root_metadata.is_dir() {
-            return Err(RootAccessError::new(RootProblem::Changed));
+            return Err(AuthorityProbe::Replaced);
         }
 
-        let root = retained_directory(&self.root.directory)?;
+        let root = self
+            .root
+            .directory
+            .file
+            .try_clone()
+            .map(Dir::from_std_file)
+            .map_err(|error| probe_io(&error))?;
         let mut options = OpenOptions::new();
         options.read(true).write(true).follow(FollowSymlinks::No);
         let reopened = root
             .open_with(Path::new(STAGING_LOCK_NAME), &options)
             .map(cap_std::fs::File::into_std)
-            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            .map_err(|error| probe_io(&error))?;
         let metadata = reopened
             .metadata()
-            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            .map_err(|error| probe_io(&error))?;
         let identity = file_identity(&reopened, &metadata)
-            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            .map_err(|error| probe_io(&error))?;
         if identity != self.instance_lock_identity
             || !safe_created_export_metadata(&reopened, &metadata)
             || !safe_windows_security(&reopened)
             || !safe_private_windows_security(&reopened)
         {
-            return Err(RootAccessError::new(RootProblem::Changed));
+            return Err(AuthorityProbe::Replaced);
         }
         let retained_metadata = self
             .instance_lock
             .metadata()
-            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            .map_err(|error| probe_io(&error))?;
         let retained_identity = file_identity(&self.instance_lock, &retained_metadata)
-            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            .map_err(|error| probe_io(&error))?;
         (retained_identity == identity)
             .then_some(())
-            .ok_or_else(|| RootAccessError::new(RootProblem::Changed))
+            .ok_or(AuthorityProbe::Replaced)
     }
 
     pub(crate) fn policy_identity(&self) -> StagingFileIdentity {
@@ -827,25 +885,42 @@ impl StagingDirectory {
             .open_with(Path::new(&name), &owner_private_create_options())
             .map(cap_std::fs::File::into_std)
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-        let metadata = file
-            .metadata()
-            .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
-        if !safe_created_export_metadata(&file, &metadata)
-            || !safe_windows_security(&file)
-            || !safe_private_windows_security(&file)
-        {
-            return Err(RootAccessError::new(RootProblem::Changed));
+        let result = (|| {
+            let metadata = file
+                .metadata()
+                .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
+            if !safe_created_export_metadata(&file, &metadata)
+                || !safe_windows_security(&file)
+                || !safe_private_windows_security(&file)
+            {
+                return Err(RootAccessError::new(RootProblem::Changed));
+            }
+            let identity = file_identity(&file, &metadata)
+                .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            sync_parent_directory(&directory)
+                .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+            Ok(identity)
+        })();
+        match result {
+            Ok(identity) => Ok(StagingPayload {
+                file,
+                identity,
+                maximum_bytes,
+                written: 0,
+            }),
+            Err(error) => {
+                // The name was created moments ago with create-new semantics
+                // and never published to a durable record. Removing it here
+                // keeps a failed allocation from stranding an unindexed
+                // payload that a later activation would refuse to reconcile.
+                // A failed removal leaves that stranded state in place, which
+                // only closing durable authority can report truthfully.
+                if remove_private_file(&directory, Path::new(&name), 1).is_err() {
+                    return Err(RootAccessError::new(RootProblem::Indeterminate));
+                }
+                Err(error)
+            }
         }
-        let identity = file_identity(&file, &metadata)
-            .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
-        sync_parent_directory(&directory)
-            .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
-        Ok(StagingPayload {
-            file,
-            identity,
-            maximum_bytes,
-            written: 0,
-        })
     }
 
     pub(crate) fn publish_record(
@@ -939,6 +1014,21 @@ impl StagingDirectory {
         record_name: &str,
         expected: &AnchoredImport,
     ) -> Result<(), RootAccessError> {
+        self.remove_exact_payload(record_name, expected.staging_identity())
+    }
+
+    /// Removes one staged payload whose live handle was surrendered.
+    ///
+    /// A failed transfer or dropped connection consumes the in-memory payload
+    /// writer, but the durable record still indexes the payload's stable
+    /// identity. Cleanup reopens the fixed name without following links and
+    /// refuses to unlink anything whose identity, link count, or ownership
+    /// differs from that indexed evidence.
+    pub(crate) fn remove_exact_payload(
+        &self,
+        record_name: &str,
+        expected: StagingFileIdentity,
+    ) -> Result<(), RootAccessError> {
         let path = RelativeNativePath::from_utf8(record_name)
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
         let (parent, name) = walk_parent(&self.payloads, &path)?;
@@ -955,7 +1045,8 @@ impl StagingDirectory {
             .map_err(|_| RootAccessError::new(RootProblem::Containment))?;
         if !private_file_with_links(&file, &metadata, 1)
             || !safe_windows_security(&file)
-            || identity != expected.snapshot.identity
+            || identity.volume != expected.volume
+            || identity.file != expected.file
         {
             return Err(RootAccessError::new(RootProblem::Changed));
         }
@@ -1077,6 +1168,7 @@ const STAGING_TEMPORARY_DIRECTORY: &str = "tmp";
 const STAGING_TOMBSTONES_DIRECTORY: &str = "tombstones";
 pub(crate) const STAGING_STATE_BYTES: u64 = 16 * 1024;
 
+#[cfg(not(windows))]
 fn acquire_staging_root_lock(root: &RootCapability) -> Result<File, RootAccessError> {
     let file = root
         .directory
@@ -1086,6 +1178,20 @@ fn acquire_staging_root_lock(root: &RootCapability) -> Result<File, RootAccessEr
     file.try_lock_exclusive()
         .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
     Ok(file)
+}
+
+/// Windows retains the root handle without a directory lock.
+///
+/// `LockFileEx` against a directory handle is undocumented and unreliable, so
+/// single-instance exclusion relies on `instance.lock` alone: Windows refuses
+/// to unlink or replace an exclusively locked open file, which is the
+/// namespace-replacement hazard the POSIX directory lock exists to detect.
+#[cfg(windows)]
+fn acquire_staging_root_lock(root: &RootCapability) -> Result<File, RootAccessError> {
+    root.directory
+        .file
+        .try_clone()
+        .map_err(|_| RootAccessError::new(RootProblem::Activation))
 }
 
 fn acquire_staging_lock(root: &RootCapability) -> Result<(File, FileIdentity), RootAccessError> {
@@ -1118,9 +1224,21 @@ fn acquire_staging_lock(root: &RootCapability) -> Result<(File, FileIdentity), R
     Ok((file, identity))
 }
 
+/// Layout-completeness expectation for one `validate_staging_root` pass.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayoutPhase {
+    /// Any subset of the known names is acceptable: a crash during a prior
+    /// first activation may have left a partial layout that `staging_child`
+    /// completes idempotently once activation proceeds.
+    BeforeCreation,
+    /// Every known name must exist after layout creation completed.
+    AfterCreation,
+}
+
 fn validate_staging_root(
     root: &RootCapability,
     maximum_entries: usize,
+    phase: LayoutPhase,
 ) -> Result<(), RootAccessError> {
     let directory = retained_directory(&root.directory)?;
     let entries = directory
@@ -1163,10 +1281,79 @@ fn validate_staging_root(
             return Err(RootAccessError::new(RootProblem::Activation));
         }
     }
-    if !names.is_empty() && names.len() != 5 {
+    if phase == LayoutPhase::AfterCreation && names.len() != 5 {
         return Err(RootAccessError::new(RootProblem::Activation));
     }
     Ok(())
+}
+
+const LEGACY_STAGING_LOCK_NAME: &str = ".any-mcp-staging.lock";
+
+/// Migrates a staging root left behind by the pre-durable release.
+///
+/// The previous layout kept `.any-mcp-staging.lock` plus flat `{id}.bin`
+/// payloads and `.any-mcp-{id}.tmp` temporaries directly in the root, all of
+/// which that release deleted on every activation. This release performs that
+/// final self-clean once, with the same owner-private single-link proof, so
+/// upgraded deployments activate without operator surgery. A legacy lock that
+/// is still exclusively held proves a live pre-durable instance, and
+/// activation fails instead of unlocking its root underneath it.
+fn migrate_legacy_staging_root(root: &RootCapability) -> Result<(), RootAccessError> {
+    let directory = retained_directory(&root.directory)?;
+    let entries = directory
+        .entries()
+        .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+    let mut legacy = Vec::new();
+    let mut legacy_lock = false;
+    for entry in entries {
+        let entry = entry.map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        let name = entry.file_name();
+        let Some(name_utf8) = name.to_str() else {
+            return Err(RootAccessError::new(RootProblem::Activation));
+        };
+        if name_utf8 == LEGACY_STAGING_LOCK_NAME {
+            legacy_lock = true;
+        } else if legacy_staging_name(name_utf8) {
+            legacy.push(name_utf8.to_owned());
+        }
+    }
+    if legacy_lock {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).follow(FollowSymlinks::No);
+        let file = directory
+            .open_with(Path::new(LEGACY_STAGING_LOCK_NAME), &options)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        file.try_lock_exclusive()
+            .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        remove_private_file(&directory, Path::new(LEGACY_STAGING_LOCK_NAME), 1)?;
+    }
+    let migrated = legacy_lock || !legacy.is_empty();
+    for name in legacy {
+        remove_private_file(&directory, Path::new(&name), 1)?;
+    }
+    if migrated {
+        sync_parent_directory(&directory)
+            .map_err(|_| RootAccessError::new(RootProblem::Activation))?;
+        tracing::info!(
+            target: "any_mcp::operation",
+            operation = "artifact_staging_migration",
+            outcome = "legacy_layout_migrated",
+            "Artifact staging migrated a pre-durable staging root"
+        );
+    }
+    Ok(())
+}
+
+fn legacy_staging_name(name: &str) -> bool {
+    let record = name
+        .strip_suffix(".bin")
+        .is_some_and(|stem| stem.len() == 32 && stem.bytes().all(lowercase_hex));
+    let temporary = name
+        .strip_prefix(".any-mcp-")
+        .and_then(|name| name.strip_suffix(".tmp"))
+        .is_some_and(|stem| stem.len() == 16 && stem.bytes().all(lowercase_hex));
+    record || temporary
 }
 
 fn staging_child(
@@ -2198,9 +2385,21 @@ fn owner_private_create_options() -> OpenOptions {
     options
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 fn sync_parent_directory(parent: &Dir) -> io::Result<()> {
     parent.try_clone()?.into_std_file().sync_all()
+}
+
+/// Windows deliberately reports success without flushing.
+///
+/// `FlushFileBuffers` demands write access that cap-std directory handles are
+/// not opened with, and NTFS journals metadata operations independently of an
+/// explicit directory flush. Rename visibility is therefore trusted to the
+/// filesystem journal on Windows; the payload/state file contents themselves
+/// are still explicitly synced before every rename.
+#[cfg(windows)]
+fn sync_parent_directory(_: &Dir) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]

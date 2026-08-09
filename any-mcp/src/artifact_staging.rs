@@ -47,8 +47,8 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use crate::{
     artifact_config::{ArtifactLimits, StagingConfig},
     artifact_roots::{
-        AnchoredImport, PositionalReader, RootRegistry, StagingDirectory, StagingFileIdentity,
-        StagingInventory, StagingPayload,
+        AnchoredImport, PositionalReader, RootAccessErrorKind, RootRegistry, StagingDirectory,
+        StagingFileIdentity, StagingInventory, StagingPayload,
     },
     domain::{EntityId, SpaceId},
 };
@@ -816,26 +816,16 @@ fn parse_record(
     Ok((document, file.source))
 }
 
-fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimits) -> bool {
-    let Ok(ttl) = chrono::Duration::from_std(limits.staging_ttl) else {
-        return false;
-    };
-    let now = Utc::now();
-    let Some(latest_creation) = now.checked_add_signed(chrono::Duration::minutes(5)) else {
-        return false;
-    };
-    let Some(latest_expiry) = latest_creation.checked_add_signed(ttl) else {
-        return false;
-    };
+/// Validates process-controlled invariants of one durable record: field
+/// coupling per state and a non-negative lifetime. Deliberately excludes wall
+/// clocks and configured limits, so a stepped clock or a policy change can
+/// never invalidate a record the process itself wrote.
+fn durable_shape_valid(document: &DurableStageRecord) -> bool {
     let lifetime = document
         .expires_at
         .signed_duration_since(document.created_at)
         .to_std();
-    if document.size_bytes > limits.artifact_bytes
-        || lifetime.is_err()
-        || lifetime.is_ok_and(|lifetime| lifetime > limits.staging_ttl)
-        || document.created_at > latest_creation
-        || document.expires_at > latest_expiry
+    if lifetime.is_err()
         || (document.direction == DurableDirection::Import && document.size_bytes == 0)
         || (document.direction == DurableDirection::Export && document.expected_sha256.is_some())
     {
@@ -936,6 +926,32 @@ fn durable_semantics_valid(document: &DurableStageRecord, limits: &ArtifactLimit
     }
 }
 
+/// Recency and policy bounds applied only when a restart decides whether a
+/// well-formed retained record may be revived. Records outside the current
+/// policy (larger than the configured maximum, longer-lived than the current
+/// TTL, or stamped by a clock this process cannot reconcile) are reaped
+/// through the ordinary tombstone protocol instead of failing activation.
+fn durable_policy_current(document: &DurableStageRecord, limits: &ArtifactLimits) -> bool {
+    let Ok(ttl) = chrono::Duration::from_std(limits.staging_ttl) else {
+        return false;
+    };
+    let now = Utc::now();
+    let Some(latest_creation) = now.checked_add_signed(chrono::Duration::minutes(5)) else {
+        return false;
+    };
+    let Some(latest_expiry) = latest_creation.checked_add_signed(ttl) else {
+        return false;
+    };
+    let lifetime = document
+        .expires_at
+        .signed_duration_since(document.created_at)
+        .to_std();
+    document.size_bytes <= limits.artifact_bytes
+        && lifetime.is_ok_and(|lifetime| lifetime <= limits.staging_ttl)
+        && document.created_at <= latest_creation
+        && document.expires_at <= latest_expiry
+}
+
 fn parse_tombstone(
     mut file: crate::artifact_roots::StagingInventoryFile,
 ) -> Result<(DurableTombstone, AnchoredImport), StagingError> {
@@ -1031,7 +1047,7 @@ fn reconcile_inventory(
     let mut records = BTreeMap::new();
     for file in inventory.records {
         let (document, source) = parse_record(file)?;
-        if !durable_semantics_valid(&document, limits)
+        if !durable_shape_valid(&document)
             || records
                 .insert(document.record_id.clone(), (document, source))
                 .is_some()
@@ -1083,7 +1099,12 @@ fn reconcile_inventory(
     let record_ids = records.keys().cloned().collect::<BTreeSet<_>>();
     for (record_id, (document, source)) in &records {
         if document.state == DurableStageState::Allocated {
-            if document.payload_identity.is_some() || payloads.contains_key(record_id) {
+            // A same-named payload is the expected footprint of a crash
+            // between payload creation and the `Receiving` publish. The reap
+            // loop deletes the pair through the tombstone protocol; only a
+            // payload identity claimed by a record that never reached
+            // `Receiving` is semantically impossible.
+            if document.payload_identity.is_some() {
                 return Err(StagingError::Reconciliation);
             }
         } else {
@@ -1154,6 +1175,7 @@ fn reconcile_inventory(
                 && document.expires_at > Utc::now()
                 && document.observed_sha256.is_some()
                 && document.operation_fingerprint.is_some()
+                && durable_policy_current(document, limits)
         });
         if retain_uncertain {
             let (document, record_source) = records
@@ -1239,7 +1261,7 @@ impl ArtifactStaging {
         &self,
         document: &DurableStageRecord,
     ) -> Result<AnchoredImport, StagingError> {
-        if !durable_semantics_valid(document, &self.state.limits) {
+        if !durable_shape_valid(document) {
             self.close_durable_authority();
             return Err(StagingError::Indeterminate);
         }
@@ -1445,19 +1467,27 @@ impl ArtifactStaging {
         self.ensure_authority().is_ok()
     }
 
+    /// Reports whether durable staging authority closed on uncertainty.
+    pub(crate) fn durability_uncertain(&self) -> bool {
+        self.state.durability_uncertain.load(Ordering::Acquire)
+    }
+
     fn ensure_authority(&self) -> Result<(), StagingError> {
-        if !self.state.active.load(Ordering::Acquire)
-            || self.state.shutdown.is_cancelled()
-            || self.state.directory.authority_intact().is_err()
-        {
-            self.state.active.store(false, Ordering::Release);
-            self.state
-                .durability_uncertain
-                .store(true, Ordering::Release);
-            self.state.shutdown.cancel();
+        if !self.state.active.load(Ordering::Acquire) || self.state.shutdown.is_cancelled() {
+            self.close_durable_authority();
             return Err(StagingError::Indeterminate);
         }
-        Ok(())
+        match self.state.directory.authority_intact() {
+            Ok(()) => Ok(()),
+            // Resource exhaustion (attacker-influenceable descriptor floods
+            // included) sheds only the probing request; identity was not
+            // disproven, so staging authority stays open.
+            Err(crate::artifact_roots::AuthorityProbe::Transient) => Err(StagingError::Upstream),
+            Err(crate::artifact_roots::AuthorityProbe::Replaced) => {
+                self.close_durable_authority();
+                Err(StagingError::Indeterminate)
+            }
+        }
     }
 
     fn task_guard(&self) -> StagingTaskGuard {
@@ -1508,7 +1538,11 @@ impl ArtifactStaging {
                     biased;
                     () = staging.state.shutdown.cancelled() => break,
                     () = tokio::time::sleep(Duration::from_secs(1)) => {
-                        if staging.ensure_authority().is_err() {
+                        // Transient probe failures shed nothing here; only a
+                        // proven replacement (which closes authority) stops
+                        // the listener.
+                        let _ = staging.ensure_authority();
+                        if !staging.state.active.load(Ordering::Acquire) {
                             break;
                         }
                         continue;
@@ -2000,15 +2034,44 @@ impl ArtifactStaging {
         let payload_id = record_id.clone();
         let maximum = self.state.limits.artifact_bytes;
         let task_guard = self.task_guard();
-        let destination = tokio::task::spawn_blocking(move || {
+        let created = tokio::task::spawn_blocking(move || {
             let mut task_guard = task_guard;
             let result = directory.create_payload(&payload_id, maximum);
             task_guard.complete();
             result
         })
-        .await
-        .map_err(|_| StagingError::Upstream)?
-        .map_err(|_| StagingError::Upstream)?;
+        .await;
+        let destination = match created {
+            Ok(Ok(destination)) => destination,
+            Ok(Err(error)) if error.kind() != RootAccessErrorKind::Indeterminate => {
+                // The payload provably does not exist (`create_payload`
+                // removes its own failures), so the published `Allocated`
+                // record is the only durable evidence. Remove it by retained
+                // identity rather than leaving poison for the next restart.
+                let directory = self.state.directory.clone();
+                let cleanup_id = record_id.clone();
+                let task_guard = self.task_guard();
+                let removal = tokio::task::spawn_blocking(move || {
+                    let mut task_guard = task_guard;
+                    let result =
+                        directory.remove_exact_record_state(&cleanup_id, &allocated_source);
+                    task_guard.complete();
+                    result
+                })
+                .await;
+                if !matches!(removal, Ok(Ok(()))) {
+                    self.close_durable_authority();
+                    return Err(StagingError::Indeterminate);
+                }
+                return Err(StagingError::Upstream);
+            }
+            Ok(Err(_)) | Err(_) => {
+                // Payload existence is unproven; only closing durable
+                // authority reports that uncertainty truthfully.
+                self.close_durable_authority();
+                return Err(StagingError::Indeterminate);
+            }
+        };
         let mut receiving = allocated;
         receiving.state = DurableStageState::Receiving;
         receiving.payload_identity = Some(destination.identity().into());
@@ -2180,14 +2243,23 @@ impl ArtifactStaging {
     }
 
     /// Surrenders an active writer before releasing its staging record.
+    ///
+    /// Callers routinely reach this after `take_destination` handed the
+    /// payload writer to a transfer that failed without returning it. An
+    /// emptied lease therefore still releases: cleanup reopens the payload
+    /// from its durable identity instead of requiring the live handle.
     pub(crate) async fn abort_write(
         &self,
         mut lease: StageWriteLease,
         handle: &str,
     ) -> Result<(), StagingError> {
-        let destination = lease.destination.take().ok_or(StagingError::Conflict)?;
-        let offset = lease.offset;
-        self.restore_write(lease, destination, offset).await?;
+        match lease.destination.take() {
+            Some(destination) => {
+                let offset = lease.offset;
+                self.restore_write(lease, destination, offset).await?;
+            }
+            None => drop(lease),
+        }
         self.release(handle).await
     }
 
@@ -2466,14 +2538,22 @@ impl ArtifactStaging {
             *source.lease = RecordState::Reconciliation { import, operation };
             return Err(StagingError::NotFound);
         }
-        self.persist_transition(&source.record_owner, |document| {
-            document.state = DurableStageState::Ready;
-            document.operation_fingerprint = None;
-            document.candidate_id = None;
-            document.candidate_cleanup = None;
-            document.uncertainty = None;
-        })
-        .await?;
+        if let Err(error) = self
+            .persist_transition(&source.record_owner, |document| {
+                document.state = DurableStageState::Ready;
+                document.operation_fingerprint = None;
+                document.candidate_id = None;
+                document.candidate_cleanup = None;
+                document.uncertainty = None;
+            })
+            .await
+        {
+            // Every real persist failure closes durable authority, but the
+            // in-memory record must still describe the retained import rather
+            // than a torn placeholder.
+            *source.lease = RecordState::Reconciliation { import, operation };
+            return Err(error);
+        }
         *source.lease = RecordState::Ready { import };
         source.operation = [0; 32];
         source.restore_ready_on_drop = false;
@@ -2583,12 +2663,20 @@ impl ArtifactStaging {
                 import,
                 operation: retained,
             } if retained == operation => {
-                self.persist_transition(&record, |document| {
-                    document.state = DurableStageState::Consumed;
-                    document.operation_fingerprint = Some(bytes_hex(&operation));
-                    document.uncertainty = None;
-                })
-                .await?;
+                if let Err(error) = self
+                    .persist_transition(&record, |document| {
+                        document.state = DurableStageState::Consumed;
+                        document.operation_fingerprint = Some(bytes_hex(&operation));
+                        document.uncertainty = None;
+                    })
+                    .await
+                {
+                    *state = RecordState::Reconciliation {
+                        import,
+                        operation: retained,
+                    };
+                    return Err(error);
+                }
                 *state = RecordState::Consumed { import, operation };
                 Ok(())
             }
@@ -2654,12 +2742,17 @@ impl ArtifactStaging {
             *source.lease = RecordState::Reconciliation { import, operation };
             return Err(StagingError::NotFound);
         }
-        self.persist_transition(&source.record_owner, |document| {
-            document.state = DurableStageState::Consumed;
-            document.operation_fingerprint = Some(bytes_hex(&source.operation));
-            document.uncertainty = None;
-        })
-        .await?;
+        if let Err(error) = self
+            .persist_transition(&source.record_owner, |document| {
+                document.state = DurableStageState::Consumed;
+                document.operation_fingerprint = Some(bytes_hex(&source.operation));
+                document.uncertainty = None;
+            })
+            .await
+        {
+            *source.lease = RecordState::Reconciliation { import, operation };
+            return Err(error);
+        }
         *source.lease = RecordState::Consumed { import, operation };
         source.restore_ready_on_drop = false;
         Ok(())
@@ -2767,61 +2860,115 @@ impl ArtifactStaging {
             self.close_durable_authority();
             return false;
         }
-        if self
-            .persist_transition(record, |document| {
-                document.cleanup_evidence = Some("pathname_authority_closed".to_owned());
-            })
-            .await
-            .is_err()
-        {
-            self.close_durable_authority();
-            return false;
-        }
         let target = {
             let mut state = record.state.lock().await;
             if !transition_to_cleanup_pending(&mut state) {
                 return false;
             }
-            match &mut *state {
+            // Classify the unlink target before durably closing pathname
+            // authority: a record that cannot produce a target must stay in
+            // the retryable tombstone-pending phase instead of persisting
+            // terminal evidence it can never act on.
+            enum TargetKind {
+                Temporary,
+                Published,
+                Surrendered(StagingFileIdentity),
+            }
+            let kind = match &*state {
                 RecordState::CleanupPending {
-                    destination,
+                    destination: Some(_),
                     source: None,
-                    pathname_cleanup_unsafe,
-                } if !*pathname_cleanup_unsafe => {
+                    pathname_cleanup_unsafe: false,
+                } => TargetKind::Temporary,
+                RecordState::CleanupPending {
+                    destination: None,
+                    source: Some(_),
+                    pathname_cleanup_unsafe: false,
+                } => TargetKind::Published,
+                RecordState::CleanupPending {
+                    destination: None,
+                    source: None,
+                    pathname_cleanup_unsafe: false,
+                } => {
+                    // Both live handles were surrendered: a failed transfer
+                    // consumed the write lease, or shutdown dropped an active
+                    // upload. The durable record still indexes the payload's
+                    // stable identity, so cleanup reopens the fixed name and
+                    // revalidates that identity before unlinking.
+                    let durable = record.durable.lock().await;
+                    match durable.document.payload_identity {
+                        Some(identity) => TargetKind::Surrendered(StagingFileIdentity {
+                            volume: identity.volume,
+                            file: identity.file,
+                        }),
+                        None => return false,
+                    }
+                }
+                _ => return false,
+            };
+            // Identity validation and unlink are separate pathname
+            // operations. Permanently close pathname authority — durably,
+            // then in memory, both before releasing this lock — so a failed,
+            // cancelled, or panicked attempt retains its record rather than
+            // retrying by name.
+            if self
+                .persist_transition(record, |document| {
+                    document.cleanup_evidence = Some("pathname_authority_closed".to_owned());
+                })
+                .await
+                .is_err()
+            {
+                self.close_durable_authority();
+                return false;
+            }
+            match (kind, &mut *state) {
+                (
+                    TargetKind::Temporary,
+                    RecordState::CleanupPending {
+                        destination,
+                        pathname_cleanup_unsafe,
+                        ..
+                    },
+                ) => {
                     let Some(destination) = destination.take() else {
                         return false;
                     };
-                    // Conversion and exact unlink are separate operations.
-                    // Permanently close pathname authority before either can
-                    // fail, be cancelled, or panic.
                     *pathname_cleanup_unsafe = true;
                     PendingCleanupTarget::Temporary {
                         name: record.record_name.clone(),
                         destination,
                     }
                 }
-                RecordState::CleanupPending {
-                    destination: None,
-                    source: slot @ Some(_),
-                    pathname_cleanup_unsafe,
-                } if !*pathname_cleanup_unsafe => {
-                    // Identity validation and unlink are separate pathname
-                    // operations. Closing cleanup authority before releasing
-                    // this lock makes a failed, cancelled, or panicked attempt
-                    // retain its record rather than retry by name.
+                (
+                    TargetKind::Published,
+                    RecordState::CleanupPending {
+                        source,
+                        pathname_cleanup_unsafe,
+                        ..
+                    },
+                ) => {
+                    let Some(source) = source.take() else {
+                        return false;
+                    };
                     *pathname_cleanup_unsafe = true;
-                    match slot.take() {
-                        Some(source) => PendingCleanupTarget::Published {
-                            name: record.record_name.clone(),
-                            source,
-                        },
-                        None => return false,
+                    PendingCleanupTarget::Published {
+                        name: record.record_name.clone(),
+                        source,
                     }
                 }
-                RecordState::CleanupPending {
-                    pathname_cleanup_unsafe: true,
-                    ..
-                } => return false,
+                (
+                    TargetKind::Surrendered(identity),
+                    RecordState::CleanupPending {
+                        pathname_cleanup_unsafe,
+                        ..
+                    },
+                ) => {
+                    *pathname_cleanup_unsafe = true;
+                    PendingCleanupTarget::Surrendered {
+                        name: record.record_name.clone(),
+                        identity,
+                    }
+                }
                 _ => return false,
             }
         };
@@ -2841,6 +2988,13 @@ impl ArtifactStaging {
                     PendingCleanupResult::Removed
                 } else {
                     PendingCleanupResult::RetainPublished(source)
+                }
+            }
+            PendingCleanupTarget::Surrendered { name, identity } => {
+                if directory.remove_exact_payload(&name, identity).is_ok() {
+                    PendingCleanupResult::Removed
+                } else {
+                    PendingCleanupResult::RetainSurrendered
                 }
             }
         })
@@ -2880,7 +3034,7 @@ impl ArtifactStaging {
                 }
                 false
             }
-            Err(_) => false,
+            Ok(PendingCleanupResult::RetainSurrendered) | Err(_) => false,
         }
     }
 
@@ -2993,8 +3147,12 @@ fn claim_expired_record(record: &StageRecord) -> bool {
     {
         return false;
     }
+    // A held state lock means a live settlement or export stream still owns
+    // this record. Claiming it anyway would persist cleanup evidence under an
+    // active transition, so leave it for a later expiry pass.
     let Ok(mut state) = record.state.try_lock() else {
-        return true;
+        record.cleanup_blocked.store(false, Ordering::Release);
+        return false;
     };
     if !transition_to_cleanup_pending(&mut state) {
         record.cleanup_blocked.store(false, Ordering::Release);
@@ -3088,12 +3246,20 @@ enum PendingCleanupTarget {
         name: String,
         source: AnchoredImport,
     },
+    /// Both live handles were surrendered; the durable record's indexed
+    /// payload identity authorizes one revalidated unlink by fixed name.
+    Surrendered {
+        name: String,
+        identity: StagingFileIdentity,
+    },
 }
 
 enum PendingCleanupResult {
     Removed,
     RetainPublished(AnchoredImport),
     RetainTemporary(StagingPayload),
+    /// The revalidated unlink failed; no live handle exists to restore.
+    RetainSurrendered,
 }
 
 struct IncomingWrite {
@@ -4317,7 +4483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stalled_expired_reader_does_not_block_unrelated_staging_requests() {
+    async fn stalled_expired_reader_defers_cleanup_and_never_blocks_requests() {
         let test = test_staging().await;
         let allocation = test
             .staging
@@ -4339,22 +4505,24 @@ mod tests {
             .import_source(&allocation.handle, &space_id())
             .await
             .expect("hold staged source lease");
+        // A record whose state lock is held by a live reader must be skipped
+        // by the expiry pass: claiming it would persist cleanup evidence
+        // underneath the active lease.
         let expired = {
             let mut records = test.staging.state.records.write().await;
             test.staging
                 .take_expired_locked(&mut records, Instant::now() + Duration::from_secs(3_600))
         };
-        assert_eq!(expired.len(), 1);
-        let cleanup = test
-            .staging
-            .spawn_expired_cleanup(expired)
-            .expect("schedule expired cleanup");
-        tokio::task::yield_now().await;
-        assert!(
-            !cleanup.is_finished(),
-            "cleanup must wait for the reader lease"
-        );
-        drop(cleanup);
+        assert!(expired.is_empty(), "lock-held record must not be claimed");
+        let record_path = test
+            .root
+            .join("records")
+            .join(format!("{}.json", allocation.record));
+        let document: DurableStageRecord = serde_json::from_slice(
+            &std::fs::read(&record_path).expect("read live durable record"),
+        )
+        .expect("parse live durable record");
+        assert_eq!(document.cleanup_evidence, None);
 
         tokio::time::timeout(
             Duration::from_millis(200),
@@ -4369,14 +4537,27 @@ mod tests {
         .expect("allocate unrelated export");
 
         drop(source);
+        // A later pass claims the now-unlocked record and reaps it.
+        let expired = {
+            let mut records = test.staging.state.records.write().await;
+            test.staging
+                .take_expired_locked(&mut records, Instant::now() + Duration::from_secs(3_600))
+        };
+        assert!(
+            expired
+                .iter()
+                .any(|(id, _)| record_hex(id) == allocation.record),
+            "released record must be claimable on the later pass"
+        );
+        let cleanup = test
+            .staging
+            .spawn_expired_cleanup(expired)
+            .expect("schedule expired cleanup");
+        cleanup.await.expect("expired cleanup completes");
         let staged_path = payload_path(&test.root, &allocation.record);
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while staged_path.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("detached cleanup completes after reader release");
+        assert!(!staged_path.exists());
+        assert!(!record_path.exists());
+        assert!(test.staging.is_active());
     }
 
     #[tokio::test]
@@ -4747,7 +4928,10 @@ mod tests {
             serde_json::from_slice(&record_bytes).expect("parse durable record");
         far_future.created_at += chrono::Duration::days(365);
         far_future.expires_at += chrono::Duration::days(365);
-        assert!(!durable_semantics_valid(
+        // A stepped clock keeps the record well-formed (reapable), but makes
+        // it ineligible for restart revival.
+        assert!(durable_shape_valid(&far_future));
+        assert!(!durable_policy_current(
             &far_future,
             &test.staging.state.limits
         ));

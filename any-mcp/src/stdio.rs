@@ -449,10 +449,21 @@ where
                 abort_requests(&mut requests).await;
                 drop(responses);
                 let _ = writer_task.await;
+                drain_artifact_settlements(&runtime).await;
                 runtime
                     .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
                     .await;
-                return Err(ServeError::ServiceTask);
+                // Attribute the shutdown to its fixed category: staging
+                // durability uncertainty is the only self-initiated runtime
+                // shutdown; anything else remains a generic service failure.
+                let durability = runtime
+                    .artifact_staging()
+                    .is_some_and(crate::artifact_staging::ArtifactStaging::durability_uncertain);
+                return Err(if durability {
+                    ServeError::ArtifactDurability
+                } else {
+                    ServeError::ServiceTask
+                });
             }
             writer_result = &mut writer_task => {
                 runtime.begin_shutdown();
