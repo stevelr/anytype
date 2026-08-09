@@ -1344,11 +1344,15 @@ impl ArtifactStaging {
         if !config.enabled {
             return Err(StagingError::Disabled);
         }
+        // The payload inventory bound is the aggregate staging capacity, not
+        // the per-artifact policy: payloads written under a larger previous
+        // `artifact_bytes` must stay inventoriable so reconciliation can reap
+        // them. Per-record length mismatches still fail activation closed.
         let (directory, inventory) = StagingDirectory::activate(
             config.root(),
             local_roots,
             limits.staging_entries,
-            limits.artifact_bytes,
+            limits.staging_total_bytes,
         )
         .map_err(|_| StagingError::InvalidPolicy)?;
         let reconciliation = reconcile_inventory(&directory, inventory, limits)?;
@@ -3714,6 +3718,25 @@ mod tests {
         }
     }
 
+    fn staging_test_config(root: &Path) -> ArtifactConfig {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind port probe");
+        let port = probe.local_addr().expect("probe address").port();
+        drop(probe);
+        let base = format!("http://127.0.0.1:{port}/artifacts/v1/");
+        let root_toml = root.to_string_lossy().replace('\\', "\\\\");
+        ArtifactConfig::from_toml(&format!(
+            "schema_version = 1\n\
+             [spaces]\n\
+             read_only = false\n\
+             [staging]\n\
+             enabled = true\n\
+             root = \"{root_toml}\"\n\
+             bind = \"127.0.0.1:{port}\"\n\
+             public_base_url = \"{base}\"\n"
+        ))
+        .expect("staging config")
+    }
+
     async fn test_staging() -> TestStaging {
         let suffix = getrandom::u64().expect("test randomness");
         let root = std::env::temp_dir().join(format!("any-mcp-stage-{suffix:016x}"));
@@ -3724,22 +3747,7 @@ mod tests {
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
                 .expect("make staging root owner-private");
         }
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind port probe");
-        let port = probe.local_addr().expect("probe address").port();
-        drop(probe);
-        let base = format!("http://127.0.0.1:{port}/artifacts/v1/");
-        let root_toml = root.to_string_lossy().replace('\\', "\\\\");
-        let config = ArtifactConfig::from_toml(&format!(
-            "schema_version = 1\n\
-             [spaces]\n\
-             read_only = false\n\
-             [staging]\n\
-             enabled = true\n\
-             root = \"{root_toml}\"\n\
-             bind = \"127.0.0.1:{port}\"\n\
-             public_base_url = \"{base}\"\n"
-        ))
-        .expect("staging config");
+        let config = staging_test_config(&root);
         let roots = RootRegistry::activate(&config).expect("activate empty local roots");
         let shutdown = CancellationToken::new();
         let staging = ArtifactStaging::activate(
@@ -4518,10 +4526,9 @@ mod tests {
             .root
             .join("records")
             .join(format!("{}.json", allocation.record));
-        let document: DurableStageRecord = serde_json::from_slice(
-            &std::fs::read(&record_path).expect("read live durable record"),
-        )
-        .expect("parse live durable record");
+        let document: DurableStageRecord =
+            serde_json::from_slice(&std::fs::read(&record_path).expect("read live durable record"))
+                .expect("parse live durable record");
         assert_eq!(document.cleanup_evidence, None);
 
         tokio::time::timeout(
@@ -4869,6 +4876,626 @@ mod tests {
             .cleaned,
             1
         );
+        assert_empty_closed_layout(&test.root);
+    }
+
+    /// W2: a crash between the durable `Allocated` publish and the
+    /// `Receiving` publish leaves an allocated record beside its same-named
+    /// payload. Restart must reap the pair, not refuse activation.
+    #[tokio::test]
+    async fn restart_reaps_allocated_record_with_orphan_payload() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate crash fixture");
+        let record_path = test
+            .root
+            .join("records")
+            .join(format!("{}.json", allocation.record));
+        let mut document: DurableStageRecord =
+            serde_json::from_slice(&std::fs::read(&record_path).expect("read durable record"))
+                .expect("parse durable record");
+        document.state = DurableStageState::Allocated;
+        document.payload_identity = None;
+        document.committed_offset = 0;
+        std::fs::write(
+            &record_path,
+            serde_json::to_vec(&document).expect("serialize allocated record"),
+        )
+        .expect("rewrite record to the crash footprint");
+        assert!(payload_path(&test.root, &allocation.record).is_file());
+        let inventory = test
+            .staging
+            .state
+            .directory
+            .inventory(
+                test.staging.state.limits.staging_entries,
+                test.staging.state.limits.artifact_bytes,
+            )
+            .expect("inventory crash footprint");
+        let outcome = reconcile_inventory(
+            &test.staging.state.directory,
+            inventory,
+            &test.staging.state.limits,
+        )
+        .expect("reap torn allocation");
+        assert_eq!(outcome.cleaned, 1);
+        assert!(outcome.retained.is_empty());
+        assert_empty_closed_layout(&test.root);
+    }
+
+    /// R2: the production abort path always surrenders the payload writer to
+    /// the failed transfer before aborting. The emptied lease must still
+    /// release the record and reap its on-disk footprint.
+    #[tokio::test]
+    async fn abort_write_with_surrendered_destination_releases_and_reaps() {
+        let test = test_staging().await;
+        let before_allocation = test.staging.available_quota().await;
+        let allocation = test
+            .staging
+            .allocate_export(space_id(), 5, Some("application/octet-stream".to_owned()))
+            .await
+            .expect("allocate export");
+        let mut lease = test
+            .staging
+            .begin_write(
+                &allocation.handle,
+                Some(&allocation.record),
+                StageDirection::Export,
+                0,
+            )
+            .await
+            .expect("lease export");
+        let destination = lease.take_destination().expect("surrender destination");
+        drop(destination);
+        test.staging
+            .abort_write(lease, &allocation.handle)
+            .await
+            .expect("abort with surrendered destination");
+        assert!(!payload_path(&test.root, &allocation.record).exists());
+        assert!(
+            !test
+                .root
+                .join("records")
+                .join(format!("{}.json", allocation.record))
+                .exists()
+        );
+        assert!(
+            !test
+                .root
+                .join("tombstones")
+                .join(format!("{}.json", allocation.record))
+                .exists()
+        );
+        assert!(test.staging.state.records.read().await.is_empty());
+        assert_eq!(test.staging.available_quota().await, before_allocation);
+        assert!(test.staging.is_active());
+        assert_empty_closed_layout(&test.root);
+    }
+
+    /// W14: shutdown or a dropped connection can drop an active write lease
+    /// outright; the destination-less record must still be releasable.
+    #[tokio::test]
+    async fn dropped_write_lease_still_releases_and_reaps() {
+        let test = test_staging().await;
+        let before_allocation = test.staging.available_quota().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate import");
+        let lease = test
+            .staging
+            .begin_write(
+                &allocation.handle,
+                Some(&allocation.record),
+                StageDirection::Import,
+                0,
+            )
+            .await
+            .expect("lease import");
+        drop(lease);
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("release destination-less record");
+        assert!(!payload_path(&test.root, &allocation.record).exists());
+        assert!(test.staging.state.records.read().await.is_empty());
+        assert_eq!(test.staging.available_quota().await, before_allocation);
+        assert!(test.staging.is_active());
+        assert_empty_closed_layout(&test.root);
+    }
+
+    /// W3: payload bytes flushed beyond the durable committed offset are
+    /// truncated back to the exact offset during restart reconciliation.
+    #[tokio::test]
+    async fn restart_truncates_over_committed_payload_before_reaping() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate truncation fixture");
+        let payload = payload_path(&test.root, &allocation.record);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&payload)
+            .expect("open payload for crash bytes")
+            .write_all(b"hello")
+            .expect("write uncommitted payload bytes");
+        let record_path = test
+            .root
+            .join("records")
+            .join(format!("{}.json", allocation.record));
+        let mut document: DurableStageRecord =
+            serde_json::from_slice(&std::fs::read(&record_path).expect("read durable record"))
+                .expect("parse durable record");
+        document.committed_offset = 3;
+        std::fs::write(
+            &record_path,
+            serde_json::to_vec(&document).expect("serialize over-committed record"),
+        )
+        .expect("rewrite record with durable offset");
+        let inventory = test
+            .staging
+            .state
+            .directory
+            .inventory(
+                test.staging.state.limits.staging_entries,
+                test.staging.state.limits.artifact_bytes,
+            )
+            .expect("inventory over-committed payload");
+        let outcome = reconcile_inventory(
+            &test.staging.state.directory,
+            inventory,
+            &test.staging.state.limits,
+        )
+        .expect("truncate and reap over-committed payload");
+        assert_eq!(outcome.cleaned, 1);
+        assert_empty_closed_layout(&test.root);
+    }
+
+    /// W6/W7/W10/W13: deterministic crash footprints at every deletion
+    /// barrier — cleanup-pending without its tombstone, cleanup-pending with
+    /// its tombstone, and an orphan tombstone — all resume through one
+    /// reconciliation pass.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_resumes_interrupted_deletions_at_every_barrier() {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+        fn write_private(path: &Path, bytes: &[u8]) {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+                .expect("create owner-private fixture")
+                .write_all(bytes)
+                .expect("write owner-private fixture");
+        }
+
+        let test = test_staging().await;
+        let mut cleaned_expected = 0_usize;
+        // W6: `CleanupPending` persisted, crash before the tombstone publish.
+        let before_tombstone = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate pre-tombstone fixture");
+        let record_path = test
+            .root
+            .join("records")
+            .join(format!("{}.json", before_tombstone.record));
+        let mut document: DurableStageRecord =
+            serde_json::from_slice(&std::fs::read(&record_path).expect("read durable record"))
+                .expect("parse durable record");
+        document.state = DurableStageState::CleanupPending;
+        document.cleanup_evidence = Some("tombstone_pending".to_owned());
+        std::fs::write(
+            &record_path,
+            serde_json::to_vec(&document).expect("serialize cleanup-pending record"),
+        )
+        .expect("rewrite pre-tombstone record");
+        cleaned_expected += 1;
+
+        // W7: crash after the tombstone publish, before any removal.
+        let with_tombstone = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate post-tombstone fixture");
+        let record_path = test
+            .root
+            .join("records")
+            .join(format!("{}.json", with_tombstone.record));
+        let mut document: DurableStageRecord =
+            serde_json::from_slice(&std::fs::read(&record_path).expect("read durable record"))
+                .expect("parse durable record");
+        document.state = DurableStageState::CleanupPending;
+        document.cleanup_evidence = Some("tombstone_pending".to_owned());
+        std::fs::write(
+            &record_path,
+            serde_json::to_vec(&document).expect("serialize cleanup-pending record"),
+        )
+        .expect("rewrite post-tombstone record");
+        let record_meta = std::fs::metadata(&record_path).expect("record metadata");
+        let payload_meta = std::fs::metadata(payload_path(&test.root, &with_tombstone.record))
+            .expect("payload metadata");
+        let tombstone = DurableTombstone {
+            format_version: DURABLE_RECORD_VERSION,
+            record_id: with_tombstone.record.clone(),
+            payload_identity: Some(DurableFileIdentity {
+                volume: payload_meta.dev(),
+                file: payload_meta.ino(),
+            }),
+            record_identity: DurableFileIdentity {
+                volume: record_meta.dev(),
+                file: record_meta.ino(),
+            },
+        };
+        write_private(
+            &test
+                .root
+                .join("tombstones")
+                .join(format!("{}.json", with_tombstone.record)),
+            &serde_json::to_vec(&tombstone).expect("serialize tombstone"),
+        );
+        cleaned_expected += 1;
+
+        // W10: crash after record removal left only the tombstone behind.
+        let orphan_id = "0123456789abcdef0123456789abcdef".to_owned();
+        let orphan = DurableTombstone {
+            format_version: DURABLE_RECORD_VERSION,
+            record_id: orphan_id.clone(),
+            payload_identity: None,
+            record_identity: DurableFileIdentity {
+                volume: record_meta.dev(),
+                file: record_meta.ino(),
+            },
+        };
+        write_private(
+            &test
+                .root
+                .join("tombstones")
+                .join(format!("{orphan_id}.json")),
+            &serde_json::to_vec(&orphan).expect("serialize orphan tombstone"),
+        );
+
+        let inventory = test
+            .staging
+            .state
+            .directory
+            .inventory(
+                test.staging.state.limits.staging_entries,
+                test.staging.state.limits.artifact_bytes,
+            )
+            .expect("inventory barrier footprints");
+        let outcome = reconcile_inventory(
+            &test.staging.state.directory,
+            inventory,
+            &test.staging.state.limits,
+        )
+        .expect("resume all interrupted deletions");
+        assert_eq!(outcome.cleaned, cleaned_expected);
+        assert!(outcome.retained.is_empty());
+        assert_empty_closed_layout(&test.root);
+    }
+
+    /// F6: a stepped wall clock keeps runtime publication working, and makes
+    /// out-of-recency records reapable — never activation-fatal.
+    #[tokio::test]
+    async fn clock_steps_never_close_authority_or_refuse_restart() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate clock fixture");
+        let record_path = test
+            .root
+            .join("records")
+            .join(format!("{}.json", allocation.record));
+        let document: DurableStageRecord =
+            serde_json::from_slice(&std::fs::read(&record_path).expect("read durable record"))
+                .expect("parse durable record");
+
+        // Runtime: republishing under a stepped clock (either direction)
+        // succeeds and leaves authority open.
+        let mut stepped_back = document.clone();
+        stepped_back.created_at -= chrono::Duration::days(365);
+        stepped_back.expires_at -= chrono::Duration::days(365);
+        test.staging
+            .publish_document(&stepped_back)
+            .await
+            .expect("publish under a backwards clock step");
+        let mut stepped_forward = document.clone();
+        stepped_forward.created_at += chrono::Duration::days(365);
+        stepped_forward.expires_at += chrono::Duration::days(365);
+        test.staging
+            .publish_document(&stepped_forward)
+            .await
+            .expect("publish under a forwards clock step");
+        assert!(test.staging.is_active());
+
+        // Restart: the far-future record is well-formed and reapable.
+        let inventory = test
+            .staging
+            .state
+            .directory
+            .inventory(
+                test.staging.state.limits.staging_entries,
+                test.staging.state.limits.artifact_bytes,
+            )
+            .expect("inventory stepped-clock record");
+        let outcome = reconcile_inventory(
+            &test.staging.state.directory,
+            inventory,
+            &test.staging.state.limits,
+        )
+        .expect("reap stepped-clock record");
+        assert_eq!(outcome.cleaned, 1);
+        assert_empty_closed_layout(&test.root);
+    }
+
+    /// R1: a record whose settlement is live past its expiry must not be
+    /// claimed; the settlement completes, no cleanup evidence is persisted
+    /// under it, and authority never closes.
+    #[tokio::test]
+    async fn expiry_never_claims_a_live_import_settlement() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate settlement fixture");
+        let response = reqwest::Client::new()
+            .put(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "5")
+            .body("hello")
+            .send()
+            .await
+            .expect("upload settlement fixture");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let mut source = test
+            .staging
+            .import_source(&allocation.handle, &space_id())
+            .await
+            .expect("acquire settlement source");
+        test.staging
+            .bind_import_operation(&mut source, [9; 32])
+            .await
+            .expect("bind settlement operation");
+        test.staging
+            .mark_import_dispatched(&mut source)
+            .await
+            .expect("mark settlement dispatched");
+        test.staging
+            .retain_import_candidate(
+                &source,
+                &EntityId::new("expiry-race-candidate").expect("candidate ID"),
+            )
+            .await
+            .expect("retain settlement candidate");
+
+        let expired = {
+            let mut records = test.staging.state.records.write().await;
+            test.staging
+                .take_expired_locked(&mut records, Instant::now() + Duration::from_secs(3_600))
+        };
+        assert!(expired.is_empty(), "live settlement must not be claimed");
+
+        // The settlement's own transition still succeeds, which fails if
+        // cleanup evidence had been persisted underneath it.
+        test.staging
+            .consume(&mut source)
+            .await
+            .expect("consume after the skipped expiry pass");
+        assert!(test.staging.is_active());
+        drop(source);
+
+        let expired = {
+            let mut records = test.staging.state.records.write().await;
+            test.staging
+                .take_expired_locked(&mut records, Instant::now() + Duration::from_secs(3_600))
+        };
+        assert_eq!(expired.len(), 1);
+        let cleanup = test
+            .staging
+            .spawn_expired_cleanup(expired)
+            .expect("schedule settled cleanup");
+        cleanup.await.expect("settled cleanup completes");
+        assert!(test.staging.is_active());
+        assert_empty_closed_layout(&test.root);
+    }
+
+    /// Recovery construction through the real activation path: a dirty root
+    /// with retained dispatched evidence revives the record, recharges its
+    /// quota, and preserves its identity — with no bearer authority.
+    #[tokio::test]
+    async fn full_activation_recovers_retained_dispatched_evidence() {
+        let suffix = getrandom::u64().expect("test randomness");
+        let root = std::env::temp_dir().join(format!("any-mcp-stage-{suffix:016x}"));
+        std::fs::create_dir(&root).expect("create staging root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                .expect("make staging root owner-private");
+        }
+        let config = staging_test_config(&root);
+        let roots = RootRegistry::activate(&config).expect("activate empty local roots");
+        let shutdown = CancellationToken::new();
+        let staging = ArtifactStaging::activate(
+            config.staging().expect("staging declaration"),
+            &config.limits,
+            &roots,
+            shutdown.clone(),
+        )
+        .await
+        .expect("activate first generation");
+        let allocation = staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate recovery fixture");
+        let response = reqwest::Client::new()
+            .put(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "5")
+            .body("hello")
+            .send()
+            .await
+            .expect("upload recovery fixture");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let mut source = staging
+            .import_source(&allocation.handle, &space_id())
+            .await
+            .expect("acquire recovery source");
+        staging
+            .bind_import_operation(&mut source, [3; 32])
+            .await
+            .expect("bind recovery operation");
+        staging
+            .mark_import_dispatched(&mut source)
+            .await
+            .expect("mark recovery dispatched");
+        drop(source);
+        shutdown.cancel();
+        assert!(staging.drain(Duration::from_secs(2)).await);
+        drop(staging);
+        drop(roots);
+
+        let config = staging_test_config(&root);
+        let roots = RootRegistry::activate(&config).expect("activate recovery roots");
+        let shutdown = CancellationToken::new();
+        let mut recovered = None;
+        for _ in 0..40_u32 {
+            match ArtifactStaging::activate_with_policy_digest(
+                config.staging().expect("staging declaration"),
+                &config.limits,
+                &roots,
+                [0; 32],
+                shutdown.clone(),
+            )
+            .await
+            {
+                Ok(staging) => {
+                    recovered = Some(staging);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        let recovered = recovered.expect("second generation activates on the dirty root");
+        {
+            let records = recovered.state.records.read().await;
+            assert_eq!(records.len(), 1);
+            let record = records.values().next().expect("recovered record");
+            assert_eq!(record.record_name, format!("{}.bin", allocation.record));
+            assert_eq!(record.bearer_digest, [0; 32]);
+            assert!(matches!(
+                *record.state.try_lock().expect("inspect recovered state"),
+                RecordState::Reconciliation { .. }
+            ));
+        }
+        let (available_bytes, available_entries) = recovered.available_quota().await;
+        assert_eq!(
+            available_bytes,
+            recovered.state.limits.staging_total_bytes - 5
+        );
+        assert_eq!(
+            u64::from(available_entries),
+            (recovered.state.limits.staging_entries - 1) as u64
+        );
+        // The stale bearer from the previous generation authenticates
+        // nothing.
+        assert!(matches!(
+            recovered
+                .import_metadata(&allocation.handle, &space_id())
+                .await,
+            Err(StagingError::NotFound)
+        ));
+        shutdown.cancel();
+        let _ = recovered.drain(Duration::from_secs(2)).await;
+        drop(recovered);
+        std::fs::remove_dir_all(&root).expect("cleanup recovery root");
+    }
+
+    /// F6: retained evidence outside a newly lowered policy is reaped at
+    /// restart instead of failing activation or being revived over-limit.
+    #[tokio::test]
+    async fn restart_reaps_retained_evidence_outside_lowered_policy() {
+        let test = test_staging().await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate policy fixture");
+        let response = reqwest::Client::new()
+            .put(&allocation.url)
+            .header(AUTHORIZATION, format!("Bearer {}", allocation.handle))
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "5")
+            .body("hello")
+            .send()
+            .await
+            .expect("upload policy fixture");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let mut source = test
+            .staging
+            .import_source(&allocation.handle, &space_id())
+            .await
+            .expect("acquire policy source");
+        test.staging
+            .bind_import_operation(&mut source, [5; 32])
+            .await
+            .expect("bind policy operation");
+        test.staging
+            .mark_import_dispatched(&mut source)
+            .await
+            .expect("mark policy dispatched");
+        drop(source);
+        test.shutdown.cancel();
+        assert!(test.staging.drain(Duration::from_secs(2)).await);
+
+        // Positive control: the current policy retains the evidence.
+        let inventory = test
+            .staging
+            .state
+            .directory
+            .inventory(
+                test.staging.state.limits.staging_entries,
+                test.staging.state.limits.staging_total_bytes,
+            )
+            .expect("inventory retained evidence");
+        let outcome = reconcile_inventory(
+            &test.staging.state.directory,
+            inventory,
+            &test.staging.state.limits,
+        )
+        .expect("retain under the unchanged policy");
+        assert_eq!(outcome.cleaned, 0);
+        assert_eq!(outcome.retained.len(), 1);
+        drop(outcome);
+
+        // A lowered per-artifact bound makes the same record reapable.
+        let mut lowered = test.staging.state.limits.clone();
+        lowered.artifact_bytes = 1;
+        let inventory = test
+            .staging
+            .state
+            .directory
+            .inventory(lowered.staging_entries, lowered.staging_total_bytes)
+            .expect("inventory under the lowered policy");
+        let outcome = reconcile_inventory(&test.staging.state.directory, inventory, &lowered)
+            .expect("reap instead of refusing activation");
+        assert_eq!(outcome.cleaned, 1);
+        assert!(outcome.retained.is_empty());
         assert_empty_closed_layout(&test.root);
     }
 

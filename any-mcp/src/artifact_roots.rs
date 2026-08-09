@@ -808,11 +808,8 @@ impl StagingDirectory {
             .open_with(Path::new(STAGING_LOCK_NAME), &options)
             .map(cap_std::fs::File::into_std)
             .map_err(|error| probe_io(&error))?;
-        let metadata = reopened
-            .metadata()
-            .map_err(|error| probe_io(&error))?;
-        let identity = file_identity(&reopened, &metadata)
-            .map_err(|error| probe_io(&error))?;
+        let metadata = reopened.metadata().map_err(|error| probe_io(&error))?;
+        let identity = file_identity(&reopened, &metadata).map_err(|error| probe_io(&error))?;
         if identity != self.instance_lock_identity
             || !safe_created_export_metadata(&reopened, &metadata)
             || !safe_windows_security(&reopened)
@@ -3299,6 +3296,175 @@ mod tests {
         let (second, _) =
             StagingDirectory::activate(&path, &registry, 4, 1024).expect("next generation");
         drop(second);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[test]
+    fn staging_activation_completes_partial_first_activation_layout() {
+        let (base, import, export) = temporary_tree();
+        let staging = base.join("staging");
+        fs::create_dir(&staging).expect("staging directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .expect("owner-private staging directory");
+        }
+        // Footprint of a crash during a prior first activation: the lock and
+        // two of the four subdirectories exist, nothing else.
+        let mut lock = fs::OpenOptions::new();
+        lock.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            lock.mode(0o600);
+        }
+        lock.open(staging.join(STAGING_LOCK_NAME))
+            .expect("partial-layout lock");
+        for name in [STAGING_RECORDS_DIRECTORY, STAGING_PAYLOADS_DIRECTORY] {
+            fs::create_dir(staging.join(name)).expect("partial-layout directory");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(staging.join(name), fs::Permissions::from_mode(0o700))
+                    .expect("owner-private partial directory");
+            }
+        }
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate roots");
+        let path = AbsoluteNativePath::from_utf8(
+            staging.to_str().expect("temporary staging path is UTF-8"),
+        )
+        .expect("staging path");
+        let (healed, inventory) =
+            StagingDirectory::activate(&path, &registry, 4, 1024).expect("self-healed activation");
+        assert!(inventory.records.is_empty());
+        assert!(inventory.payloads.is_empty());
+        for name in [
+            STAGING_RECORDS_DIRECTORY,
+            STAGING_PAYLOADS_DIRECTORY,
+            STAGING_TEMPORARY_DIRECTORY,
+            STAGING_TOMBSTONES_DIRECTORY,
+        ] {
+            assert!(staging.join(name).is_dir());
+        }
+        drop(healed);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[test]
+    fn staging_activation_migrates_legacy_pre_durable_root() {
+        let (base, import, export) = temporary_tree();
+        let staging = base.join("staging");
+        fs::create_dir(&staging).expect("staging directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .expect("owner-private staging directory");
+        }
+        let legacy_lock = staging.join(LEGACY_STAGING_LOCK_NAME);
+        let legacy_payload = staging.join(format!("{}.bin", "ab".repeat(16)));
+        let legacy_temporary = staging.join(format!(".any-mcp-{}.tmp", "cd".repeat(8)));
+        for path in [&legacy_lock, &legacy_payload, &legacy_temporary] {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            options.open(path).expect("legacy staging file");
+        }
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate roots");
+        let path = AbsoluteNativePath::from_utf8(
+            staging.to_str().expect("temporary staging path is UTF-8"),
+        )
+        .expect("staging path");
+        let (migrated, inventory) =
+            StagingDirectory::activate(&path, &registry, 4, 1024).expect("migrated activation");
+        assert!(inventory.records.is_empty());
+        assert!(inventory.payloads.is_empty());
+        assert!(!legacy_lock.exists());
+        assert!(!legacy_payload.exists());
+        assert!(!legacy_temporary.exists());
+        assert!(staging.join(STAGING_LOCK_NAME).is_file());
+        drop(migrated);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_legacy_staging_lock_fails_activation_closed() {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        let (base, import, export) = temporary_tree();
+        let staging = base.join("staging");
+        fs::create_dir(&staging).expect("staging directory");
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+            .expect("owner-private staging directory");
+        let legacy_lock = staging.join(LEGACY_STAGING_LOCK_NAME);
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&legacy_lock)
+            .expect("legacy lock file");
+        held.try_lock_exclusive().expect("hold legacy lock");
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate roots");
+        let path = AbsoluteNativePath::from_utf8(
+            staging.to_str().expect("temporary staging path is UTF-8"),
+        )
+        .expect("staging path");
+        // A live pre-durable instance still owns this root; activation must
+        // refuse rather than unlock the root underneath it.
+        assert!(StagingDirectory::activate(&path, &registry, 4, 1024).is_err());
+        assert!(legacy_lock.exists());
+        drop(held);
+        let (next, _) = StagingDirectory::activate(&path, &registry, 4, 1024)
+            .expect("activation after the legacy owner exited");
+        assert!(!legacy_lock.exists());
+        drop(next);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[test]
+    fn truncate_exact_payload_truncates_to_the_exact_offset() {
+        let (base, import, export) = temporary_tree();
+        let staging = base.join("staging");
+        fs::create_dir(&staging).expect("staging directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .expect("owner-private staging directory");
+        }
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate roots");
+        let path = AbsoluteNativePath::from_utf8(
+            staging.to_str().expect("temporary staging path is UTF-8"),
+        )
+        .expect("staging path");
+        let (directory, _) =
+            StagingDirectory::activate(&path, &registry, 4, 1024).expect("activate staging");
+        let record_id = "ef".repeat(16);
+        let mut payload = directory
+            .create_payload(&record_id, 64)
+            .expect("create payload");
+        payload.write_all(b"hello").expect("write payload");
+        let anchored = payload.into_anchored().expect("anchor payload");
+        directory
+            .truncate_exact_payload(&format!("{record_id}.bin"), &anchored, 3)
+            .expect("truncate payload");
+        let on_disk = staging
+            .join(STAGING_PAYLOADS_DIRECTORY)
+            .join(format!("{record_id}.bin"));
+        assert_eq!(fs::read(&on_disk).expect("read truncated payload"), b"hel");
+        drop(anchored);
+        drop(directory);
         drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }

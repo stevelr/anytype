@@ -129,6 +129,9 @@ pub struct RuntimeContext {
     settlement_active: Arc<AtomicUsize>,
     settlement_notify: Arc<Notify>,
     settlement_gate: Arc<Mutex<SettlementAdmissionGate>>,
+    // Read only by the acceptance-gated accessors; production builds carry
+    // the disabled facility without reading it.
+    #[cfg_attr(not(any(test, feature = "acceptance-harness")), allow(dead_code))]
     artifact_acceptance_gates: ArtifactAcceptanceGates,
     client_roots: Arc<ClientRootsGate>,
 }

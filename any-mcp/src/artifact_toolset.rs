@@ -2593,11 +2593,10 @@ async fn file_export(
                         })
                     },
                     move |result| match result {
-                        Ok(committed) if committed == size => abandoned_operations
-                            .set_outcome_now(
-                                key,
-                                OperationOutcome::ExportComplete(abandoned_output),
-                            ),
+                        Ok(committed) if committed == size => abandoned_operations.set_outcome_now(
+                            key,
+                            OperationOutcome::ExportComplete(abandoned_output),
+                        ),
                         Ok(_) | Err(_) => abandoned_operations.mark_indeterminate(key),
                     },
                 )
