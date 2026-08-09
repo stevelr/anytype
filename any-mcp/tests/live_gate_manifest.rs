@@ -124,6 +124,34 @@ const HEADLESS_STDIO_IGNORED_TESTS: &[&str] = &[
 const DISCUSSIONS_STDIO_IGNORED_TESTS: &[&str] =
     &["cleanup_owned_stable_and_preview_processes_cover_real_discussions"];
 
+/// Released targets of the artifact data-plane platform matrix, as the
+/// portable workflow job declares them.
+const PORTABLE_PLATFORM_MATRIX: [(&str, &str); 5] = [
+    ("ubuntu-latest", "linux-x86_64"),
+    ("ubuntu-24.04-arm", "linux-aarch64"),
+    ("macos-latest", "macos-aarch64"),
+    ("windows-latest", "windows-x86_64"),
+    ("windows-11-arm", "windows-aarch64"),
+];
+
+/// Whitespace-compacted artifact acceptance and adversarial commands that
+/// every platform row runs.
+const PORTABLE_ARTIFACT_SUITES: [&str; 2] = [
+    "cargo test --locked -p any-mcp --features acceptance-harness --lib artifact -- --test-threads=1",
+    "cargo test --locked -p any-mcp --features acceptance-harness --test headless_stdio_e2e artifact -- --test-threads=1",
+];
+
+/// Name filter shared by both compiled artifact control planes.
+const PORTABLE_ARTIFACT_FILTER: &str = "artifact";
+
+/// Smallest portable artifact selection each control plane must keep.
+///
+/// A name filter that matched nothing would pass silently on every platform,
+/// so the floor is deliberately far below the current inventories while still
+/// rejecting a collapsed selection. Exact counts stay unpinned because
+/// acceptance slices change them often.
+const PORTABLE_ARTIFACT_FLOOR: usize = 40;
+
 #[derive(Debug, Eq, PartialEq)]
 struct InventoryDrift {
     missing: BTreeSet<String>,
@@ -136,7 +164,12 @@ fn workspace_root() -> &'static Path {
         .expect("any-mcp manifest has a workspace parent")
 }
 
-fn ignored_tests(target: &str, acceptance_harness: bool) -> BTreeSet<String> {
+fn listed_tests(
+    target: &str,
+    acceptance_harness: bool,
+    filter: Option<&str>,
+    ignored_only: bool,
+) -> BTreeSet<String> {
     let mut command = Command::new(env!("CARGO"));
     command
         .current_dir(workspace_root())
@@ -149,19 +182,30 @@ fn ignored_tests(target: &str, acceptance_harness: bool) -> BTreeSet<String> {
     } else {
         command.args(["--test", target]);
     }
+    command.arg("--");
+    if let Some(filter) = filter {
+        command.arg(filter);
+    }
+    command.arg("--list");
+    if ignored_only {
+        command.arg("--ignored");
+    }
     let output = command
-        .args(["--", "--list", "--ignored"])
         .output()
-        .unwrap_or_else(|error| panic!("list ignored tests for {target}: {error}"));
+        .unwrap_or_else(|error| panic!("list tests for {target}: {error}"));
     assert!(
         output.status.success(),
-        "listing ignored tests for {target} failed:\n{}",
+        "listing tests for {target} failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.strip_suffix(": test").map(str::to_owned))
         .collect()
+}
+
+fn ignored_tests(target: &str, acceptance_harness: bool) -> BTreeSet<String> {
+    listed_tests(target, acceptance_harness, None, true)
 }
 
 fn assert_sorted_unique(entries: &[&str]) {
@@ -282,6 +326,25 @@ fn whole_binary_live_target_manifests_are_closed() {
 }
 
 #[test]
+fn artifact_suite_filter_selects_a_populated_portable_matrix() {
+    for target in ["lib", "headless_stdio_e2e"] {
+        let selected = listed_tests(target, true, Some(PORTABLE_ARTIFACT_FILTER), false);
+        assert!(
+            selected
+                .iter()
+                .all(|test| test.contains(PORTABLE_ARTIFACT_FILTER)),
+            "artifact filter selected an unrelated test in {target}"
+        );
+        let live = listed_tests(target, true, Some(PORTABLE_ARTIFACT_FILTER), true);
+        let portable = selected.difference(&live).count();
+        assert!(
+            portable >= PORTABLE_ARTIFACT_FLOOR,
+            "artifact control plane {target} selects only {portable} portable tests"
+        );
+    }
+}
+
+#[test]
 fn inventory_comparison_rejects_a_renamed_test() {
     let expected = ["headless_alpha", "headless_beta"];
     let actual = test_names(&["headless_alpha", "headless_beta_renamed"]);
@@ -323,13 +386,17 @@ fn inventory_comparison_rejects_a_same_count_replacement() {
 
 #[test]
 fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
-    let workflow = include_str!("../../.github/workflows/any-mcp.yml");
+    // Every platform row of the matrix runs this gate, and a Windows checkout
+    // may translate the committed line endings. The reviewed representation is
+    // therefore pinned in its canonical newline form.
+    let workflow = include_str!("../../.github/workflows/any-mcp.yml").replace("\r\n", "\n");
+    let workflow = workflow.as_str();
     let digest = Sha256::digest(workflow.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     assert_eq!(
-        digest, "aaf410bfad40a39a1d1c5fc272064f3fef1f48cabc4a2c1b4ab191389d58b2ad",
+        digest, "2061a8a3f6bc20b0eb497cb1f86fd526864e707c4284210cdead451197999a92",
         "workflow policy is an exact reviewed representation; audit before updating this digest"
     );
     let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
@@ -341,6 +408,26 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
     assert!(!workflow.contains("  schedule:\n"));
     assert!(!portable.contains("self-hosted"));
     assert_eq!(occurrences(portable, "if: runner.os == 'Linux'"), 2);
+
+    let compact_portable = compact_whitespace(portable);
+    for (os, platform) in PORTABLE_PLATFORM_MATRIX {
+        assert!(
+            compact_portable.contains(&format!("- os: {os} platform: {platform}")),
+            "portable matrix is missing platform row {platform}"
+        );
+    }
+    assert_eq!(
+        occurrences(portable, "- os: "),
+        PORTABLE_PLATFORM_MATRIX.len(),
+        "portable matrix carries an undeclared platform row"
+    );
+    for suite in PORTABLE_ARTIFACT_SUITES {
+        assert!(
+            compact_portable.contains(suite),
+            "portable artifact suite step is missing {suite}"
+        );
+    }
+
     for block in [live, clean] {
         assert!(compact_whitespace(block).contains(predicate));
         assert!(block.contains("needs: portable-contracts"));
@@ -357,6 +444,15 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         assert!(block.contains("systemctl --user show-environment"));
         for label in ["direct", "stdio", "discussions"] {
             assert!(block.contains(&format!("run-live-cgroup.sh test {label} --")));
+        }
+        for target in [
+            "--lib headless_ -- \\",
+            "--test headless_stdio_e2e -- --ignored",
+        ] {
+            assert!(
+                block.contains(target),
+                "live gate narrowed a whole-target run and can drop artifact owners: {target}"
+            );
         }
     }
     assert_eq!(occurrences(workflow, "group: anytype-headless-live"), 2);

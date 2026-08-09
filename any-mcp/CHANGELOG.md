@@ -27,6 +27,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Run the artifact data-plane acceptance and adversarial suites on every
+  released target of the platform matrix. The portable CI job declares one row
+  per target — Linux x86_64/aarch64, macOS aarch64, Windows x86_64/aarch64 —
+  and each row executes both compiled artifact control planes serially: the
+  library plane, which also locks the exact artifact catalog and schema
+  snapshots, and the spawned `headless_stdio_e2e` plane, which adds the
+  adversarial case matrix. The live-gate manifest pins the platform rows, both
+  suite command lines, and the whole-target shape of the live steps, so a
+  narrowing filter cannot silently drop artifact owners; it normalizes
+  workflow line endings before hashing so the reviewed digest survives a
+  Windows checkout, and a floor test rejects a collapsed artifact selection in
+  either plane. Live real-backend rows remain Linux-only.
+
 - Accept client-root narrowing on stable stdio with two live protocol rows in
   the spawned artifact matrix owner. The intersecting row advertises the MCP
   roots capability, answers exactly one bounded `roots/list` snapshot with the

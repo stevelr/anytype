@@ -1727,10 +1727,14 @@ cargo test -p any-mcp
 ```
 
 The `.github/workflows/any-mcp.yml` matrix runs the library schema, catalog,
-budget, and unit tests plus the real-process stdio suites on Linux, macOS, and
-Windows. The process harness uses only portable Rust process, TCP, path,
-environment, thread, and channel APIs; it does not depend on Unix signals,
-`/tmp`, executable suffixes, or shell scripts.
+budget, and unit tests plus the real-process stdio suites on one row per
+released target: Linux x86_64/aarch64, macOS aarch64, and Windows
+x86_64/aarch64. Every row also runs both compiled artifact control planes —
+the library plane, which locks the exact artifact catalog and schema
+snapshots, and the spawned `headless_stdio_e2e` plane, which adds the
+adversarial case matrix — serially. The process harness uses only portable
+Rust process, TCP, path, environment, thread, and channel APIs; it does not
+depend on Unix signals, `/tmp`, executable suffixes, or shell scripts.
 
 The release workflow can also be started manually for a selected branch or
 tag. Manual runs build either all cargo-dist targets or one selected target
@@ -1753,11 +1757,18 @@ and validation tests remain the only no-backend cases; production has no
 test-mode backend selector. The executable catalog audit and disposable live
 scenarios maintain the architecture and evidence contract.
 
-This is an OS-family portability gate, not a claim that CI exercises every CPU
-architecture. The workspace targets Linux x86_64/aarch64, macOS aarch64, and
-Windows x86_64/aarch64; the current dist configuration produces macOS aarch64,
-Linux x86_64/aarch64, and Windows x86_64 artifacts. No external `any-mcp`
-release is published by this documentation change.
+The portable matrix now carries one row per released target, including the two
+aarch64 rows, so it is an architecture gate as well as an OS-family gate. The
+aarch64 rows use hosted arm labels; a fork without access to them must move
+those rows to self-hosted labels rather than drop them. Live real-backend rows
+stay Linux-only, because the self-hosted headless environment and its
+systemd-scoped containment helper exist only there: on macOS and Windows the
+pipeline proves the portable artifact matrix (configuration, path,
+state-machine, staging-record, adversarial case matrix, and catalog/schema
+snapshots) but not the live protocol and staging rows. The current dist
+configuration produces macOS aarch64, Linux x86_64/aarch64, and Windows
+x86_64 artifacts. No external `any-mcp` release is published by this
+documentation change.
 
 ## Headless integration tests
 
