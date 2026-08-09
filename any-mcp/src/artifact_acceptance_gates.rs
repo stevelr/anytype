@@ -176,6 +176,30 @@ impl ArtifactAcceptanceGates {
         .await
     }
 
+    /// Arms the atomic publication window for one file-export operation.
+    pub async fn arm_file_export_atomic_publication(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
+        self.arm(
+            ArtifactAcceptanceGatePoint::ExportAtomicPublication,
+            operation_key(b"export", idempotency_key),
+        )
+        .await
+    }
+
+    /// Arms a file import after dispatch has returned and before settlement.
+    pub async fn arm_file_import_post_dispatch(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
+        self.arm(
+            ArtifactAcceptanceGatePoint::ImportPostDispatch,
+            operation_key(b"import", idempotency_key),
+        )
+        .await
+    }
+
     /// Arms the exact final document-source revalidation selected by its key.
     pub async fn arm_document_import(
         &self,
@@ -183,6 +207,18 @@ impl ArtifactAcceptanceGates {
     ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
         self.arm(
             ArtifactAcceptanceGatePoint::DocumentFinalRevalidation,
+            operation_key(b"document", idempotency_key),
+        )
+        .await
+    }
+
+    /// Arms a document update after dispatch has returned and before settlement.
+    pub async fn arm_document_update_post_dispatch(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<ArtifactAcceptanceGateLease, ArtifactAcceptanceGateError> {
+        self.arm(
+            ArtifactAcceptanceGatePoint::DocumentPostDispatch,
             operation_key(b"document", idempotency_key),
         )
         .await

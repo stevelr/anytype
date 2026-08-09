@@ -39,10 +39,9 @@ use anytype::{
         with_disposable_space_context,
     },
 };
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD},
-};
+#[cfg(feature = "acceptance-harness")]
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::FutureExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

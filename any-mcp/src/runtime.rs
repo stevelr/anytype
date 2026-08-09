@@ -21,6 +21,7 @@ use rmcp::{
     service::{QuitReason, RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{IntoTransport, Transport},
 };
+use sha2::{Digest as _, Sha256};
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -29,7 +30,7 @@ use crate::{
     artifact_client_roots::ClientRootsGate,
     artifact_config::ArtifactConfig,
     artifact_roots::RootRegistry,
-    artifact_staging::ArtifactStaging,
+    artifact_staging::{ArtifactStaging, StagingError},
     artifact_toolset::{
         ArtifactOperationState, ArtifactToolError, FileImportOutput, ImportIdempotency,
     },
@@ -37,8 +38,61 @@ use crate::{
     config::{ApplicationProfile, ProtocolMode, RuntimeConfig},
     optional_toolsets::OptionalToolsetSelection,
     server::AnyMcpServer,
-    space_policy::{PolicyClient, SpaceAuthority},
+    space_policy::{PolicyClient, SpaceAuthority, SpacePolicy},
 };
+
+fn hash_generation_part(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn runtime_artifact_policy_digest(
+    profile: ApplicationProfile,
+    read_only: bool,
+    optional_toolsets: &OptionalToolsetSelection,
+    artifact: &ArtifactConfig,
+    authority: &SpaceAuthority,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"any-mcp/configuration-policy/v1\0");
+    hasher.update(1_u64.to_be_bytes());
+    hash_generation_part(&mut hasher, profile.as_str().as_bytes());
+    hasher.update([u8::from(read_only)]);
+    for name in optional_toolsets.names() {
+        hash_generation_part(&mut hasher, name.as_bytes());
+    }
+    match authority.policy() {
+        SpacePolicy::AllReadWrite => hasher.update([0]),
+        SpacePolicy::None => hasher.update([1]),
+        SpacePolicy::OnlyReadWrite(spaces) => {
+            hasher.update([2]);
+            for space in spaces {
+                hash_generation_part(&mut hasher, space.as_str().as_bytes());
+            }
+        }
+    }
+    for validator in artifact.validators() {
+        hash_generation_part(&mut hasher, validator.id.as_str().as_bytes());
+        hash_generation_part(&mut hasher, b"file-mime/v1");
+        hash_generation_part(&mut hasher, validator.sha256.as_bytes());
+        hasher.update([u8::from(validator.required)]);
+        for media_type in &validator.mime {
+            hash_generation_part(&mut hasher, media_type.as_bytes());
+        }
+        for value in [
+            validator.timeout.as_nanos(),
+            u128::from(validator.memory_bytes),
+            u128::from(validator.input_bytes),
+            u128::try_from(validator.stdout_bytes).unwrap_or(u128::MAX),
+            u128::try_from(validator.stderr_bytes).unwrap_or(u128::MAX),
+            u128::try_from(validator.fields).unwrap_or(u128::MAX),
+            u128::try_from(validator.field_bytes).unwrap_or(u128::MAX),
+        ] {
+            hasher.update(value.to_be_bytes());
+        }
+    }
+    hasher.finalize().into()
+}
 
 /// Availability established once during authenticated startup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +250,30 @@ impl RuntimeContext {
     /// Returns a concise [`StartupError`] without embedding credential values
     /// or upstream response bodies.
     pub async fn start(config: &RuntimeConfig) -> Result<Self, StartupError> {
+        // Validate and retain all filesystem authority before credential or
+        // network activity. Staging is activated only after these validators
+        // and the canonical space policy have succeeded, so no listener or
+        // cleanup task can outlive a later startup failure.
+        let artifact_roots = if config.optional_toolsets.contains("artifacts") && !config.read_only
+        {
+            Some(
+                RootRegistry::activate(&config.artifact)
+                    .map_err(|_| StartupError::ArtifactRoots)?,
+            )
+        } else {
+            None
+        };
+        let artifact_validators = if artifact_roots.is_some()
+            && !config.artifact.validators().is_empty()
+        {
+            Some(
+                ValidatorRunner::activate(config.artifact.validators(), &config.artifact.limits)
+                    .await
+                    .map_err(|_| StartupError::ArtifactValidators)?,
+            )
+        } else {
+            None
+        };
         let client = AnytypeClient::with_config(config.client_config())
             .map_err(|_| StartupError::ClientInitialization)?;
         let auth = client
@@ -216,15 +294,13 @@ impl RuntimeContext {
         let authority = SpaceAuthority::initialize(&client, &config.artifact.spaces)
             .await
             .map_err(|_| StartupError::SpacePolicy)?;
-        let artifact_roots = if config.optional_toolsets.contains("artifacts") && !config.read_only
-        {
-            Some(
-                RootRegistry::activate(&config.artifact)
-                    .map_err(|_| StartupError::ArtifactRoots)?,
-            )
-        } else {
-            None
-        };
+        let artifact_policy_digest = runtime_artifact_policy_digest(
+            config.profile,
+            config.read_only,
+            &config.optional_toolsets,
+            &config.artifact,
+            &authority,
+        );
         let mut runtime = Self::from_parts_with_authority(
             client,
             RuntimeParts {
@@ -242,27 +318,17 @@ impl RuntimeContext {
             config.artifact.staging().filter(|staging| staging.enabled),
         ) {
             (Some(roots), Some(staging)) => Some(
-                ArtifactStaging::activate(
+                ArtifactStaging::activate_with_policy_digest(
                     staging,
                     &config.artifact.limits,
                     roots,
+                    artifact_policy_digest,
                     runtime.shutdown.clone(),
                 )
                 .await
-                .map_err(|_| StartupError::ArtifactStaging)?,
+                .map_err(classify_staging_startup_error)?,
             ),
             _ => None,
-        };
-        let artifact_validators = if artifact_roots.is_some()
-            && !config.artifact.validators().is_empty()
-        {
-            Some(
-                ValidatorRunner::activate(config.artifact.validators(), &config.artifact.limits)
-                    .await
-                    .map_err(|_| StartupError::ArtifactValidators)?,
-            )
-        } else {
-            None
         };
         runtime.artifact_config = Arc::new(config.artifact.clone());
         runtime.artifact_roots = artifact_roots;
@@ -469,6 +535,51 @@ impl RuntimeContext {
         receiver
     }
 
+    /// Owns one blocking local artifact operation through completion even if
+    /// its request waiter is cancelled. Shutdown drain observes the same task
+    /// counter used by import settlement. When the waiter vanished, the
+    /// caller-provided `abandoned` handler settles the ledger with the actual
+    /// outcome, so a commit that provably succeeded can be recorded as
+    /// success rather than blanket indeterminate.
+    pub(crate) fn supervise_artifact_blocking<T, F, A>(
+        &self,
+        operation: F,
+        abandoned: A,
+    ) -> tokio::sync::oneshot::Receiver<Result<T, ArtifactToolError>>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, ArtifactToolError> + Send + 'static,
+        A: FnOnce(Result<T, ArtifactToolError>) + Send + 'static,
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let gate = match self.settlement_gate.lock() {
+            Ok(gate) => gate,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !gate.accepting {
+            let _ = sender.send(Err(ArtifactToolError::Indeterminate));
+            return receiver;
+        }
+        self.settlement_active.fetch_add(1, Ordering::AcqRel);
+        drop(gate);
+        let active = Arc::clone(&self.settlement_active);
+        let notify = Arc::clone(&self.settlement_notify);
+        tokio::spawn(async move {
+            let result = match tokio::task::spawn_blocking(operation).await {
+                Ok(result) => result,
+                Err(_) => Err(ArtifactToolError::Indeterminate),
+            };
+            if let Err(result) = sender.send(result) {
+                abandoned(result);
+            }
+            let _ = active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_sub(1)
+            });
+            notify.notify_waiters();
+        });
+        receiver
+    }
+
     /// Admits a settlement before an idempotency reservation is created.
     /// This prevents reserved operations from accumulating behind an
     /// unbounded internal task queue.
@@ -520,10 +631,22 @@ impl RuntimeContext {
         let _ = tokio::time::timeout(timeout, drained).await;
     }
 
+    /// Waits a bounded interval for staging listener, connection, cleanup,
+    /// and publication work to release the retained instance authority.
+    pub(crate) async fn drain_artifact_staging(&self, timeout: Duration) {
+        if let Some(staging) = &self.artifact_staging {
+            let _ = staging.drain(timeout).await;
+        }
+    }
+
     /// Returns whether process shutdown has started.
     #[must_use]
     pub fn is_shutting_down(&self) -> bool {
         self.shutdown.is_cancelled()
+    }
+
+    pub(crate) fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
     }
 
     /// Executes one upstream operation with concurrency, timeout, and MCP
@@ -809,14 +932,30 @@ impl RuntimeContext {
         artifact: &ArtifactConfig,
         read_only: bool,
     ) -> Result<Self, StartupError> {
-        let authority = SpaceAuthority::initialize(&client, &artifact.spaces)
-            .await
-            .map_err(|_| StartupError::SpacePolicy)?;
         let artifact_roots = if optional_toolsets.contains("artifacts") && !read_only {
             Some(RootRegistry::activate(artifact).map_err(|_| StartupError::ArtifactRoots)?)
         } else {
             None
         };
+        let artifact_validators = if artifact_roots.is_some() && !artifact.validators().is_empty() {
+            Some(
+                ValidatorRunner::activate(artifact.validators(), &artifact.limits)
+                    .await
+                    .map_err(|_| StartupError::ArtifactValidators)?,
+            )
+        } else {
+            None
+        };
+        let authority = SpaceAuthority::initialize(&client, &artifact.spaces)
+            .await
+            .map_err(|_| StartupError::SpacePolicy)?;
+        let artifact_policy_digest = runtime_artifact_policy_digest(
+            ApplicationProfile::Standard,
+            read_only,
+            &optional_toolsets,
+            artifact,
+            &authority,
+        );
         let mut runtime = Self::from_parts_with_authority(
             client,
             RuntimeParts {
@@ -834,25 +973,17 @@ impl RuntimeContext {
             artifact.staging().filter(|staging| staging.enabled),
         ) {
             (Some(roots), Some(staging)) => Some(
-                ArtifactStaging::activate(
+                ArtifactStaging::activate_with_policy_digest(
                     staging,
                     &artifact.limits,
                     roots,
+                    artifact_policy_digest,
                     runtime.shutdown.clone(),
                 )
                 .await
-                .map_err(|_| StartupError::ArtifactStaging)?,
+                .map_err(classify_staging_startup_error)?,
             ),
             _ => None,
-        };
-        let artifact_validators = if artifact_roots.is_some() && !artifact.validators().is_empty() {
-            Some(
-                ValidatorRunner::activate(artifact.validators(), &artifact.limits)
-                    .await
-                    .map_err(|_| StartupError::ArtifactValidators)?,
-            )
-        } else {
-            None
         };
         runtime.artifact_config = Arc::new(artifact.clone());
         runtime.artifact_roots = artifact_roots;
@@ -1240,6 +1371,10 @@ pub enum StartupError {
     ArtifactRoots,
     /// Configured private staging authority could not be activated safely.
     ArtifactStaging,
+    /// Configured private staging policy or instance ownership was invalid.
+    ArtifactStagingPolicy,
+    /// Durable private staging state could not be reconciled safely.
+    ArtifactStateReconciliation,
     /// Configured validator executables could not be pinned safely.
     ArtifactValidators,
 }
@@ -1272,10 +1407,22 @@ impl fmt::Display for StartupError {
             Self::ArtifactStaging => {
                 formatter.write_str("unable to initialize configured artifact staging")
             }
+            Self::ArtifactStagingPolicy => formatter.write_str("invalid staging policy"),
+            Self::ArtifactStateReconciliation => {
+                formatter.write_str("artifact state reconciliation failed")
+            }
             Self::ArtifactValidators => {
                 formatter.write_str("unable to initialize configured artifact validators")
             }
         }
+    }
+}
+
+fn classify_staging_startup_error(error: StagingError) -> StartupError {
+    match error {
+        StagingError::InvalidPolicy => StartupError::ArtifactStagingPolicy,
+        StagingError::Reconciliation => StartupError::ArtifactStateReconciliation,
+        _ => StartupError::ArtifactStaging,
     }
 }
 
@@ -1325,6 +1472,9 @@ where
             runtime
                 .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
                 .await;
+            runtime
+                .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
+                .await;
             return Ok(());
         }
         Err(_) => {
@@ -1343,6 +1493,9 @@ where
     runtime.begin_shutdown();
     runtime
         .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
+        .await;
+    runtime
+        .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
         .await;
     result
 }
@@ -1366,7 +1519,12 @@ where
     }
 
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
-        let message = self.inner.receive().await;
+        let shutdown = self.runtime.shutdown_token();
+        let message = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => None,
+            message = self.inner.receive() => message,
+        };
         if message.is_none() {
             self.runtime.begin_shutdown();
         }
@@ -1390,6 +1548,10 @@ pub enum ServeError {
     ServiceTask,
     /// The bounded stdio adapter could not read or write a frame.
     StdioTransport,
+    /// Artifact staging durability became uncertain and the runtime shut
+    /// itself down. The category is fixed and carries no operating-system
+    /// message, path, or caller value.
+    ArtifactDurability,
 }
 
 impl fmt::Display for ServeError {
@@ -1399,6 +1561,9 @@ impl fmt::Display for ServeError {
             Self::Initialization => formatter.write_str("MCP stdio initialization failed"),
             Self::ServiceTask => formatter.write_str("MCP stdio service task failed"),
             Self::StdioTransport => formatter.write_str("MCP stdio transport failed"),
+            Self::ArtifactDurability => {
+                formatter.write_str("artifact staging durability uncertain")
+            }
         }
     }
 }
@@ -1422,6 +1587,74 @@ mod tests {
     use tracing::instrument::WithSubscriber;
 
     use super::*;
+
+    #[test]
+    fn artifact_generation_evidence_binds_canonical_space_policy() {
+        let artifact = ArtifactConfig::default();
+        let optional = OptionalToolsetSelection::default();
+        let all = SpaceAuthority::from_policy_for_tests(SpacePolicy::AllReadWrite);
+        let only = SpaceAuthority::from_policy_for_tests(SpacePolicy::OnlyReadWrite(
+            [crate::domain::SpaceId::new("space-1").expect("space ID")]
+                .into_iter()
+                .collect(),
+        ));
+
+        assert_ne!(
+            runtime_artifact_policy_digest(
+                ApplicationProfile::Standard,
+                false,
+                &optional,
+                &artifact,
+                &all,
+            ),
+            runtime_artifact_policy_digest(
+                ApplicationProfile::Standard,
+                false,
+                &optional,
+                &artifact,
+                &only,
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_local_publication_waiter_remains_owned_and_indeterminate() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let key = [51; 32];
+        let fingerprint = [52; 32];
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import_now(key, fingerprint),
+            Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
+        ));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker_entered = Arc::clone(&entered);
+        let worker_release = Arc::clone(&release);
+        let abandoned_operations = runtime.artifact_operations().clone();
+        let receiver = runtime.supervise_artifact_blocking(
+            move || {
+                worker_entered.wait();
+                worker_release.wait();
+                Ok::<_, ArtifactToolError>(())
+            },
+            move |_| abandoned_operations.mark_indeterminate(key),
+        );
+        entered.wait();
+        drop(receiver);
+        release.wait();
+        runtime
+            .drain_artifact_settlements(Duration::from_secs(1))
+            .await;
+
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import_now(key, fingerprint),
+            Err(ArtifactToolError::Indeterminate)
+        ));
+    }
 
     #[tokio::test]
     async fn settlement_panic_is_terminal_and_drainable() {

@@ -174,6 +174,12 @@ pub async fn serve_http(
     tracing::info!(target: "any_mcp::http", "http_transport_ready");
 
     let shutdown = CancellationToken::new();
+    let runtime_shutdown = runtime.shutdown_token();
+    let staging_shutdown = shutdown.clone();
+    let staging_failure = tokio::spawn(async move {
+        runtime_shutdown.cancelled().await;
+        staging_shutdown.cancel();
+    });
     let signal_shutdown = shutdown.clone();
     let signals = tokio::spawn(async move {
         let interrupt = tokio::signal::ctrl_c();
@@ -202,6 +208,7 @@ pub async fn serve_http(
 
     let result = listener::run_listener(bound, state, shutdown.clone(), config.shutdown).await;
     signals.abort();
+    staging_failure.abort();
     // Cancel remaining sessions and SSE streams, then stop admitting any
     // Anytype operation work.
     session_cancel.cancel();
@@ -221,6 +228,9 @@ async fn drain_artifact_settlements(runtime: &RuntimeContext) {
 async fn shutdown_runtime(runtime: &RuntimeContext) {
     runtime.begin_shutdown();
     drain_artifact_settlements(runtime).await;
+    runtime
+        .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
+        .await;
 }
 
 #[cfg(test)]

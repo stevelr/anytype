@@ -38,8 +38,8 @@ use crate::artifact_acceptance_gates::{ArtifactAcceptanceGatePoint, FirstChunkGa
 use crate::{
     artifact_config::RelativeNativePath,
     artifact_roots::{
-        AnchoredImport, EffectiveRootRegistry, PositionalReader, ROOTS_REQUIRED_GUIDANCE,
-        RootAccessError, RootAccessErrorKind,
+        AnchoredImport, AtomicExport, EffectiveRootRegistry, PositionalReader,
+        ROOTS_REQUIRED_GUIDANCE, RootAccessError, RootAccessErrorKind, StagingPayload,
     },
     artifact_staging::{
         ArtifactStaging, RetainedStageImport, STAGING_REQUIRED_GUIDANCE, StageAllocation,
@@ -969,6 +969,12 @@ impl ArtifactOperationState {
         self.settle_import_timeout_now(key);
     }
 
+    pub(crate) fn mark_indeterminate(&self, key: [u8; 32]) {
+        if let Some(entry) = self.entries().get_mut(&key) {
+            entry.outcome = OperationOutcome::Indeterminate;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn reserve_import(
         &self,
@@ -1125,6 +1131,10 @@ impl ArtifactOperationState {
     }
 
     async fn set_outcome(&self, key: [u8; 32], outcome: OperationOutcome) {
+        self.set_outcome_now(key, outcome);
+    }
+
+    fn set_outcome_now(&self, key: [u8; 32], outcome: OperationOutcome) {
         if let Some(entry) = self.entries().get_mut(&key) {
             entry.outcome = outcome;
         }
@@ -1161,7 +1171,9 @@ fn staging(runtime: &RuntimeContext) -> Result<&ArtifactStaging, ArtifactToolErr
 fn classify_staging_error(error: StagingError) -> ArtifactToolError {
     match error {
         StagingError::Disabled => ArtifactToolError::MissingStaging,
+        StagingError::InvalidPolicy | StagingError::Reconciliation => ArtifactToolError::Upstream,
         StagingError::NotFound => ArtifactToolError::NotFound,
+        StagingError::BadRequest => ArtifactToolError::Validation,
         StagingError::Conflict => ArtifactToolError::Conflict,
         StagingError::Bounded => ArtifactToolError::Bounded,
         StagingError::Timeout => ArtifactToolError::Upstream,
@@ -1443,26 +1455,58 @@ impl PreparedImport {
         }
     }
 
-    fn mark_import_dispatched(
+    async fn mark_import_dispatched(
         &mut self,
         runtime: &RuntimeContext,
     ) -> Result<(), ArtifactToolError> {
         match self {
             Self::Staged(source) => staging(runtime)?
                 .mark_import_dispatched(source)
+                .await
                 .map_err(classify_staging_error),
             Self::Local { .. } => Ok(()),
             Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
         }
     }
 
-    fn restore_after_definitive_rejection(
+    async fn restore_after_definitive_rejection(
         &mut self,
         runtime: &RuntimeContext,
     ) -> Result<(), ArtifactToolError> {
         match self {
             Self::Staged(source) => staging(runtime)?
                 .restore_import_operation(source)
+                .await
+                .map_err(classify_staging_error),
+            Self::Local { .. } => Ok(()),
+            Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
+        }
+    }
+
+    async fn retain_import_candidate(
+        &self,
+        runtime: &RuntimeContext,
+        candidate: &EntityId,
+    ) -> Result<(), ArtifactToolError> {
+        match self {
+            Self::Staged(source) => staging(runtime)?
+                .retain_import_candidate(source, candidate)
+                .await
+                .map_err(classify_staging_error),
+            Self::Local { .. } => Ok(()),
+            Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
+        }
+    }
+
+    async fn retain_candidate_cleanup(
+        &self,
+        runtime: &RuntimeContext,
+        category: &'static str,
+    ) -> Result<(), ArtifactToolError> {
+        match self {
+            Self::Staged(source) => staging(runtime)?
+                .retain_candidate_cleanup(source, category)
+                .await
                 .map_err(classify_staging_error),
             Self::Local { .. } => Ok(()),
             Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
@@ -1870,6 +1914,7 @@ async fn file_import(
                 let _ = handle;
                 staging(runtime)?
                     .bind_import_operation(staged, key)
+                    .await
                     .map_err(classify_staging_error)?;
             }
         }
@@ -1958,14 +2003,18 @@ async fn settle_reserved_import(
     if let Some(media_type) = declared_media_type.as_ref() {
         request = request.mime(media_type);
     }
-    if let Err(error) = source.mark_import_dispatched(&runtime) {
+    if let Err(error) = source.mark_import_dispatched(&runtime).await {
         runtime.artifact_operations().remove(key).await;
         return Err(error);
     }
     let uploaded = match request.upload().await {
         Ok(uploaded) => uploaded,
         Err(error) if mutation_rejection_is_definitive(&error) => {
-            if source.restore_after_definitive_rejection(&runtime).is_err() {
+            if source
+                .restore_after_definitive_rejection(&runtime)
+                .await
+                .is_err()
+            {
                 runtime
                     .artifact_operations()
                     .set_outcome(key, OperationOutcome::Indeterminate)
@@ -1993,6 +2042,29 @@ async fn settle_reserved_import(
             return Err(ArtifactToolError::Indeterminate);
         }
     };
+    if source
+        .retain_import_candidate(&runtime, &candidate)
+        .await
+        .is_err()
+    {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::ImportIndeterminate(candidate))
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if !runtime
+        .artifact_acceptance_gates()
+        .reach(ArtifactAcceptanceGatePoint::ImportPostDispatch, key)
+        .await
+    {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::ImportIndeterminate(candidate))
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
     runtime
         .artifact_operations()
         .set_outcome(
@@ -2030,13 +2102,44 @@ async fn settle_reserved_import(
                 .artifact_operations()
                 .set_outcome(key, OperationOutcome::ImportCleaning(candidate.clone()))
                 .await;
-        }
-        if source_error == ArtifactToolError::Conflict
-            && cleanup_changed_import_candidate(&runtime, &space_id, &candidate).await
-        {
-            drop(source);
-            runtime.artifact_operations().remove(key).await;
-            return Err(source_error);
+            if source
+                .retain_candidate_cleanup(&runtime, "delete_dispatched")
+                .await
+                .is_err()
+            {
+                drop(source);
+                runtime
+                    .artifact_operations()
+                    .set_outcome(
+                        key,
+                        OperationOutcome::ImportIndeterminate(candidate.clone()),
+                    )
+                    .await;
+                return Err(ArtifactToolError::Indeterminate);
+            }
+            if cleanup_changed_import_candidate(&runtime, &space_id, &candidate).await {
+                if source
+                    .restore_after_definitive_rejection(&runtime)
+                    .await
+                    .is_err()
+                {
+                    drop(source);
+                    runtime
+                        .artifact_operations()
+                        .set_outcome(
+                            key,
+                            OperationOutcome::ImportIndeterminate(candidate.clone()),
+                        )
+                        .await;
+                    return Err(ArtifactToolError::Indeterminate);
+                }
+                drop(source);
+                runtime.artifact_operations().remove(key).await;
+                return Err(source_error);
+            }
+            let _ = source
+                .retain_candidate_cleanup(&runtime, "absence_ambiguous")
+                .await;
         }
         drop(source);
         runtime
@@ -2287,6 +2390,27 @@ enum ExportCompletion {
     },
 }
 
+enum ExportDestination {
+    Local(AtomicExport),
+    Remote(StagingPayload),
+}
+
+impl Write for ExportDestination {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Local(destination) => destination.write(bytes),
+            Self::Remote(destination) => destination.write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Local(destination) => destination.flush(),
+            Self::Remote(destination) => destination.flush(),
+        }
+    }
+}
+
 async fn file_export(
     runtime: &RuntimeContext,
     input: FileExportInput,
@@ -2342,7 +2466,7 @@ async fn file_export(
                 }
             };
             (
-                destination,
+                ExportDestination::Local(destination),
                 ExportCompletion::Local { root_id },
                 input.expected_strong_etag.as_ref().cloned(),
             )
@@ -2413,7 +2537,7 @@ async fn file_export(
                 }
             };
             (
-                destination,
+                ExportDestination::Remote(destination),
                 ExportCompletion::Remote {
                     lease: Box::new(lease),
                     allocation,
@@ -2450,33 +2574,67 @@ async fn file_export(
     };
     let receipt = match completion {
         ExportCompletion::Local { root_id } => {
+            let ExportDestination::Local(destination) = destination else {
+                return Err(ArtifactToolError::Indeterminate);
+            };
             let destination = destination.with_cancellation(cancellation.clone());
             #[cfg(any(test, feature = "acceptance-harness"))]
             let destination =
                 destination.with_acceptance_gate(runtime.artifact_acceptance_gates().clone(), key);
-            let committed = match tokio::task::spawn_blocking(move || destination.commit()).await {
-                Ok(committed) => committed,
-                Err(_) => {
-                    return Err(settle_export_failure(
-                        runtime.artifact_operations(),
-                        key,
-                        ArtifactToolError::Indeterminate,
-                    )
-                    .await);
-                }
+            // A vanished waiter still owns this commit; a proven success is
+            // recorded as the terminal completed outcome rather than blanket
+            // indeterminate. The replay output below is exactly what the
+            // waiter would have recorded.
+            let abandoned_operations = runtime.artifact_operations().clone();
+            let abandoned_output = FileExportOutput {
+                file_id: file_id.as_str().to_owned(),
+                receipt: ArtifactReceipt {
+                    direction: ArtifactDirection::Export,
+                    state: ArtifactState::Available,
+                    space_id: space_id.as_str().to_owned(),
+                    size_bytes: size,
+                    sha256: sha256.clone(),
+                    declared_media_type: None,
+                    stored_media_type: stored_media_type.clone(),
+                    root_id: Some(root_id.clone()),
+                    staging_record: None,
+                    staging_handle: None,
+                    staging_url: None,
+                    validators: Vec::new(),
+                },
             };
-            let committed = match committed {
-                Ok(committed) => committed,
-                Err(error) if error.kind() == RootAccessErrorKind::Indeterminate => {
+            let committed = match runtime
+                .supervise_artifact_blocking(
+                    move || {
+                        destination.commit().map_err(|error| {
+                            if error.kind() == RootAccessErrorKind::Indeterminate {
+                                ArtifactToolError::Indeterminate
+                            } else {
+                                classify_root_error(&error)
+                            }
+                        })
+                    },
+                    move |result| match result {
+                        Ok(committed) if committed == size => abandoned_operations.set_outcome_now(
+                            key,
+                            OperationOutcome::ExportComplete(abandoned_output),
+                        ),
+                        Ok(_) | Err(_) => abandoned_operations.mark_indeterminate(key),
+                    },
+                )
+                .await
+            {
+                Ok(Ok(committed)) => committed,
+                Ok(Err(ArtifactToolError::Indeterminate)) | Err(_) => {
                     runtime
                         .artifact_operations()
                         .set_outcome(key, OperationOutcome::Indeterminate)
                         .await;
                     return Err(ArtifactToolError::Indeterminate);
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     runtime.artifact_operations().remove(key).await;
-                    return Err(classify_root_error(&error));
+                    return Err(error);
                 }
             };
             if committed != size {
@@ -2502,6 +2660,9 @@ async fn file_export(
             }
         }
         ExportCompletion::Remote { lease, allocation } => {
+            let ExportDestination::Remote(destination) = destination else {
+                return Err(ArtifactToolError::Indeterminate);
+            };
             let staging = match staging(runtime) {
                 Ok(staging) => staging,
                 Err(error) => {
@@ -3234,6 +3395,21 @@ async fn document_import_update(
             return Err(ArtifactToolError::Indeterminate);
         }
     };
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if !runtime
+        .artifact_acceptance_gates()
+        .reach(
+            ArtifactAcceptanceGatePoint::DocumentPostDispatch,
+            acceptance_key,
+        )
+        .await
+    {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::Indeterminate)
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
     let returned = checked_document(
         &updated,
         &space_id,
@@ -3391,21 +3567,61 @@ async fn document_export(
             let bytes = body.into_bytes();
             #[cfg(any(test, feature = "acceptance-harness"))]
             let gates = runtime.artifact_acceptance_gates().clone();
-            let written = match tokio::task::spawn_blocking(move || {
-                let mut destination = roots
-                    .begin_atomic_export(&root_id, &path, maximum)
-                    .map_err(|error| classify_root_error(&error))?;
-                destination
-                    .write_all(&bytes)
-                    .map_err(|_| ArtifactToolError::NotFound)?;
-                #[cfg(any(test, feature = "acceptance-harness"))]
-                let destination = destination.with_acceptance_gate(gates, key);
-                let committed = destination
-                    .commit()
-                    .map_err(|error| classify_root_error(&error))?;
-                Ok::<_, ArtifactToolError>((committed, root_id))
-            })
-            .await
+            // Mirror of the waiter's terminal recording for a commit whose
+            // waiter vanished: a proven full-length publication replays as
+            // completed, anything else as indeterminate.
+            let abandoned_operations = runtime.artifact_operations().clone();
+            let abandoned_space = space_id.as_str().to_owned();
+            let abandoned_object = object_id.as_str().to_owned();
+            let abandoned_sha256 = sha256.clone();
+            let written = match runtime
+                .supervise_artifact_blocking(
+                    move || {
+                        let mut destination = roots
+                            .begin_atomic_export(&root_id, &path, maximum)
+                            .map_err(|error| classify_root_error(&error))?;
+                        destination
+                            .write_all(&bytes)
+                            .map_err(|_| ArtifactToolError::NotFound)?;
+                        #[cfg(any(test, feature = "acceptance-harness"))]
+                        let destination = destination.with_acceptance_gate(gates, key);
+                        let committed = destination
+                            .commit()
+                            .map_err(|error| classify_root_error(&error))?;
+                        Ok::<_, ArtifactToolError>((committed, root_id))
+                    },
+                    move |result| match result {
+                        Ok((committed, root_id)) if committed == size => {
+                            abandoned_operations.set_outcome_now(
+                                key,
+                                OperationOutcome::DocumentExportComplete(DocumentExportOutput {
+                                    space_id: abandoned_space.clone(),
+                                    object_id: abandoned_object,
+                                    size_bytes: size,
+                                    chars,
+                                    sha256: abandoned_sha256.clone(),
+                                    receipt: ArtifactReceipt {
+                                        direction: ArtifactDirection::Export,
+                                        state: ArtifactState::Available,
+                                        space_id: abandoned_space,
+                                        size_bytes: size,
+                                        sha256: abandoned_sha256,
+                                        declared_media_type: None,
+                                        stored_media_type: Some("text/markdown".to_owned()),
+                                        root_id: Some(root_id),
+                                        staging_record: None,
+                                        staging_handle: None,
+                                        staging_url: None,
+                                        validators: Vec::new(),
+                                    },
+                                    reused: false,
+                                }),
+                            );
+                        }
+                        Ok(_) | Err(_) => abandoned_operations.mark_indeterminate(key),
+                    },
+                )
+                .await
             {
                 Ok(Ok(written)) => written,
                 Ok(Err(error)) => {
