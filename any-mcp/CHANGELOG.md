@@ -27,6 +27,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Completed the Streamable HTTP real-headless scenario matrix across all three
+  modes on Linux x86_64. Beyond the static-token baseline below, the OAuth
+  resource-server mode verifies RFC 9728 protected-resource metadata, the
+  challenge naming that metadata URI and the required scope, a valid-token read
+  and the mutations scenario, and nine distinct unauthorized rejections; the
+  preview HTTP mode verifies stateless JSON exchange, discovery, read, a
+  mutation sentinel, method rejection for GET and DELETE, and the unauthorized
+  rejection when no bearer token is presented.
+
 - Verified the Streamable HTTP transport against a real headless backend under
   static-token authentication: the six shared domain scenarios — discovery,
   documents, views, mutations, markdown no-op, and archive — plus the compact
