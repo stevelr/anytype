@@ -18,6 +18,9 @@ anyr auth status
 anyr auth login
 # initialize HTTP and gRPC credentials from a running headless CLI
 anyr init-cli
+# save a directly sourceable environment file for an agent or service
+ANYTYPE_KEYSTORE=env anyr init-cli --save-env ./anytype.env
+source ./anytype.env
 # optionally join a space after initialization
 anyr init-cli --join "$INVITE_LINK"
 
@@ -539,6 +542,19 @@ anyr ARGS ...
   before reporting success. A later verification or join failure leaves the
   newly generated credentials stored so the operator can retry without losing
   them.
+
+  `--save-env FILE` additionally writes the effective endpoints, keystore
+  service, HTTP token, gRPC account key, and
+  `ANYTYPE_TEST_SPACE_PREFIX=xtest` as quoted POSIX shell `export` assignments.
+  The file can be sourced directly without `set -a`. The `xtest` prefix
+  authorizes disposable integration tests to create and remove spaces whose
+  names begin with that value. `FILE` must be a filesystem path; `-` does not
+  select stdout because stdout remains the command result channel. The file is
+  created with mode `0600` on Unix and the command refuses to replace an
+  existing destination. It contains credentials in plaintext; keep it outside
+  shared directories and configuration repositories. If file creation fails,
+  the generated credentials may already be in the selected keystore.
+  Credential values remain absent from normal command output and errors.
 
 The global `--keystore` and `--keystore-service` options (or their environment
 variables) select where `init-cli` stores credentials. See

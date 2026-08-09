@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- Add `anyr init-cli --save-env FILE` to save generated HTTP and gRPC
+  credentials, effective endpoints, the keystore service, and the `xtest`
+  disposable-space prefix as a directly sourceable POSIX shell environment
+  file. The command uses owner-only Unix permissions, refuses to overwrite an
+  existing destination, and keeps credentials out of normal stdout and errors.
+
 ### Changed
 
 - Render the new anytype-api HTTP deadline and indeterminate-mutation errors

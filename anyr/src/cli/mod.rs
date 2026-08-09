@@ -105,6 +105,10 @@ pub enum Commands {
         /// Join a space with this invitation link after credentials are stored
         #[arg(long, value_name = "INVITE_LINK")]
         join: Option<String>,
+
+        /// Save generated credentials as a sourceable POSIX shell environment file
+        #[arg(long, value_name = "FILE")]
+        save_env: Option<PathBuf>,
     },
 
     /// Authentication commands
@@ -1740,7 +1744,9 @@ pub async fn run(mut cli: Cli) -> Result<()> {
     };
 
     match cli.command {
-        Commands::InitCli { join } => init_cli::handle(&ctx, join.as_deref()).await,
+        Commands::InitCli { join, save_env } => {
+            init_cli::handle(&ctx, join.as_deref(), save_env.as_deref()).await
+        }
         Commands::Auth(args) => auth::handle(&ctx, args).await,
         Commands::Chat(args) => chat::handle(&ctx, args).await,
         Commands::Space(args) => space::handle(&ctx, args).await,

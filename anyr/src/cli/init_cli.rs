@@ -2,7 +2,10 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    fs::{self, OpenOptions},
     future::Future,
+    io::{self, Write},
+    path::Path,
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -26,9 +29,15 @@ const CLI_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// The child process output is consumed only for credential extraction and is
 /// never forwarded to `anyr` output or included in errors.
-pub async fn handle(ctx: &AppContext, join: Option<&str>) -> Result<()> {
+pub async fn handle(ctx: &AppContext, join: Option<&str>, save_env: Option<&Path>) -> Result<()> {
     if let Some(invite) = join {
         validate_invite_link(invite)?;
+    }
+    if let Some(path) = save_env {
+        validate_environment_file_path(path)?;
+        if let Some(output_path) = ctx.output.path() {
+            validate_distinct_output_paths(path, output_path)?;
+        }
     }
 
     let executable = anytype_cli_executable()?;
@@ -46,12 +55,19 @@ pub async fn handle(ctx: &AppContext, join: Option<&str>) -> Result<()> {
         ctx.client.get_http_endpoint().to_owned(),
         grpc_endpoint,
     );
+    let environment_file = save_env.map(|path| EnvironmentFile {
+        path,
+        http_endpoint: &process.http_endpoint,
+        grpc_endpoint: &process.grpc_endpoint,
+        keystore_service: ctx.client.get_key_store().service(),
+    });
 
     let http_credentials = initialize_keystore(
         ctx.client.get_key_store(),
         &process,
         timestamp,
         &account_name,
+        environment_file.as_ref(),
     )
     .await?;
     ctx.client.set_api_key(http_credentials);
@@ -66,6 +82,71 @@ pub async fn handle(ctx: &AppContext, join: Option<&str>) -> Result<()> {
         "joined": join.is_some(),
         "status": status,
     }))
+}
+
+struct EnvironmentFile<'a> {
+    path: &'a Path,
+    http_endpoint: &'a str,
+    grpc_endpoint: &'a str,
+    keystore_service: &'a str,
+}
+
+fn validate_environment_file_path(path: &Path) -> Result<()> {
+    if path == Path::new("-") {
+        bail!("--save-env requires a file path; '-' is not supported");
+    }
+    if path.as_os_str().is_empty() || path.file_name().is_none() {
+        bail!("--save-env must name a file");
+    }
+    match fs::symlink_metadata(path) {
+        Ok(_) => bail!("--save-env destination already exists"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => bail!("--save-env destination could not be inspected"),
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match fs::metadata(parent) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => bail!("--save-env parent is not a directory"),
+        Err(_) => bail!("--save-env parent directory is unavailable"),
+    }
+}
+
+fn validate_distinct_output_paths(environment_path: &Path, output_path: &Path) -> Result<()> {
+    let Some((environment_parent, environment_name)) = resolved_parent_and_name(environment_path)
+    else {
+        bail!("--save-env and --output must name different files");
+    };
+    let Some((output_parent, output_name)) = resolved_parent_and_name(output_path) else {
+        return Ok(());
+    };
+    if environment_parent == output_parent && file_names_equal(&environment_name, &output_name) {
+        bail!("--save-env and --output must name different files");
+    }
+    Ok(())
+}
+
+fn resolved_parent_and_name(path: &Path) -> Option<(std::path::PathBuf, OsString)> {
+    let name = path.file_name()?.to_owned();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = fs::canonicalize(parent).ok()?;
+    Some((parent, name))
+}
+
+#[cfg(windows)]
+fn file_names_equal(left: &OsStr, right: &OsStr) -> bool {
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(&right.to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn file_names_equal(left: &OsStr, right: &OsStr) -> bool {
+    left == right
 }
 
 async fn join_space(process: &CliProcess, invite: &str) -> Result<()> {
@@ -112,6 +193,7 @@ async fn initialize_keystore(
     process: &CliProcess,
     timestamp: u64,
     account_name: &str,
+    environment_file: Option<&EnvironmentFile<'_>>,
 ) -> Result<HttpCredentials> {
     let account_output = process
         .run_capture(
@@ -139,10 +221,98 @@ async fn initialize_keystore(
         .await?;
     let http_token = parse_http_token(&token_output)?;
 
-    let grpc_credentials = GrpcCredentials::from_account_key(account_key);
-    let http_credentials = HttpCredentials::new(http_token);
+    let grpc_credentials = GrpcCredentials::from_account_key(account_key.clone());
+    let http_credentials = HttpCredentials::new(http_token.clone());
     store_credential_pair(keystore, &grpc_credentials, &http_credentials)?;
+    if let Some(environment_file) = environment_file {
+        save_environment_file(environment_file, &account_key, &http_token)?;
+    }
     Ok(http_credentials)
+}
+
+fn save_environment_file(
+    environment_file: &EnvironmentFile<'_>,
+    account_key: &str,
+    http_token: &str,
+) -> Result<()> {
+    let contents = render_environment_file(environment_file, account_key, http_token);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        options.share_mode(0);
+    }
+    let mut file = match options.open(environment_file.path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            bail!("credentials were stored, but --save-env refuses to overwrite its destination")
+        }
+        Err(_) => {
+            bail!("credentials were stored, but --save-env could not create its destination")
+        }
+    };
+    if file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+        .is_err()
+    {
+        drop(file);
+        if fs::remove_file(environment_file.path).is_err() {
+            bail!(
+                "credentials were stored, but --save-env failed and its incomplete destination could not be removed"
+            );
+        }
+        bail!(
+            "credentials were stored, but --save-env failed; its incomplete destination was removed"
+        );
+    }
+    Ok(())
+}
+
+fn render_environment_file(
+    environment_file: &EnvironmentFile<'_>,
+    account_key: &str,
+    http_token: &str,
+) -> String {
+    let mut output = String::new();
+    push_shell_export(&mut output, "ANYTYPE_URL", environment_file.http_endpoint);
+    push_shell_export(
+        &mut output,
+        "ANYTYPE_GRPC_ENDPOINT",
+        environment_file.grpc_endpoint,
+    );
+    push_shell_export(&mut output, "ANYTYPE_KEYSTORE", "env");
+    push_shell_export(
+        &mut output,
+        "ANYTYPE_KEYSTORE_SERVICE",
+        environment_file.keystore_service,
+    );
+    push_shell_export(&mut output, "ANYTYPE_TEST_SPACE_PREFIX", "xtest");
+    push_shell_export(&mut output, "ANYTYPE_KEY_HTTP_TOKEN", http_token);
+    push_shell_export(&mut output, "ANYTYPE_KEY_ACCOUNT_KEY", account_key);
+    output
+}
+
+fn push_shell_export(output: &mut String, name: &str, value: &str) {
+    output.push_str("export ");
+    output.push_str(name);
+    output.push_str("='");
+    for character in value.chars() {
+        if character == '\'' {
+            output.push_str("'\"'\"'");
+        } else {
+            output.push(character);
+        }
+    }
+    output.push_str("'\n");
 }
 
 async fn verify_stored_credentials(client: &AnytypeClient) -> Result<serde_json::Value> {
@@ -538,14 +708,17 @@ mod tests {
             "init-cli",
             "--join",
             "anytype://invite/?cid=test&key=value",
+            "--save-env",
+            "/tmp/anyr.env",
         ])
         .expect("parse init-cli");
         match cli.command {
-            Commands::InitCli { join } => {
+            Commands::InitCli { join, save_env } => {
                 assert_eq!(
                     join.as_deref(),
                     Some("anytype://invite/?cid=test&key=value")
                 );
+                assert_eq!(save_env.as_deref(), Some(Path::new("/tmp/anyr.env")));
             }
             command => panic!("unexpected command: {command:?}"),
         }
@@ -646,7 +819,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn fake_cli_initializes_selected_keystore_and_joins() {
+    async fn fake_cli_initializes_env_keystore_saves_environment_and_joins() {
         let temp = TestDir::new();
         let executable = temp.path().join("fake-anytype");
         let script = format!(
@@ -671,9 +844,8 @@ esac
         );
         write_executable(&executable, &script);
 
-        let key_path = temp.path().join("credentials.db");
         let mut config = ClientConfig::default().app_name("anyr-init-cli-test");
-        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore = Some("env".to_owned());
         config.keystore_service = Some("anyr-init-cli-test".to_owned());
         let client = AnytypeClient::with_config(config).expect("build test client");
         let process = CliProcess::new(
@@ -681,12 +853,25 @@ esac
             "http://headless.test:31012".to_owned(),
             "http://headless.test:31010".to_owned(),
         );
+        let environment_path = temp.path().join("anyr.env");
+        let environment_file = EnvironmentFile {
+            path: &environment_path,
+            http_endpoint: &process.http_endpoint,
+            grpc_endpoint: &process.grpc_endpoint,
+            keystore_service: client.get_key_store().service(),
+        };
 
-        let http_credentials =
-            initialize_keystore(client.get_key_store(), &process, 4242, "configured-user")
-                .await
-                .expect("initialize keystore");
+        let http_credentials = initialize_keystore(
+            client.get_key_store(),
+            &process,
+            4242,
+            "configured-user",
+            Some(&environment_file),
+        )
+        .await
+        .expect("initialize keystore");
         assert!(http_credentials.has_creds());
+        assert_saved_environment(&environment_path);
         process
             .run_status(
                 CommandKind::JoinSpace,
@@ -714,6 +899,107 @@ esac
                 .account_key(),
             Some(ACCOUNT_KEY)
         );
+    }
+
+    #[test]
+    fn environment_file_is_sourceable_and_shell_quotes_values() {
+        let temp = TestDir::new();
+        let path = temp.path().join("quoted.env");
+        let environment_file = EnvironmentFile {
+            path: &path,
+            http_endpoint: "http://example.test/it's",
+            grpc_endpoint: "http://example.test:31010",
+            keystore_service: "agent's-service",
+        };
+        save_environment_file(&environment_file, "account'key", "http'token")
+            .expect("save quoted environment");
+
+        let contents = fs::read_to_string(&path).expect("read quoted environment");
+        assert!(contents.contains("export ANYTYPE_URL='http://example.test/it'\"'\"'s'"));
+        assert!(contents.contains("export ANYTYPE_KEY_HTTP_TOKEN='http'\"'\"'token'"));
+        assert!(contents.contains("export ANYTYPE_KEY_ACCOUNT_KEY='account'\"'\"'key'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sourcing_environment_file_exports_values_to_child_process() {
+        let temp = TestDir::new();
+        let path = temp.path().join("sourceable.env");
+        let environment_file = EnvironmentFile {
+            path: &path,
+            http_endpoint: "http://127.0.0.1:31012",
+            grpc_endpoint: "http://127.0.0.1:31010",
+            keystore_service: "anyr-test",
+        };
+        save_environment_file(&environment_file, ACCOUNT_KEY, HTTP_TOKEN)
+            .expect("save sourceable environment");
+
+        let status = std::process::Command::new("sh")
+            .args([
+                "-c",
+                ". \"$1\" && sh -c 'test \"$ANYTYPE_KEYSTORE\" = env && test \"$ANYTYPE_TEST_SPACE_PREFIX\" = xtest && test -n \"$ANYTYPE_KEY_HTTP_TOKEN\" && test -n \"$ANYTYPE_KEY_ACCOUNT_KEY\"'",
+                "sh",
+            ])
+            .arg(&path)
+            .status()
+            .expect("source environment file");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn environment_file_refuses_overwrite_without_disclosing_credentials() {
+        let temp = TestDir::new();
+        let path = temp.path().join("existing.env");
+        fs::write(&path, "operator-owned\n").expect("create existing environment file");
+        let environment_file = EnvironmentFile {
+            path: &path,
+            http_endpoint: "http://127.0.0.1:31012",
+            grpc_endpoint: "http://127.0.0.1:31010",
+            keystore_service: "anyr",
+        };
+
+        let error = save_environment_file(&environment_file, ACCOUNT_KEY, HTTP_TOKEN)
+            .expect_err("existing environment file must not be replaced")
+            .to_string();
+        assert!(error.contains("refuses to overwrite"));
+        assert!(!error.contains(ACCOUNT_KEY));
+        assert!(!error.contains(HTTP_TOKEN));
+        assert_eq!(
+            fs::read_to_string(path).expect("read preserved destination"),
+            "operator-owned\n"
+        );
+    }
+
+    #[test]
+    fn environment_file_path_is_validated_before_credential_generation() {
+        let temp = TestDir::new();
+        let available = temp.path().join("available.env");
+        validate_environment_file_path(&available).expect("available destination");
+        assert!(validate_environment_file_path(Path::new("-")).is_err());
+
+        let existing = temp.path().join("private-existing.env");
+        fs::write(&existing, "existing\n").expect("create existing destination");
+        let existing_error = validate_environment_file_path(&existing)
+            .expect_err("existing destination must fail")
+            .to_string();
+        assert!(existing_error.contains("already exists"));
+        assert!(!existing_error.contains("private-existing"));
+
+        let unavailable = temp.path().join("missing-parent").join("private.env");
+        let unavailable_error = validate_environment_file_path(&unavailable)
+            .expect_err("missing parent must fail")
+            .to_string();
+        assert!(unavailable_error.contains("parent directory is unavailable"));
+        assert!(!unavailable_error.contains("private.env"));
+
+        let aliased_output = temp.path().join(".").join("available.env");
+        let alias_error = validate_distinct_output_paths(&available, &aliased_output)
+            .expect_err("output must not replace the environment file")
+            .to_string();
+        assert!(alias_error.contains("must name different files"));
+        assert!(!alias_error.contains("available.env"));
+        validate_distinct_output_paths(&available, &temp.path().join("result.json"))
+            .expect("distinct output path");
     }
 
     #[cfg(unix)]
@@ -1052,6 +1338,35 @@ esac
                 credentials.session_token().map(str::to_owned),
             );
             Ok(())
+        }
+    }
+
+    fn assert_saved_environment(path: &Path) {
+        let environment = fs::read_to_string(path).expect("read environment file");
+        assert_eq!(
+            environment,
+            format!(
+                "export ANYTYPE_URL='http://headless.test:31012'\n\
+                 export ANYTYPE_GRPC_ENDPOINT='http://headless.test:31010'\n\
+                 export ANYTYPE_KEYSTORE='env'\n\
+                 export ANYTYPE_KEYSTORE_SERVICE='anyr-init-cli-test'\n\
+                 export ANYTYPE_TEST_SPACE_PREFIX='xtest'\n\
+                 export ANYTYPE_KEY_HTTP_TOKEN='{HTTP_TOKEN}'\n\
+                 export ANYTYPE_KEY_ACCOUNT_KEY='{ACCOUNT_KEY}'\n"
+            )
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(
+                fs::metadata(path)
+                    .expect("environment file metadata")
+                    .permissions()
+                    .mode()
+                    & 0o077,
+                0
+            );
         }
     }
 
