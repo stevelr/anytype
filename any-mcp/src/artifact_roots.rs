@@ -802,8 +802,9 @@ impl StagingDirectory {
             .try_clone()
             .map(Dir::from_std_file)
             .map_err(|error| probe_io(&error))?;
+        // Identity probing needs no write authority on the lock file.
         let mut options = OpenOptions::new();
-        options.read(true).write(true).follow(FollowSymlinks::No);
+        options.read(true).follow(FollowSymlinks::No);
         let reopened = root
             .open_with(Path::new(STAGING_LOCK_NAME), &options)
             .map(cap_std::fs::File::into_std)
