@@ -1951,6 +1951,39 @@ mod tests {
         }
     }
 
+    /// Pins the two startup diagnostics the artifact acceptance harness
+    /// asserts verbatim for a selected file whose writable-access declaration
+    /// is absent or `true`.
+    ///
+    /// The acceptance harness cannot name this module (it is compiled both as
+    /// an external test target and as a crate-internal module), so the exact
+    /// texts are restated in
+    /// `any-mcp/tests/support/artifact_acceptance.rs` as
+    /// `READ_ONLY_MISSING_DIAGNOSTIC` and `READ_ONLY_TRUE_DIAGNOSTIC`. This
+    /// test fails first when a production edit drifts either one.
+    #[test]
+    fn selected_access_declaration_diagnostics_are_stable_for_acceptance() {
+        // Exactly the fixture layout: `[spaces]` on the second line.
+        let missing = ArtifactConfig::from_toml(
+            "schema_version = 1\n[spaces]\nallowed = [{ id = \"bafyrei-under-test\" }]\n",
+        )
+        .expect_err("absent access declaration");
+        assert_eq!(
+            missing.to_string(),
+            "invalid any-mcp TOML configuration at line 2, column 1 in `spaces`: \
+             required field is missing"
+        );
+        assert!(!missing.to_string().contains("bafyrei-under-test"));
+
+        let read_only =
+            ArtifactConfig::from_toml("schema_version = 1\n[spaces]\nread_only = true\n")
+                .expect_err("read-only access declaration");
+        assert_eq!(
+            read_only.to_string(),
+            "selected any-mcp configuration must declare spaces.read_only = false"
+        );
+    }
+
     #[test]
     fn toml_diagnostics_locate_schema_errors_without_echoing_values() {
         let secret = "operator-secret-value";

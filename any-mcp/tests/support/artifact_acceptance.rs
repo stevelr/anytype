@@ -1007,7 +1007,7 @@ const ADVERSARIAL_CONFLICT_MESSAGE: &str =
     "The object changed or a request precondition failed. Read it again before retrying.";
 const ADVERSARIAL_BOUNDED_MESSAGE: &str =
     "The result exceeds this workflow's limit. Retry with a paginated or chunked read.";
-const ADVERSARIAL_ROOTS_REQUIRED_MESSAGE: &str = "No artifact roots are configured. Declare roots in an any-mcp TOML config and select it with ANY_MCP_CONFIG or --config.";
+const ADVERSARIAL_ROOTS_REQUIRED_MESSAGE: &str = ROOTS_REQUIRED_GUIDANCE;
 
 fn adversarial_tool_error(kind: ExpectedToolErrorKind) -> ExpectedOutcome {
     let message = match kind {
@@ -6155,6 +6155,56 @@ impl FixtureSpacePolicy {
     }
 }
 
+/// Writable-access declaration rendered into `[spaces]` by a fixture.
+///
+/// The design makes `spaces.read_only` required in a selected file and accepts
+/// only literal `false`, so the three renderable shapes are exactly one
+/// accepted startup and two rejected startups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FixtureSpaceAccess {
+    /// `read_only = false`: the only declaration the MVP accepts.
+    Writable,
+    /// The key is absent, which the MVP must reject at startup.
+    Missing,
+    /// `read_only = true`, which the MVP must reject at startup.
+    ReadOnlyTrue,
+}
+
+impl FixtureSpaceAccess {
+    /// Complete closed inventory of renderable access declarations.
+    pub const ALL: [Self; 3] = [Self::Writable, Self::Missing, Self::ReadOnlyTrue];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Writable => "read_only_false",
+            Self::Missing => "read_only_missing",
+            Self::ReadOnlyTrue => "read_only_true",
+        }
+    }
+
+    /// Exact `[spaces]` body line rendered for this declaration.
+    ///
+    /// The rendered fragment is deliberately either one complete line or
+    /// nothing, so `[spaces]` always stays on the policy's second line and the
+    /// rejected-startup diagnostics keep a fixed, assertable location.
+    #[must_use]
+    const fn render(self) -> &'static str {
+        match self {
+            Self::Writable => "read_only = false\n",
+            Self::Missing => "",
+            Self::ReadOnlyTrue => "read_only = true\n",
+        }
+    }
+
+    /// Whether a selected file carrying this declaration starts the server.
+    #[must_use]
+    pub const fn starts_server(self) -> bool {
+        matches!(self, Self::Writable)
+    }
+}
+
 /// Syntactically valid identifier of a space that exists in no test account.
 ///
 /// The restricted fixture authorizes only this identifier, so the disposable
@@ -6545,16 +6595,28 @@ impl ArtifactLimitProfile {
 /// Strict artifact policy options shared by every acceptance fixture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactPolicyOptions {
+    /// Whether the rendered policy file is selected through `ANY_MCP_CONFIG`.
+    ///
+    /// `false` reproduces the design's no-file compatibility mode: the fixture
+    /// still writes and owns a complete policy on disk, but the production
+    /// child is started without selecting it, so roots, staging, and
+    /// validators must default to empty or disabled and built-in space policy
+    /// must admit every otherwise-authorized space.
+    pub selected: bool,
     /// Whether the remote HTTP staging service is enabled.
     pub staging: bool,
     /// Whether the server under test runs in read-only mode.
     ///
     /// Read-only is a server mode, never a policy field: `ArtifactConfig`
-    /// rejects a configuration declaring `spaces.read_only = true`, so the
-    /// rendered policy always declares `read_only = false` and the caller
+    /// rejects a configuration declaring `spaces.read_only = true`, so an
+    /// operable fixture always declares `read_only = false` and the caller
     /// selects read-only through the production server's read-only switch
-    /// (`ANY_MCP_READ_ONLY` for a spawned child).
+    /// (`ANY_MCP_READ_ONLY` for a spawned child). The rejected declarations
+    /// are reachable only through [`ArtifactPolicyOptions::space_access`],
+    /// which produces a file no server can start from.
     pub read_only: bool,
+    /// Writable-access declaration rendered into `[spaces]`.
+    pub space_access: FixtureSpaceAccess,
     /// Configured space policy shape.
     pub spaces: FixtureSpacePolicy,
     /// Configured validator declaration shape.
@@ -6566,8 +6628,10 @@ pub struct ArtifactPolicyOptions {
 impl Default for ArtifactPolicyOptions {
     fn default() -> Self {
         Self {
+            selected: true,
             staging: true,
             read_only: false,
+            space_access: FixtureSpaceAccess::Writable,
             spaces: FixtureSpacePolicy::AllowedUnderTest,
             validators: FixtureValidatorPolicy::Absent,
             limits: ArtifactLimitProfile::Default,
@@ -6825,6 +6889,17 @@ impl ArtifactPolicyFixture {
     #[must_use]
     pub fn config_path(&self) -> &Path {
         &self.config
+    }
+
+    /// Path a production child must select, when this fixture selects one.
+    ///
+    /// Returns `None` for the no-file compatibility fixture. Spawn helpers
+    /// must consult this method rather than [`Self::config_path`], so an
+    /// unselected policy stays on disk as a negative control and is never
+    /// silently handed to the server.
+    #[must_use]
+    pub fn selected_config_path(&self) -> Option<&Path> {
+        self.options.selected.then_some(self.config.as_path())
     }
 
     /// Returns the private fixture-base bytes for a redacted server-log audit.
@@ -7153,9 +7228,11 @@ fn render_policy(
     validator: Option<&PinnedValidatorExecutable>,
     options: ArtifactPolicyOptions,
 ) -> String {
-    // `ArtifactConfig` rejects `spaces.read_only = true` outright, so the
-    // policy always declares a writable configuration and read-only coverage
-    // uses the production server's read-only mode instead.
+    // `ArtifactConfig` rejects `spaces.read_only = true` outright, so an
+    // operable policy always declares a writable configuration and read-only
+    // coverage uses the production server's read-only mode instead. The two
+    // rejected declarations are rendered only by the startup-acceptance cases,
+    // which never reach an initialized server.
     let allowed = match options.spaces {
         FixtureSpacePolicy::Omitted => String::new(),
         FixtureSpacePolicy::Empty => "allowed = []\n".to_owned(),
@@ -7173,7 +7250,7 @@ fn render_policy(
     let mut contents = format!(
         "schema_version = 1\n\
          [spaces]\n\
-         read_only = false\n\
+         {}\
          {}\
          {}\
          [[roots.import]]\n\
@@ -7182,6 +7259,7 @@ fn render_policy(
          [[roots.export]]\n\
          id = \"{}\"\n\
          path = \"{}\"\n",
+        options.space_access.render(),
         allowed,
         options.limits.render(),
         toml_basic_string(ArtifactPolicyFixture::IMPORT_ROOT),
@@ -7842,6 +7920,14 @@ pub const READ_ONLY_GUIDANCE: &str =
 pub const STAGING_REQUIRED_GUIDANCE: &str =
     "Remote artifact staging is disabled. Enable it in the selected any-mcp TOML config.";
 
+/// Fixed corrective text returned when no artifact roots are configured.
+///
+/// Mirrors `ROOTS_REQUIRED_GUIDANCE` in `any-mcp/src/artifact_roots.rs`. This
+/// file is compiled both into external test targets and into the crate's own
+/// integration module, so no single crate path names the production constant
+/// in both contexts and the exact text is restated here.
+pub const ROOTS_REQUIRED_GUIDANCE: &str = "No artifact roots are configured. Declare roots in an any-mcp TOML config and select it with ANY_MCP_CONFIG or --config.";
+
 /// Stable domain error code reported for a policy-denied space.
 pub const AUTHENTICATION_CODE: &str = "authentication";
 /// Stable domain error code reported for an unauthorized root or absent entity.
@@ -7857,6 +7943,9 @@ pub const VALIDATION_CODE: &str = "validation";
 /// permissive space shapes that are configured differently from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ArtifactPolicyScenario {
+    /// No selected configuration file: roots, staging, and validators default
+    /// to empty or disabled while built-in space policy stays permissive.
+    NoSelectedFile,
     /// `spaces.allowed` omitted: the space under test stays authorized.
     SpacesOmitted,
     /// `spaces.allowed = []`: every space-scoped artifact call is denied.
@@ -7871,7 +7960,8 @@ pub enum ArtifactPolicyScenario {
 
 impl ArtifactPolicyScenario {
     /// Complete closed policy scenario inventory.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
+        Self::NoSelectedFile,
         Self::SpacesOmitted,
         Self::SpacesEmpty,
         Self::SpacesRestrictedElsewhere,
@@ -7883,6 +7973,7 @@ impl ArtifactPolicyScenario {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::NoSelectedFile => "no_selected_file",
             Self::SpacesOmitted => "spaces_omitted",
             Self::SpacesEmpty => "spaces_empty",
             Self::SpacesRestrictedElsewhere => "spaces_restricted_elsewhere",
@@ -7902,18 +7993,26 @@ impl ArtifactPolicyScenario {
     /// Exact fixture policy options that realize this scenario.
     #[must_use]
     pub const fn policy_options(self) -> ArtifactPolicyOptions {
-        let (staging, read_only, spaces) = match self {
-            Self::SpacesOmitted => (true, false, FixtureSpacePolicy::Omitted),
-            Self::SpacesEmpty => (true, false, FixtureSpacePolicy::Empty),
+        let (selected, staging, read_only, spaces) = match self {
+            // The unselected fixture still renders an allowlist naming the
+            // space under test, so a regression that selects the file anyway
+            // changes only the root and staging evidence and stays visible.
+            Self::NoSelectedFile => (false, false, false, FixtureSpacePolicy::AllowedUnderTest),
+            Self::SpacesOmitted => (true, true, false, FixtureSpacePolicy::Omitted),
+            Self::SpacesEmpty => (true, true, false, FixtureSpacePolicy::Empty),
             Self::SpacesRestrictedElsewhere => {
-                (true, false, FixtureSpacePolicy::RestrictedElsewhere)
+                (true, true, false, FixtureSpacePolicy::RestrictedElsewhere)
             }
-            Self::ReadOnly => (true, true, FixtureSpacePolicy::AllowedUnderTest),
-            Self::StagingDisabled => (false, false, FixtureSpacePolicy::AllowedUnderTest),
+            Self::ReadOnly => (true, true, true, FixtureSpacePolicy::AllowedUnderTest),
+            Self::StagingDisabled => (true, false, false, FixtureSpacePolicy::AllowedUnderTest),
         };
         ArtifactPolicyOptions {
+            selected,
             staging,
             read_only,
+            // Every policy scenario reaches an initialized server, so each one
+            // declares the single accepted writable access value.
+            space_access: FixtureSpaceAccess::Writable,
             spaces,
             // Validator behavior is a separate scenario family: policy
             // scenarios must observe an unchanged, validator-free catalog.
@@ -7929,9 +8028,37 @@ impl ArtifactPolicyScenario {
     }
 
     /// Whether the disposable space under test is admitted by policy.
+    ///
+    /// With no selected file the built-in compatibility policy is
+    /// `AllReadWrite`, so the space is admitted without any configured
+    /// allowlist taking part in the decision.
     #[must_use]
     pub const fn admits_space_under_test(self) -> bool {
-        self.policy_options().spaces.admits_space_under_test()
+        match self {
+            Self::NoSelectedFile => true,
+            _ => self.policy_options().spaces.admits_space_under_test(),
+        }
+    }
+
+    /// Whether this configuration activates the local artifact root plane.
+    ///
+    /// Only a read-only server leaves the plane inactive. A compatibility
+    /// start activates it with zero declared roots, which is what
+    /// `artifact_status.local_roots_active` reports; use
+    /// [`Self::declares_local_roots`] for the presence of actual roots.
+    #[must_use]
+    pub const fn activates_local_roots(self) -> bool {
+        !self.policy_options().read_only
+    }
+
+    /// Whether this configuration declares any local artifact root.
+    ///
+    /// An unselected file declares none, so every local operation is refused
+    /// with the fixed roots-required guidance instead of reaching a root.
+    #[must_use]
+    pub const fn declares_local_roots(self) -> bool {
+        let options = self.policy_options();
+        options.selected && !options.read_only
     }
 
     /// Exact sorted artifact tools this configuration must advertise.
@@ -7951,18 +8078,209 @@ impl ArtifactPolicyScenario {
     #[must_use]
     pub const fn expected_status(self) -> ArtifactStatusEvidence {
         let options = self.policy_options();
-        // A read-only server never activates local roots, and staging is only
-        // activated on top of activated roots, so both report inactive while
-        // the configured staging declaration stays visible.
-        let roots_active = !options.read_only;
+        // A read-only server never activates the local plane, and staging is
+        // only activated on top of an activated plane, so both report
+        // inactive while a configured staging declaration stays visible. A
+        // compatibility start activates the plane with zero roots, so it
+        // reports an active plane and empty counts.
+        let plane_active = self.activates_local_roots();
+        let roots = if self.declares_local_roots() { 1 } else { 0 };
         ArtifactStatusEvidence {
-            local_roots_active: roots_active,
-            import_root_count: if roots_active { 1 } else { 0 },
-            export_root_count: if roots_active { 1 } else { 0 },
-            staging_configured: options.staging,
-            staging_active: options.staging && roots_active,
+            local_roots_active: plane_active,
+            import_root_count: roots,
+            export_root_count: roots,
+            staging_configured: options.selected && options.staging,
+            staging_active: options.selected && options.staging && plane_active,
         }
     }
+}
+
+/// Closed inventory of configuration-selection startup cases.
+///
+/// The canonical design requires `spaces.read_only` in a selected file and
+/// accepts only literal `false`, and requires an unselected file to preserve
+/// legacy behavior. These four cases are that requirement's complete truth
+/// table: one compatibility start, one accepted declaration, and the two
+/// rejected declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtifactConfigStartupCase {
+    /// No file selected: the server starts with legacy defaults.
+    NoSelectedFile,
+    /// Selected file declaring `read_only = false`: the server starts.
+    ReadOnlyFalse,
+    /// Selected file omitting `read_only`: startup is refused.
+    ReadOnlyMissing,
+    /// Selected file declaring `read_only = true`: startup is refused.
+    ReadOnlyTrue,
+}
+
+/// Exact startup diagnostic a selected file with an absent access declaration
+/// must produce.
+///
+/// The rendered fixture policy always places `[spaces]` on its second line, so
+/// this location is fixed rather than incidental;
+/// `rendered_policy_keeps_the_spaces_table_on_the_pinned_line` guards the
+/// assumption offline.
+pub const READ_ONLY_MISSING_DIAGNOSTIC: &str =
+    "invalid any-mcp TOML configuration at line 2, column 1 in `spaces`: required field is missing";
+
+/// Exact startup diagnostic a selected file declaring `read_only = true` must
+/// produce.
+///
+/// Mirrors `ConfigProblem::SpaceAccess` in `any-mcp/src/artifact_config.rs`.
+pub const READ_ONLY_TRUE_DIAGNOSTIC: &str =
+    "selected any-mcp configuration must declare spaces.read_only = false";
+
+/// Required startup result of one configuration-selection case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactStartupExpectation {
+    /// The production child initializes and serves its catalog.
+    Accepted,
+    /// The production child exits before any frame with this exact reason.
+    Rejected(&'static str),
+}
+
+/// Observed startup result of one configuration-selection case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactConfigStartupObservation {
+    /// The production child initialized and answered its catalog.
+    Accepted,
+    /// The production child exited before any frame with this exact reason.
+    ///
+    /// The reason is the child's redacted `reason=` field only; callers must
+    /// have already proven that the diagnostic carries no path, credential, or
+    /// upstream body.
+    Rejected(String),
+}
+
+impl ArtifactConfigStartupCase {
+    /// Complete closed startup-case inventory.
+    pub const ALL: [Self; 4] = [
+        Self::NoSelectedFile,
+        Self::ReadOnlyFalse,
+        Self::ReadOnlyMissing,
+        Self::ReadOnlyTrue,
+    ];
+
+    /// Stable identifier used in evidence and failure reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSelectedFile => "no_selected_file",
+            Self::ReadOnlyFalse => "read_only_false",
+            Self::ReadOnlyMissing => "read_only_missing",
+            Self::ReadOnlyTrue => "read_only_true",
+        }
+    }
+
+    /// Required startup result of this case.
+    #[must_use]
+    pub const fn expectation(self) -> ArtifactStartupExpectation {
+        match self {
+            Self::NoSelectedFile | Self::ReadOnlyFalse => ArtifactStartupExpectation::Accepted,
+            Self::ReadOnlyMissing => {
+                ArtifactStartupExpectation::Rejected(READ_ONLY_MISSING_DIAGNOSTIC)
+            }
+            Self::ReadOnlyTrue => ArtifactStartupExpectation::Rejected(READ_ONLY_TRUE_DIAGNOSTIC),
+        }
+    }
+
+    /// Policy scenario that already proves an accepted case, when any.
+    ///
+    /// Acceptance is never re-proven by a second child: the spawned policy
+    /// matrix already starts exactly these two configurations on every
+    /// control plane and compares their catalog, schema, and status evidence.
+    #[must_use]
+    pub const fn proving_policy_scenario(self) -> Option<ArtifactPolicyScenario> {
+        match self {
+            Self::NoSelectedFile => Some(ArtifactPolicyScenario::NoSelectedFile),
+            Self::ReadOnlyFalse => Some(ArtifactPolicyScenario::SpacesOmitted),
+            Self::ReadOnlyMissing | Self::ReadOnlyTrue => None,
+        }
+    }
+
+    /// Fixture options that render the rejected file for this case.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed message for an accepted case, which owns no rejected
+    /// fixture.
+    pub fn rejected_policy_options(self) -> Result<ArtifactPolicyOptions, String> {
+        let space_access = match self {
+            Self::ReadOnlyMissing => FixtureSpaceAccess::Missing,
+            Self::ReadOnlyTrue => FixtureSpaceAccess::ReadOnlyTrue,
+            Self::NoSelectedFile | Self::ReadOnlyFalse => {
+                return Err(format!(
+                    "startup case {} is accepted and renders no rejected fixture",
+                    self.as_str()
+                ));
+            }
+        };
+        Ok(ArtifactPolicyOptions {
+            // A rejected file must fail on its access declaration alone, so
+            // every other declaration stays at the operable default and no
+            // listener port is reserved for a child that never starts.
+            staging: false,
+            space_access,
+            ..ArtifactPolicyOptions::default()
+        })
+    }
+}
+
+/// Content-free record of the complete startup-case truth table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactConfigStartupEvidence {
+    /// Stable case identifier mapped to its observed disposition.
+    ///
+    /// The disposition is `accepted` or the exact redacted refusal reason.
+    pub cases: BTreeMap<&'static str, String>,
+}
+
+/// Proves the complete configuration-selection truth table exactly once.
+///
+/// # Errors
+///
+/// Returns a fixed message when the inventory is incomplete, duplicated, or
+/// misordered, or when an observed startup disposition diverges from the
+/// design-mandated one.
+pub fn record_artifact_config_startup_cases(
+    observed: &[(ArtifactConfigStartupCase, ArtifactConfigStartupObservation)],
+) -> Result<ArtifactConfigStartupEvidence, String> {
+    if observed.len() != ArtifactConfigStartupCase::ALL.len() {
+        return Err("artifact startup case inventory is incomplete".to_owned());
+    }
+    let mut cases = BTreeMap::new();
+    for ((case, observation), expected_case) in observed.iter().zip(ArtifactConfigStartupCase::ALL)
+    {
+        if *case != expected_case {
+            return Err(format!(
+                "artifact startup case out of order: {}",
+                case.as_str()
+            ));
+        }
+        let disposition = match (case.expectation(), observation) {
+            (ArtifactStartupExpectation::Accepted, ArtifactConfigStartupObservation::Accepted) => {
+                "accepted".to_owned()
+            }
+            (
+                ArtifactStartupExpectation::Rejected(expected),
+                ArtifactConfigStartupObservation::Rejected(reason),
+            ) if reason == expected => reason.clone(),
+            _ => {
+                return Err(format!(
+                    "artifact startup disposition diverged: {}",
+                    case.as_str()
+                ));
+            }
+        };
+        if cases.insert(case.as_str(), disposition).is_some() {
+            return Err(format!(
+                "duplicate artifact startup case: {}",
+                case.as_str()
+            ));
+        }
+    }
+    Ok(ArtifactConfigStartupEvidence { cases })
 }
 
 /// Closed inventory of policy probes executed by every policy scenario.
@@ -8055,6 +8373,21 @@ pub const fn probe_expectation(
         return ArtifactProbeExpectation::Refused {
             code: AUTHENTICATION_CODE,
             message: None,
+        };
+    }
+    // With no selected file the built-in policy admits the space, so every
+    // local probe reaches the root gate and is refused with the exact
+    // configuration guidance instead of the uniform hidden-resource refusal.
+    if !scenario.declares_local_roots()
+        && matches!(
+            probe,
+            ArtifactPolicyProbe::LocalImportMissingSource
+                | ArtifactPolicyProbe::LocalExportUnauthorizedRoot
+        )
+    {
+        return ArtifactProbeExpectation::Refused {
+            code: VALIDATION_CODE,
+            message: Some(ROOTS_REQUIRED_GUIDANCE),
         };
     }
     match probe {
@@ -8199,9 +8532,12 @@ pub async fn run_artifact_policy_scenario(
     let status = ArtifactStatusEvidence::from_status(
         &driver.call_tool("artifact_status", json!({})).await?,
     )?;
-    if status != scenario.expected_status() {
+    let expected_status = scenario.expected_status();
+    if status != expected_status {
+        // Both sides are counts and booleans, so naming them keeps a failed
+        // configuration diagnosable without disclosing any configured value.
         return Err(format!(
-            "artifact status did not match the configuration: {}",
+            "artifact status did not match the configuration: {} expected={expected_status:?} observed={status:?}",
             scenario.as_str()
         ));
     }
@@ -8826,8 +9162,10 @@ impl ArtifactContentScenario {
     #[must_use]
     pub const fn policy_options(self) -> ArtifactPolicyOptions {
         ArtifactPolicyOptions {
+            selected: true,
             staging: true,
             read_only: false,
+            space_access: FixtureSpaceAccess::Writable,
             spaces: FixtureSpacePolicy::AllowedUnderTest,
             validators: self.validator_policy(),
             limits: ArtifactLimitProfile::Default,
@@ -9619,8 +9957,10 @@ impl ArtifactLifecycleScenario {
             ),
         };
         ArtifactPolicyOptions {
+            selected: true,
             staging: true,
             read_only: false,
+            space_access: FixtureSpaceAccess::Writable,
             spaces,
             validators: FixtureValidatorPolicy::Absent,
             limits,
@@ -11002,6 +11342,184 @@ mod tests {
         }
     }
 
+    #[test]
+    fn no_selected_file_scenario_declares_the_legacy_compatibility_defaults() {
+        let scenario = ArtifactPolicyScenario::NoSelectedFile;
+        let options = scenario.policy_options();
+        assert!(!options.selected);
+        assert!(!options.staging);
+        assert!(!options.read_only);
+        assert_eq!(options.validators, FixtureValidatorPolicy::Absent);
+        // Built-in policy admits the space even though the unselected file
+        // renders an allowlist, and no local plane is activated.
+        assert!(scenario.admits_space_under_test());
+        // The root plane is activated for a read-write start even with no
+        // declared roots, so the compatibility status reports an active plane
+        // with empty counts.
+        assert!(scenario.activates_local_roots());
+        assert!(!scenario.declares_local_roots());
+        assert_eq!(
+            scenario.expected_status(),
+            ArtifactStatusEvidence {
+                local_roots_active: true,
+                import_root_count: 0,
+                export_root_count: 0,
+                staging_configured: false,
+                staging_active: false,
+            }
+        );
+        // A compatibility start is read-write, so the catalog is unreduced.
+        assert_eq!(scenario.advertised_tools(), ARTIFACT_TOOL_NAMES.to_vec());
+
+        let fixture = ArtifactPolicyFixture::create_with("bafyrei-under-test", options)
+            .expect("no-selected-file fixture");
+        assert!(fixture.selected_config_path().is_none());
+        assert!(fixture.config_path().is_file());
+
+        for probe in [
+            ArtifactPolicyProbe::LocalImportMissingSource,
+            ArtifactPolicyProbe::LocalExportUnauthorizedRoot,
+        ] {
+            assert_eq!(
+                probe_expectation(scenario, probe),
+                ArtifactProbeExpectation::Refused {
+                    code: VALIDATION_CODE,
+                    message: Some(ROOTS_REQUIRED_GUIDANCE),
+                }
+            );
+        }
+        assert_eq!(
+            probe_expectation(scenario, ArtifactPolicyProbe::StageUpload),
+            ArtifactProbeExpectation::Refused {
+                code: VALIDATION_CODE,
+                message: Some(STAGING_REQUIRED_GUIDANCE),
+            }
+        );
+    }
+
+    #[test]
+    fn selected_policy_scenarios_still_select_their_rendered_file() {
+        for scenario in ArtifactPolicyScenario::ALL {
+            let fixture =
+                ArtifactPolicyFixture::create_with("bafyrei-under-test", scenario.policy_options())
+                    .expect("artifact policy fixture");
+            assert_eq!(
+                fixture.selected_config_path().is_some(),
+                scenario != ArtifactPolicyScenario::NoSelectedFile,
+                "{}",
+                scenario.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_policy_keeps_the_spaces_table_on_the_pinned_line() {
+        // `READ_ONLY_MISSING_DIAGNOSTIC` pins the missing-field location, so
+        // the rendered layout that produces it must not drift silently.
+        for access in FixtureSpaceAccess::ALL {
+            let contents = ArtifactPolicyFixture::create_with(
+                "bafyrei-under-test",
+                ArtifactPolicyOptions {
+                    staging: false,
+                    space_access: access,
+                    ..ArtifactPolicyOptions::default()
+                },
+            )
+            .expect("artifact access fixture")
+            .policy_contents()
+            .expect("policy contents");
+            let mut lines = contents.lines();
+            assert_eq!(lines.next(), Some("schema_version = 1"), "{access:?}");
+            assert_eq!(lines.next(), Some("[spaces]"), "{access:?}");
+            let expected = match access {
+                FixtureSpaceAccess::Writable => Some("read_only = false"),
+                FixtureSpaceAccess::ReadOnlyTrue => Some("read_only = true"),
+                FixtureSpaceAccess::Missing => Some("allowed = [{ id = \"bafyrei-under-test\" }]"),
+            };
+            assert_eq!(lines.next(), expected, "{access:?}");
+        }
+    }
+
+    #[test]
+    fn rejected_startup_fixtures_render_exactly_one_refused_declaration() {
+        for case in [
+            ArtifactConfigStartupCase::ReadOnlyMissing,
+            ArtifactConfigStartupCase::ReadOnlyTrue,
+        ] {
+            let options = case.rejected_policy_options().expect("rejected options");
+            assert!(options.selected);
+            // A refused file must fail on its access declaration alone: no
+            // listener is reserved and every other declaration stays operable.
+            assert!(!options.staging);
+            assert_eq!(options.validators, FixtureValidatorPolicy::Absent);
+            assert!(!options.space_access.starts_server());
+            let contents = ArtifactPolicyFixture::create_with("bafyrei-under-test", options)
+                .expect("rejected startup fixture")
+                .policy_contents()
+                .expect("policy contents");
+            match case {
+                ArtifactConfigStartupCase::ReadOnlyMissing => {
+                    assert!(!contents.contains("read_only"));
+                }
+                _ => assert!(contents.contains("read_only = true")),
+            }
+            assert!(matches!(
+                case.expectation(),
+                ArtifactStartupExpectation::Rejected(_)
+            ));
+            assert!(case.proving_policy_scenario().is_none());
+        }
+        for case in [
+            ArtifactConfigStartupCase::NoSelectedFile,
+            ArtifactConfigStartupCase::ReadOnlyFalse,
+        ] {
+            assert!(case.rejected_policy_options().is_err(), "{}", case.as_str());
+            assert_eq!(case.expectation(), ArtifactStartupExpectation::Accepted);
+            assert!(case.proving_policy_scenario().is_some());
+        }
+    }
+
+    #[test]
+    fn startup_case_recorder_requires_the_complete_ordered_truth_table() {
+        let complete = ArtifactConfigStartupCase::ALL.map(|case| {
+            let observation = match case.expectation() {
+                ArtifactStartupExpectation::Accepted => ArtifactConfigStartupObservation::Accepted,
+                ArtifactStartupExpectation::Rejected(reason) => {
+                    ArtifactConfigStartupObservation::Rejected(reason.to_owned())
+                }
+            };
+            (case, observation)
+        });
+        let evidence =
+            record_artifact_config_startup_cases(&complete).expect("complete truth table");
+        assert_eq!(evidence.cases.len(), ArtifactConfigStartupCase::ALL.len());
+        assert_eq!(
+            evidence.cases.get("no_selected_file").map(String::as_str),
+            Some("accepted")
+        );
+        assert_eq!(
+            evidence.cases.get("read_only_missing").map(String::as_str),
+            Some(READ_ONLY_MISSING_DIAGNOSTIC)
+        );
+        assert_eq!(
+            evidence.cases.get("read_only_true").map(String::as_str),
+            Some(READ_ONLY_TRUE_DIAGNOSTIC)
+        );
+
+        assert!(record_artifact_config_startup_cases(&complete[..3]).is_err());
+        let mut misordered = complete.clone();
+        misordered.swap(0, 1);
+        assert!(record_artifact_config_startup_cases(&misordered).is_err());
+        let mut wrong_reason = complete.clone();
+        wrong_reason[2].1 =
+            ArtifactConfigStartupObservation::Rejected(READ_ONLY_TRUE_DIAGNOSTIC.to_owned());
+        assert!(record_artifact_config_startup_cases(&wrong_reason).is_err());
+        let mut wrong_disposition = complete;
+        wrong_disposition[0].1 =
+            ArtifactConfigStartupObservation::Rejected(READ_ONLY_TRUE_DIAGNOSTIC.to_owned());
+        assert!(record_artifact_config_startup_cases(&wrong_disposition).is_err());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn required_validator_fixture_uses_an_invalidatable_private_copy() {
@@ -11105,7 +11623,13 @@ mod tests {
             if scenario.is_read_only() {
                 continue;
             }
+            // Every writable configuration keeps the full catalog, including
+            // the compatibility start that activates no local plane; its
+            // inactive status is pinned by the no-selected-file test.
             assert_eq!(scenario.advertised_tools(), ARTIFACT_TOOL_NAMES.to_vec());
+            if !scenario.declares_local_roots() {
+                continue;
+            }
             let status = scenario.expected_status();
             assert!(status.local_roots_active);
             assert_eq!(status.import_root_count, 1);

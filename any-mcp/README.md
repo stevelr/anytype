@@ -1839,11 +1839,26 @@ the complete executed matrix for exact parity, so a divergence between the wire
 envelope, the router, and either protocol revision fails the suite.
 
 Two further scenario families reuse the same harness. The policy family
-executes a complete server configuration — space policy omitted, empty, or
-restricted elsewhere, read-only mode, and disabled staging — across the
-scripted, direct, stable, and preview control planes, and every one of them
-must report the same advertised catalog, the same `artifact_status`
-projection, and the same refusal code and guidance.
+executes a complete server configuration — no selected file, space policy
+omitted, empty, or restricted elsewhere, read-only mode, and disabled staging
+— across the scripted, direct, stable, and preview control planes, and every
+one of them must report the same advertised catalog, the same
+`artifact_status` projection, and the same refusal code and guidance. The
+no-selected-file row is the compatibility mode: the fixture still owns a
+complete policy on disk, no child selects it, and the server must advertise
+the unreduced read-write catalog while reporting zero roots and no staging and
+refusing every root-based call with the fixed roots-required guidance.
+
+The same family then closes the configuration-selection truth table that the
+required `spaces.read_only` declaration defines. A started server proves the
+two accepted rows (no selected file, and a selected file declaring
+`read_only = false`); the two refused rows start a bounded production child on
+both spawned stdio profiles, and each must die before its first protocol frame
+with an empty stdout and exactly one error diagnostic — `required field is
+missing` at the located schema path for an absent declaration, and
+`selected any-mcp configuration must declare spaces.read_only = false` for
+`read_only = true`. Neither diagnostic may contain a fixture path or a
+credential, and both profiles must report the identical reason.
 
 The content family proves what the artifact contract does with real bytes on
 both data planes. `mime_matrix` imports and exports binary, UTF-8 text, PNG,

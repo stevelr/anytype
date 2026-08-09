@@ -53,9 +53,10 @@ use support::live_scenario::{
     ACCEPTANCE_TRANSFER_CHUNK_BYTES, ADVERSARIAL_DYNAMIC_STDIO_IMPLEMENTED_IDS,
     ADVERSARIAL_STDIO_SENTINEL_IDS, ARTIFACT_FILE_MEDIA_TYPE, ARTIFACT_FILE_PAYLOAD,
     ARTIFACT_FRAME_CEILING_BYTES, ARTIFACT_TOOL_NAMES, AdversarialCaseId, AdversarialExecution,
-    ArtifactAdversarialRun, ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario,
-    ArtifactControlPlane, ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks,
-    ArtifactGateLease, ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture,
+    ArtifactAdversarialRun, ArtifactConfigStartupCase, ArtifactConfigStartupObservation,
+    ArtifactContentEvidence, ArtifactContentRun, ArtifactContentScenario, ArtifactControlPlane,
+    ArtifactDataPlane, ArtifactFrameMeasurement, ArtifactGateHooks, ArtifactGateLease,
+    ArtifactLifecycleScenario, ArtifactPolicyEvidence, ArtifactPolicyFixture,
     ArtifactPolicyOptions, ArtifactPolicyRun, ArtifactPolicyScenario, ArtifactServerLogAudit,
     ArtifactServerLogBaseline, ArtifactSmokeFixture, ArtifactStageAllocation,
     ArtifactStartupCaseOutcome, ArtifactSymlinkStartupTarget, ArtifactTransport, ExpectedOutcome,
@@ -63,12 +64,12 @@ use support::live_scenario::{
     artifact_sha256, assert_artifact_content_parity, assert_artifact_parity,
     assert_artifact_policy_parity, assert_payload_frame_independence, audit_server_log,
     classify_collision_frames, measure_artifact_frame, prepare_artifact_symlink_startup_case,
-    record_artifact_dynamic_filesystem_startup_cases, reject_oversized_stage_chunk,
-    release_stage_upload, require_completed, run_artifact_adversarial_stdio_sentinels,
-    run_artifact_content_scenario, run_artifact_dynamic_filesystem_stdio_sentinels,
-    run_artifact_policy_scenario, run_artifact_race01, run_artifact_race04,
-    run_artifact_smoke_scenario, server_log_baseline, stage_head_status, upload_stage_bytes,
-    validate_tool_frame, wait_for_stage_reaped,
+    record_artifact_config_startup_cases, record_artifact_dynamic_filesystem_startup_cases,
+    reject_oversized_stage_chunk, release_stage_upload, require_completed,
+    run_artifact_adversarial_stdio_sentinels, run_artifact_content_scenario,
+    run_artifact_dynamic_filesystem_stdio_sentinels, run_artifact_policy_scenario,
+    run_artifact_race01, run_artifact_race04, run_artifact_smoke_scenario, server_log_baseline,
+    stage_head_status, upload_stage_bytes, validate_tool_frame, wait_for_stage_reaped,
 };
 #[cfg(feature = "acceptance-harness")]
 use support::live_scenario::{
@@ -2462,7 +2463,12 @@ fn spawn_disposable_artifact_driver_configured(
     let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
     child_environment.configure(&mut command)?;
     configure_stdio_command(&mut command, options, Some("artifacts"));
-    command.env("ANY_MCP_CONFIG", policy.config_path());
+    // The no-file compatibility fixture owns a complete policy on disk that no
+    // child may select, so the selection is read from the fixture instead of
+    // being assumed.
+    if let Some(config) = policy.selected_config_path() {
+        command.env("ANY_MCP_CONFIG", config);
+    }
     if let Some((gate, point, key)) = gate {
         gate.configure(&mut command, point, key);
     }
@@ -7203,6 +7209,111 @@ fn run_dynamic_symlink_startup_rejection(
     Ok(ArtifactStartupCaseOutcome::Rejected(category))
 }
 
+/// Starts one production child against a selected file whose writable-access
+/// declaration the MVP must refuse, and returns its exact redacted reason.
+///
+/// The child is expected to die before its first frame, so no cleanup-owned
+/// driver is registered: the bounded process wrapper reaps it and reports the
+/// complete captured output.
+#[cfg(feature = "acceptance-harness")]
+fn run_artifact_config_startup_rejection(
+    ctx: &TestContext,
+    case: ArtifactConfigStartupCase,
+    control: ArtifactControlPlane,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<ArtifactConfigStartupObservation> {
+    let options = case
+        .rejected_policy_options()
+        .map_err(|_| sentinel_assertion("artifact startup case owns no rejected fixture"))?;
+    let policy = ArtifactPolicyFixture::create_with(&ctx.space_id, options)
+        .map_err(|_| sentinel_assertion("create artifact startup rejection fixture"))?;
+    let fixture_needle = artifact_fixture_log_needle(&policy)?;
+    record_artifact_log_needle(audit_needles, &fixture_needle)?;
+    let config = policy
+        .selected_config_path()
+        .ok_or_else(|| sentinel_assertion("artifact startup rejection fixture selects no file"))?;
+
+    let credential_needles = disposable_child_credential_needles(ctx)?;
+    let environment = ctx.disposable_child_environment().ok_or_else(|| {
+        sentinel_assertion("artifact startup rejection omitted child environment")
+    })?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    environment.configure(&mut command)?;
+    configure_stdio_command(
+        &mut command,
+        artifact_driver_options(control),
+        Some("artifacts"),
+    );
+    command.env("ANY_MCP_CONFIG", config);
+
+    let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(5));
+    let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
+        .expect_err("refused artifact configuration closes stdout without a frame");
+    let panic_text = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic");
+    if panic_text != "bounded protocol process failed: child_eof" {
+        return Err(sentinel_assertion(
+            "artifact startup rejection did not produce the bounded EOF category",
+        ));
+    }
+    let failure = process
+        .take_failure()
+        .ok_or_else(|| sentinel_assertion("artifact startup rejection omitted process evidence"))?;
+    if failure.category != "child_eof"
+        || failure.output.exit_category != "exit_code"
+        || !failure.output.stdout.is_empty()
+        || failure.output.stderr.len() > support::process::MAX_STDERR_BYTES
+    {
+        return Err(sentinel_assertion(
+            "artifact startup rejection violated the production output contract",
+        ));
+    }
+    if contains_bytes(&failure.output.stderr, &fixture_needle)
+        || credential_needles
+            .iter()
+            .any(|needle| contains_bytes(&failure.output.stderr, needle))
+    {
+        return Err(sentinel_assertion(
+            "artifact startup rejection diagnostics exposed forbidden values",
+        ));
+    }
+    let stderr = std::str::from_utf8(&failure.output.stderr)
+        .map_err(|_| sentinel_assertion("artifact startup rejection stderr was not UTF-8"))?;
+    let lines = stderr
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let [line] = lines.as_slice() else {
+        return Err(sentinel_assertion(
+            "artifact startup rejection did not emit exactly one diagnostic",
+        ));
+    };
+    let (prefix, reason) = line
+        .split_once("any-mcp startup or service failure reason=")
+        .ok_or_else(|| {
+            sentinel_assertion("artifact startup rejection omitted the startup diagnostic")
+        })?;
+    if !prefix
+        .split_ascii_whitespace()
+        .any(|field| field == "ERROR")
+    {
+        return Err(sentinel_assertion(
+            "artifact startup rejection was not reported at error level",
+        ));
+    }
+    eprintln!(
+        "artifact startup case={} control={} outcome=rejected",
+        case.as_str(),
+        control.as_str()
+    );
+    Ok(ArtifactConfigStartupObservation::Rejected(
+        reason.to_owned(),
+    ))
+}
+
 #[cfg(feature = "acceptance-harness")]
 #[tokio::test]
 #[serial_test::serial]
@@ -7408,9 +7519,11 @@ async fn run_spawned_artifact_policy_scenario(
     let stopped = lock_driver(&child)
         .take()
         .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
-    let evidence = observed.map_err(|_| {
+    let evidence = observed.map_err(|error| {
+        // The harness only ever returns fixed content-free categories, so
+        // reporting the category keeps a failed matrix diagnosable.
         eprintln!(
-            "artifact policy scenario={} control={} outcome=failed",
+            "artifact policy scenario={} control={} outcome=failed category={error}",
             scenario.as_str(),
             control.as_str()
         );
@@ -7424,7 +7537,13 @@ async fn run_spawned_artifact_policy_scenario(
     Ok(evidence)
 }
 
-/// Runs every artifact policy scenario across the spawned control planes.
+/// Runs every artifact policy scenario across the spawned control planes, then
+/// closes the configuration-selection startup truth table.
+///
+/// The scenario loop starts the two accepted configurations (no selected file
+/// and a selected file declaring `read_only = false`) on every control plane;
+/// the two refused declarations are started here as bounded children that must
+/// die before their first frame with the design-mandated diagnostic.
 #[cfg(feature = "acceptance-harness")]
 #[tokio::test]
 #[serial_test::serial]
@@ -7443,6 +7562,9 @@ async fn headless_artifact_policy_spawned_scenarios() {
         move |ctx| {
             Box::pin(async move {
                 record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
+                // Startup acceptance is claimed only for configurations this
+                // run actually started on every control plane.
+                let mut accepted = std::collections::BTreeSet::new();
                 for (scenario_index, scenario) in
                     ArtifactPolicyScenario::ALL.into_iter().enumerate()
                 {
@@ -7476,6 +7598,32 @@ async fn headless_artifact_policy_spawned_scenarios() {
                             sentinel_assertion("spawned artifact policy planes diverged")
                         },
                     )?;
+                    accepted.insert(scenario);
+                }
+                let mut observed = Vec::with_capacity(ArtifactConfigStartupCase::ALL.len());
+                for case in ArtifactConfigStartupCase::ALL {
+                    let observation = match case.proving_policy_scenario() {
+                        Some(scenario) => {
+                            if !accepted.contains(&scenario) {
+                                return Err(sentinel_assertion(
+                                    "accepted artifact startup case lacks a proving scenario",
+                                ));
+                            }
+                            ArtifactConfigStartupObservation::Accepted
+                        }
+                        None => run_artifact_config_startup_rejection_matrix(
+                            ctx.as_ref(),
+                            case,
+                            &callback_audit_needles,
+                        )?,
+                    };
+                    observed.push((case, observation));
+                }
+                let evidence = record_artifact_config_startup_cases(&observed).map_err(|_| {
+                    sentinel_assertion("artifact configuration startup truth table diverged")
+                })?;
+                for (case, disposition) in &evidence.cases {
+                    eprintln!("artifact startup case={case} disposition={disposition}");
                 }
                 Ok(())
             })
@@ -7498,6 +7646,30 @@ async fn headless_artifact_policy_spawned_scenarios() {
             panic!("artifact policy scenarios require disposable admission");
         }
     }
+}
+
+/// Refuses one rejected configuration on every spawned stdio profile and
+/// proves that each profile reported the identical redacted reason.
+#[cfg(feature = "acceptance-harness")]
+fn run_artifact_config_startup_rejection_matrix(
+    ctx: &TestContext,
+    case: ArtifactConfigStartupCase,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<ArtifactConfigStartupObservation> {
+    let mut observed: Option<ArtifactConfigStartupObservation> = None;
+    for control in ADVERSARIAL_STDIO_CONTROLS {
+        let observation = run_artifact_config_startup_rejection(ctx, case, control, audit_needles)?;
+        match &observed {
+            Some(first) if *first != observation => {
+                return Err(sentinel_assertion(
+                    "artifact startup rejection diverged across stdio profiles",
+                ));
+            }
+            Some(_) => {}
+            None => observed = Some(observation),
+        }
+    }
+    observed.ok_or_else(|| sentinel_assertion("artifact startup rejection matrix was empty"))
 }
 
 /// Runs one spawned control plane through one artifact content scenario.
@@ -7557,9 +7729,11 @@ async fn run_spawned_artifact_content_scenario(
     let stopped = lock_driver(&child)
         .take()
         .map_or(Ok(()), |driver| driver.try_finish().map(|_| ()));
-    let evidence = observed.map_err(|_| {
+    let evidence = observed.map_err(|error| {
+        // The harness only ever returns fixed content-free categories, so
+        // reporting the category keeps a failed matrix diagnosable.
         eprintln!(
-            "artifact content scenario={} control={} outcome=failed",
+            "artifact content scenario={} control={} outcome=failed category={error}",
             scenario.as_str(),
             control.as_str()
         );

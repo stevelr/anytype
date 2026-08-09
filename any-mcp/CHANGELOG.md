@@ -27,6 +27,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Prove the artifact configuration-selection contract end to end. The policy
+  scenario family gains a no-selected-file compatibility row: the fixture
+  renders a complete policy that no server selects, and every control plane —
+  scripted, direct, stable, and preview — must advertise the unreduced
+  read-write catalog while reporting zero import and export roots, no staging,
+  and the fixed roots-required guidance for every root-based call. The same
+  family now closes the truth table that the required `spaces.read_only`
+  declaration defines: the two accepted rows start a server, and the two
+  refused rows start a bounded production child on both spawned stdio profiles
+  that must exit before its first protocol frame with an empty stdout and one
+  path-free, credential-free diagnostic. A new unit test in
+  `artifact_config.rs` pins both refusal texts, which the acceptance harness
+  restates because it cannot name the production module.
 - Retire the last pending adversarial robustness rows: all 122 matrix cases
   now state executed evidence. The crash-restart owner adds the CRASH-04
   durable-record corruption rejection (`artifact state reconciliation

@@ -2812,15 +2812,29 @@ async fn live_artifact_server_with(
     policy: &ArtifactPolicyFixture,
     read_only: bool,
 ) -> Result<AnyMcpServer, TestError> {
-    let contents = policy.policy_contents().map_err(|_| TestError::Assertion {
-        message: "read artifact acceptance policy".to_owned(),
-    })?;
-    let artifact = ArtifactConfig::from_toml(&contents).map_err(|_| TestError::Assertion {
-        message: "parse artifact acceptance policy".to_owned(),
-    })?;
+    let artifact = live_artifact_policy(policy)?;
     let mut runtime = live_artifact_runtime(ctx, &artifact, read_only).await?;
     runtime.enable_artifact_acceptance_gates();
     Ok(AnyMcpServer::new(runtime).expect("production artifacts MCP catalog"))
+}
+
+/// Loads the exact policy a production server owns for this fixture.
+///
+/// The no-file compatibility fixture selects nothing: its rendered policy stays
+/// on disk as a negative control, and the direct router must start from the
+/// same built-in defaults a spawned child inherits when `ANY_MCP_CONFIG` is
+/// unset. Reading [`ArtifactPolicyFixture::selected_config_path`] rather than
+/// the fixture's config path keeps the two control planes on one contract.
+fn live_artifact_policy(policy: &ArtifactPolicyFixture) -> Result<ArtifactConfig, TestError> {
+    if policy.selected_config_path().is_none() {
+        return Ok(ArtifactConfig::default());
+    }
+    let contents = policy.policy_contents().map_err(|_| TestError::Assertion {
+        message: "read artifact acceptance policy".to_owned(),
+    })?;
+    ArtifactConfig::from_toml(&contents).map_err(|_| TestError::Assertion {
+        message: "parse artifact acceptance policy".to_owned(),
+    })
 }
 
 async fn live_artifact_runtime(
