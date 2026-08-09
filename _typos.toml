@@ -21,6 +21,8 @@ oif = "oif" # nftables output-interface keyword
 ratatui = "ratatui" # dependency name
 
 [default.extend-words]
+caf = "caf" # NFC "caf\u{e9}" filename prefix in Unicode-normalization alias tests
+hel = "hel" # deliberate 3-byte truncated-payload prefix asserted in artifact tests
 nin = "nin" # word-split form of ext_nin identifiers
 oif = "oif" # nftables output-interface keyword
 ratatui = "ratatui" # word-split form of ratatui_image
