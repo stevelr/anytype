@@ -1736,6 +1736,11 @@ adversarial case matrix — serially. The process harness uses only portable
 Rust process, TCP, path, environment, thread, and channel APIs; it does not
 depend on Unix signals, `/tmp`, executable suffixes, or shell scripts.
 
+The workflow is manual-only during matrix qualification. Its tier selector
+always runs the portable matrix, then optionally adds the existing headless or
+clean-server live lane. Every job installs the Rust version selected by
+`rust-toolchain.toml`.
+
 The release workflow can also be started manually for a selected branch or
 tag. Manual runs build either all cargo-dist targets or one selected target
 from the supported architecture list. They upload build artifacts for

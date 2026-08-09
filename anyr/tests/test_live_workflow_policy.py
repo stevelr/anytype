@@ -10,6 +10,11 @@ class LiveWorkflowPolicyTests(unittest.TestCase):
         workflow = (root / ".github/workflows/anyr-anyback-live.yml").read_text(
             encoding="utf-8"
         )
+        self.assertIn("  workflow_dispatch:\n", workflow)
+        self.assertNotIn("  pull_request:\n", workflow)
+        self.assertNotIn("  push:\n", workflow)
+        self.assertNotIn("  schedule:\n", workflow)
+        self.assertNotRegex(workflow, r"uses:\s+\S+@v\d")
         self.assertIn("group: anytype-headless-live", workflow)
         self.assertIn("trap 'rm -rf -- \"$gate_dir\"' EXIT", workflow)
         self.assertIn("ANYR_PY_REQUIRE_LIVE=1", workflow)

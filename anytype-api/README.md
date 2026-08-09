@@ -1156,7 +1156,8 @@ python3 anytype-api/scripts/run-live-gate.py required anytype-api/tests/live-gat
 ```
 
 The checked-in live-gate manifest assigns every ignored test to the required,
-scheduled soak, or excluded tier. Verify that closed inventory without a server:
+manual soak, or excluded tier. The manual workflow selector can run either live
+tier or both. Verify that closed inventory without a server:
 
 ```sh
 cargo test --locked -p anytype --test live_gate_manifest

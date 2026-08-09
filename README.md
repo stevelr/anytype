@@ -50,6 +50,23 @@ cargo run -- -h
 Use `--workspace` or `-p PACKAGE` when you need to build or test other
 workspace members.
 
+The Nix development shell supplies the Rust version pinned by
+`rust-toolchain.toml`, protobuf, `just`, `jq`, a C compiler, `gate`, and Python
+3.14:
+
+```sh
+nix develop
+```
+
+GitHub Actions workflows are manual-only while the expanded matrix is being
+qualified. The CI and build workflows offer platform selectors for Linux
+x86_64 and arm64, macOS arm64, and Windows x86_64 and arm64; CI also has a
+native Arch Linux lane. Nix drives Linux and macOS builds, Windows builds run
+natively, and Linux builds can produce loadable x86_64 or arm64 OCI image
+archives. The release-artifact workflow generates shell and PowerShell
+installers and Homebrew formulae, then validates the POSIX artifacts on both
+Linux and macOS without publishing a release.
+
 ## Compatibility notes
 
 - [Numeric and checkbox filter status](FILTER_STATUS.md) records the

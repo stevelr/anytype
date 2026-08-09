@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Make GitHub Actions manual-only during cross-platform qualification and take
+  the Rust version from `rust-toolchain.toml` instead of workflow literals.
+  The Nix build also exposes Linux x86_64/arm64 OCI image archives containing
+  the supported `anyr` entrypoint, including its `mcp` commands.
 - Map the new anytype-api HTTP deadline errors onto existing MCP error
   classes. Mutation-scoped deadline expirations and explicitly indeterminate
   mutation outcomes return `mutation_indeterminate`; other deadline

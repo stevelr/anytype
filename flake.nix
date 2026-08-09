@@ -7,6 +7,10 @@
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    gate-check = {
+      url = "github:stevelr/gate-check";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -24,6 +28,12 @@
           lib = pkgs.lib;
           os = if pkgs.stdenv.isDarwin then "darwin" else "linux";
           arch = if pkgs.stdenv.isx86_64 then "amd64" else "arm64";
+          dockerArch =
+            {
+              "x86_64-linux" = "amd64";
+              "aarch64-linux" = "arm64";
+            }
+            .${system};
           toolchain = inputs.fenix.packages.${system}.fromToolchainFile {
             file = ./rust-toolchain.toml;
             sha256 = "sha256-A1abGIbOtcBSdrUMhDGrER3pRM1hQP4fp9gh3Y4PKc8=";
@@ -99,14 +109,52 @@
             version = workspace-version;
             nightly = false;
           };
+          anytype-toolbox-binaries = mkAnytypeToolbox {
+            version = workspace-version;
+            cargoBuildFlags = [
+              "--package"
+              "anyr"
+              "--bin"
+              "anyr"
+            ];
+            doCheck = false;
+            nightly = false;
+          };
 
         in
         {
-          packages.default = anytype-toolbox;
+          packages = {
+            default = anytype-toolbox;
+            "anytype-toolbox-${system}" = anytype-toolbox-binaries;
+          }
+          // lib.optionalAttrs pkgs.stdenv.isLinux {
+            anytype-toolbox-oci = pkgs.dockerTools.buildLayeredImage {
+              name = "anytype-toolbox";
+              tag = "${workspace-version}-${dockerArch}";
+              contents = pkgs.buildEnv {
+                name = "anytype-toolbox-root";
+                paths = [ anytype-toolbox-binaries ];
+                pathsToLink = [ "/bin" ];
+              };
+              config = {
+                Entrypoint = [ "/bin/anyr" ];
+                WorkingDir = "/";
+                Labels = {
+                  "org.opencontainers.image.description" = "Anytype automation CLI with MCP server commands";
+                  "org.opencontainers.image.source" = "https://github.com/stevelr/anytype";
+                  "org.opencontainers.image.title" = "anytype-toolbox";
+                  "org.opencontainers.image.version" = workspace-version;
+                };
+              };
+            };
+          };
           devShells.default = pkgs.mkShell {
             nativeBuildInputs = [
+              inputs.gate-check.packages.${system}.default
+              pkgs.stdenv.cc
               pkgs.jq
               pkgs.just
+              pkgs.python314
               pkgs.protobuf
               toolchain
               anytype-cli

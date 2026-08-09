@@ -396,18 +396,19 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     assert_eq!(
-        digest, "2061a8a3f6bc20b0eb497cb1f86fd526864e707c4284210cdead451197999a92",
+        digest, "a5e67dcd1074ec048a70477b2c6e61b78065c78086e8c2c97b8d05841a55e5b9",
         "workflow policy is an exact reviewed representation; audit before updating this digest"
     );
     let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
     let live = workflow_job(workflow, "headless-e2e", Some("headless-clean-server-soak"));
     let clean = workflow_job(workflow, "headless-clean-server-soak", None);
 
-    let predicate = "if: >- github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')";
-    assert!(workflow.contains("  pull_request:\n"));
+    assert!(workflow.contains("  workflow_dispatch:\n"));
+    assert!(!workflow.contains("  pull_request:\n"));
+    assert!(!workflow.contains("  push:\n"));
     assert!(!workflow.contains("  schedule:\n"));
     assert!(!portable.contains("self-hosted"));
-    assert_eq!(occurrences(portable, "if: runner.os == 'Linux'"), 2);
+    assert_eq!(occurrences(portable, "if: runner.os == 'Linux'"), 1);
 
     let compact_portable = compact_whitespace(portable);
     for (os, platform) in PORTABLE_PLATFORM_MATRIX {
@@ -428,7 +429,16 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         );
     }
 
-    for block in [live, clean] {
+    for (block, predicate) in [
+        (
+            live,
+            "if: ${{ inputs.tier == 'live' || inputs.tier == 'all' }}",
+        ),
+        (
+            clean,
+            "if: ${{ inputs.tier == 'clean-server' || inputs.tier == 'all' }}",
+        ),
+    ] {
         assert!(compact_whitespace(block).contains(predicate));
         assert!(block.contains("needs: portable-contracts"));
         assert!(block.contains("      - self-hosted"));
@@ -473,7 +483,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
             line.starts_with("- uses:") || line.starts_with("uses:")
         })
         .collect::<Vec<_>>();
-    assert_eq!(action_lines.len(), 14);
+    assert_eq!(action_lines.len(), 13);
     for line in action_lines {
         let reference = line
             .split_once('@')
@@ -499,13 +509,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         ),
         3
     );
-    assert_eq!(
-        occurrences(
-            workflow,
-            "dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e"
-        ),
-        3
-    );
+    assert_eq!(occurrences(workflow, "run: rustup show"), 3);
     assert_eq!(
         occurrences(
             workflow,

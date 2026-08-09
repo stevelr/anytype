@@ -613,8 +613,9 @@ Python CLI suite, and one exact backup create/restore smoke test. Each subgate
 rejects skips and zero-test collection. The workflow requires authenticated HTTP
 and gRPC pings, disposable-process admission, a unique safe space prefix, and a
 reviewed redacted server log. Its smoke test creates and removes its own source
-and destination spaces. Ordinary offline workspace tests do not run these
-server-backed targets.
+and destination spaces. The workflow is started manually while CI qualification
+is in progress. Ordinary offline workspace tests do not run these server-backed
+targets.
 
 ## License
 

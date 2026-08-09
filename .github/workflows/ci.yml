@@ -1,0 +1,195 @@
+name: CI
+
+# Manual-only while the expanded platform matrix is being qualified.
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform or platform family to test
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - linux
+          - linux-x86_64
+          - linux-aarch64
+          - archlinux-x86_64
+          - macos-aarch64
+          - windows
+          - windows-x86_64
+          - windows-aarch64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.platform }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Gate is distributed through Nix, so this deterministic lane qualifies the
+  # common tool set once before any selected native platform starts.
+  preflight:
+    runs-on: ubuntu-24.04
+    outputs:
+      nix: ${{ steps.matrix.outputs.nix }}
+      arch: ${{ steps.matrix.outputs.arch }}
+      windows: ${{ steps.matrix.outputs.windows }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Verify pinned prerequisites and repository formatting
+        run: nix develop --command bash .github/scripts/verify-ci-prerequisites.sh --check-repository
+
+      - id: matrix
+        name: Select native platform rows
+        shell: bash
+        env:
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          all='[
+            {"platform":"linux-x86_64","family":"linux","kind":"nix","runner":"ubuntu-24.04","system":"x86_64-linux"},
+            {"platform":"linux-aarch64","family":"linux","kind":"nix","runner":"ubuntu-24.04-arm","system":"aarch64-linux"},
+            {"platform":"archlinux-x86_64","family":"linux","kind":"arch","runner":"ubuntu-24.04","system":"x86_64-linux"},
+            {"platform":"macos-aarch64","family":"macos","kind":"nix","runner":"macos-15","system":"aarch64-darwin"},
+            {"platform":"windows-x86_64","family":"windows","kind":"windows","runner":"windows-2025","python_arch":"x64"},
+            {"platform":"windows-aarch64","family":"windows","kind":"windows","runner":"windows-11-arm","python_arch":"arm64"}
+          ]'
+          if [[ "$PLATFORM" == all ]]; then
+            selected=$(jq -c . <<<"$all")
+          elif [[ "$PLATFORM" == linux || "$PLATFORM" == windows ]]; then
+            selected=$(jq -c --arg family "$PLATFORM" '[.[] | select(.family == $family)]' <<<"$all")
+          else
+            selected=$(jq -c --arg platform "$PLATFORM" '[.[] | select(.platform == $platform)]' <<<"$all")
+          fi
+          test "$(jq length <<<"$selected")" -gt 0
+          {
+            echo "nix=$(jq -c '[.[] | select(.kind == "nix")]' <<<"$selected")"
+            echo "arch=$(jq -c '[.[] | select(.kind == "arch")]' <<<"$selected")"
+            echo "windows=$(jq -c '[.[] | select(.kind == "windows")]' <<<"$selected")"
+          } >> "$GITHUB_OUTPUT"
+
+  nix-native:
+    name: native gates (${{ matrix.platform }})
+    needs: preflight
+    if: ${{ needs.preflight.outputs.nix != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.preflight.outputs.nix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Verify native prerequisites
+        run: nix develop --command bash .github/scripts/verify-ci-prerequisites.sh
+
+      - name: Build
+        run: nix develop --command cargo build --locked --workspace --all-features
+
+      - name: Clippy
+        run: nix develop --command cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: nix develop --command cargo test --locked --workspace --all-features
+
+      - name: Format check
+        run: nix develop --command cargo fmt --all --check
+
+  arch-native:
+    name: native gates (${{ matrix.platform }})
+    needs: preflight
+    if: ${{ needs.preflight.outputs.arch != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.preflight.outputs.arch) }}
+    runs-on: ${{ matrix.runner }}
+    container: archlinux:base-devel
+    steps:
+      - name: Install checkout prerequisites
+        shell: bash
+        run: pacman -Syu --noconfirm --needed git
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install native prerequisites
+        shell: bash
+        run: |
+          pacman -S --noconfirm --needed gcc jq just protobuf python rustup
+          rustup show
+          bash .github/scripts/verify-ci-prerequisites.sh --without-gate
+
+      - name: Build, lint, test, and format-check
+        shell: bash
+        run: |
+          cargo build --locked --workspace --all-features
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+          cargo test --locked --workspace --all-features
+          cargo fmt --all --check
+
+  windows-native:
+    name: native gates (${{ matrix.platform }})
+    needs: preflight
+    if: ${{ needs.preflight.outputs.windows != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.preflight.outputs.windows) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+          architecture: ${{ matrix.python_arch }}
+
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      - name: Install native prerequisites
+        shell: pwsh
+        run: |
+          choco install protoc jq mingw --yes --no-progress
+          rustup show
+          $expected = (Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"$').Matches.Groups[1].Value
+          if ((rustc --version).Split(' ')[1] -ne $expected) { throw "Rust toolchain mismatch" }
+          if ((python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") -ne '3.14') { throw "Python toolchain mismatch" }
+          protoc --version
+          just --version
+          jq --version
+          gcc --version | Select-Object -First 1
+
+      - name: Build
+        run: cargo build --locked --workspace --all-features
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --workspace --all-features
+
+      - name: Format check
+        run: cargo fmt --all --check

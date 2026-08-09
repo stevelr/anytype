@@ -4,36 +4,25 @@ name: anyr-anyback-live
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/anyr-anyback-live.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "anyr/**"
-      - "anyback/**"
-      - "anytype-api/**"
-      - "anytype-rpc/**"
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/anyr-anyback-live.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "anyr/**"
-      - "anyback/**"
-      - "anytype-api/**"
-      - "anytype-rpc/**"
 
 permissions:
   contents: read
 
 jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: Verify pinned CI prerequisites
+        run: nix develop --command bash .github/scripts/verify-ci-prerequisites.sh --check-repository
+
   installed-backup-smoke:
     name: installed anyr backup create/restore
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+    needs: preflight
     environment: anytype-headless
     runs-on:
       - self-hosted
@@ -45,15 +34,20 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.97.1
-        uses: dtolnay/rust-toolchain@1.97.1
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Install Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
 
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: anyr-anyback-live
 
@@ -169,7 +163,7 @@ jobs:
 
       - name: Retain bounded redacted server evidence on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: anyr-anyback-live-server-log
           path: ${{ env.ANYBACK_HEADLESS_REDACTED_LOG_ARTIFACT }}

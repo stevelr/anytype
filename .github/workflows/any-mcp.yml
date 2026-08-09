@@ -4,35 +4,38 @@ name: any-mcp
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/any-mcp.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "any-mcp/**"
-      - "anytype-api/**"
-      - "anytype-rpc/**"
-  push:
-    branches:
-      - main
-    tags:
-      - "v*"
-    paths:
-      - ".github/workflows/any-mcp.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "any-mcp/**"
-      - "anytype-api/**"
-      - "anytype-rpc/**"
+    inputs:
+      tier:
+        description: Test tier to run after portable contracts
+        type: choice
+        required: true
+        default: portable
+        options:
+          - portable
+          - live
+          - clean-server
+          - all
 
 permissions:
   contents: read
 
 jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: Verify pinned CI prerequisites
+        run: nix develop --command bash .github/scripts/verify-ci-prerequisites.sh --check-repository
+
   portable-contracts:
     # One row per released target of the artifact data-plane platform matrix:
     # Linux x86_64/aarch64, macOS aarch64, and Windows x86_64/aarch64.
     name: contracts, stdio, and artifacts (${{ matrix.platform }})
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -54,11 +57,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.96.0
-        uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e # 1.96.0
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
 
-      - name: Install Python 3.14 for Linux helper checks
-        if: runner.os == 'Linux'
+      - name: Install Python 3.14
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
@@ -97,9 +99,7 @@ jobs:
 
   headless-e2e:
     name: stdio to headless Anytype
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: ${{ inputs.tier == 'live' || inputs.tier == 'all' }}
     needs: portable-contracts
     environment: anytype-headless
     runs-on:
@@ -116,8 +116,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.96.0
-        uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e # 1.96.0
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
 
       - name: Install Python 3.14
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -221,9 +221,7 @@ jobs:
 
   headless-clean-server-soak:
     name: clean-server live gate
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: ${{ inputs.tier == 'clean-server' || inputs.tier == 'all' }}
     needs: portable-contracts
     environment: anytype-headless
     runs-on:
@@ -240,8 +238,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.96.0
-        uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e # 1.96.0
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
 
       - name: Install Python 3.14
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6

@@ -370,6 +370,10 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
         .join(".github/workflows/anytype-api-live.yml");
     let workflow = std::fs::read_to_string(&workflow)
         .unwrap_or_else(|error| panic!("read {}: {error}", workflow.display()));
+    assert!(workflow.contains("  workflow_dispatch:\n"));
+    assert!(!workflow.contains("  pull_request:\n"));
+    assert!(!workflow.contains("  push:\n"));
+    assert!(!workflow.contains("  schedule:\n"));
     let required = workflow
         .split("  headless-required:\n")
         .nth(1)
@@ -379,9 +383,9 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
         .split("  headless-soak:\n")
         .nth(1)
         .expect("headless-soak block");
-    assert!(required.contains("if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')"));
+    assert!(required.contains("if: ${{ inputs.tier == 'required' || inputs.tier == 'all' }}"));
     assert!(required.contains("needs: ignored-test-inventory"));
-    assert!(soak.contains("if: github.event_name == 'schedule'"));
+    assert!(soak.contains("if: ${{ inputs.tier == 'soak' || inputs.tier == 'all' }}"));
     for block in [required, soak] {
         assert!(block.contains("needs: ignored-test-inventory"));
         assert!(block.contains("runs-on: [ self-hosted, linux, anytype-headless ]"));

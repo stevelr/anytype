@@ -2,36 +2,46 @@ name: anytype-api live
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "31 3 * * *"
-  pull_request:
-    paths:
-      - ".github/workflows/anytype-api-live.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "anytype-api/**"
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/anytype-api-live.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "anytype-api/**"
+    inputs:
+      tier:
+        description: Live tier to run after inventory validation
+        type: choice
+        required: true
+        default: required
+        options:
+          - required
+          - soak
+          - all
 
 permissions:
   contents: read
 
 jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: Verify pinned CI prerequisites
+        run: nix develop --command bash .github/scripts/verify-ci-prerequisites.sh --check-repository
+
   ignored-test-inventory:
     name: disposable ignored-test inventory
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Install Rust 1.97.1
-        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Install Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
@@ -43,7 +53,7 @@ jobs:
 
   headless-required:
     name: protected disposable required tier
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: ${{ inputs.tier == 'required' || inputs.tier == 'all' }}
     needs: ignored-test-inventory
     environment: anytype-headless
     runs-on: [ self-hosted, linux, anytype-headless ]
@@ -55,8 +65,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Install Rust 1.97.1
-        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Install Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
@@ -154,7 +168,7 @@ jobs:
 
   headless-soak:
     name: scheduled disposable characterization tier
-    if: github.event_name == 'schedule'
+    if: ${{ inputs.tier == 'soak' || inputs.tier == 'all' }}
     needs: ignored-test-inventory
     environment: anytype-headless
     runs-on: [ self-hosted, linux, anytype-headless ]
@@ -166,8 +180,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Install Rust 1.97.1
-        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Install Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:

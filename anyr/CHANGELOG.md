@@ -8,6 +8,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add manual cross-platform build and release-artifact workflows for Linux
+  x86_64/arm64, macOS arm64, and Windows x86_64/arm64. Release qualification
+  generates shell and PowerShell installers plus Homebrew formulae, validates
+  the POSIX artifacts on Linux and macOS, and cannot publish releases while
+  the matrix is being debugged.
 - Add `anyr init-cli --save-env FILE` to save generated HTTP and gRPC
   credentials, effective endpoints, the keystore service, and the `xtest`
   disposable-space prefix as a directly sourceable POSIX shell environment

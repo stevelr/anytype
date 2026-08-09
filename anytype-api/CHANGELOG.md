@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Make the protected live workflow manual-only, with required, soak, or all
+  tier selection, Python 3.14, and the Rust version selected from
+  `rust-toolchain.toml`.
 - Bound every REST wire request with one absolute logical deadline. Defaults
   are 120 seconds for ordinary requests, 600 seconds for file and multipart
   requests, and separate 120-second SSE open and error-body phases. Explicit
