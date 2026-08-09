@@ -404,6 +404,16 @@ impl EstablishedSseState {
                             TimeoutOutcome::StreamTerminated,
                             elapsed,
                         );
+                        warn!(
+                            target: "anytype::http",
+                            error_variant = "transport_timeout",
+                            timeout_outcome = %TimeoutOutcome::StreamTerminated,
+                            elapsed_millis = duration_millis_saturating(elapsed),
+                            http_method = "GET",
+                            http_path = %diagnostic_path(&self.path),
+                            physical_attempt = 1_u32,
+                            "HTTP established stream transport timeout"
+                        );
                         AnytypeError::Http {
                             method: "GET".to_owned(),
                             url: self.path.clone(),
@@ -788,6 +798,12 @@ impl HttpClient {
         timing: &OperationTiming,
         operation: impl Future<Output = Result<T>>,
     ) -> Result<T> {
+        // Boxing bounds every helper's composed future at one pointer, so
+        // deep call chains (pagination, resolution, discovery) cannot grow
+        // caller stack frames with the whole deadline-wrapped request state.
+        // One heap allocation per logical request is negligible next to the
+        // wire round trip.
+        let operation = Box::pin(operation);
         let Some(duration) = self.timeout_policy.duration(class) else {
             return match operation.await {
                 Err(AnytypeError::Http { source, .. }) => {
@@ -807,10 +823,13 @@ impl HttpClient {
             Ok(Err(AnytypeError::Http { source, .. })) => {
                 Err(self.classify_transport_error(source, method, path, timing))
             }
-            Ok(Err(error @ AnytypeError::HttpTimeout { .. })) => Err(error),
-            Ok(_result) if tokio::time::Instant::now() >= deadline => {
-                Err(self.logical_timeout_error(class, outcome, method, path, timing))
-            }
+            // A completed result in hand is returned as-is, even when it
+            // becomes ready on the same tick the deadline expires: the
+            // deadline converts waiting into a timeout, never a completed
+            // outcome, so success and typed errors are not discarded and
+            // metrics count exactly one outcome per logical operation.
+            // `ensure_before_dispatch` still prevents a new physical send at
+            // or after the deadline instant.
             Ok(result) => result,
             Err(_) => Err(self.logical_timeout_error(class, outcome, method, path, timing)),
         }
@@ -919,7 +938,15 @@ impl HttpClient {
                 elapsed: Some(elapsed),
                 attempts: Some(timing.attempts()),
             }
-        } else if outcome == TimeoutOutcome::MutationIndeterminate && timing.attempts() > 0 {
+        } else if outcome == TimeoutOutcome::MutationIndeterminate
+            && timing.attempts() > 0
+            && !source.is_connect()
+            && !source.is_builder()
+        {
+            // Connect and builder failures happen before any bytes reach the
+            // peer, so the mutation was provably never dispatched and the
+            // typed transport error (with its reqwest source) is returned
+            // instead of an indeterminate outcome.
             AnytypeError::HttpMutationIndeterminate {
                 method: method.as_str().to_owned(),
                 path: path.to_owned(),
@@ -1416,7 +1443,10 @@ impl HttpClient {
             self.metrics.increment_errors();
             let status = response.status();
             let code = status.as_u16();
-            let message = self.read_error_body(response, "post", path).await?;
+            // The ambiguous status alone fixes the classification, so the
+            // error-body read is best-effort diagnostics and must not mask
+            // the indeterminate outcome.
+            let body = self.read_error_body(response, "post", path).await;
             if mutation_status_is_indeterminate(status) {
                 return Err(Self::mutation_indeterminate(
                     &Method::POST,
@@ -1425,6 +1455,7 @@ impl HttpClient {
                     status,
                 ));
             }
+            let message = body?;
             return Err(AnytypeError::ApiError {
                 code,
                 method: "post".to_string(),
@@ -1450,8 +1481,13 @@ impl HttpClient {
     /// (`204 No Content`) response body.
     ///
     /// The JSON [`delete_request`](Self::delete_request) helper deserializes a
-    /// response entity; file deletion (`DELETE /v1/spaces/{space_id}/files/{file_id}`)
-    /// returns `204` with no body, so it needs this no-content variant.
+    /// response entity; this variant is for non-file endpoints that return
+    /// `204` with no body (currently chat message deletion). REST file
+    /// deletion — including permanent deletion — routes through
+    /// [`file_request`](Self::file_request) instead, which applies the long
+    /// timeout profile that the observed ~154-second permanent delete
+    /// requires. Do not route file deletes back through this
+    /// standard-profile helper.
     pub(crate) async fn delete_no_content(&self, path: &str) -> Result<()> {
         let timing = OperationTiming::start();
         self.with_deadline(
@@ -1497,7 +1533,10 @@ impl HttpClient {
             self.metrics.increment_errors();
             let status = response.status();
             let code = status.as_u16();
-            let message = self.read_error_body(response, "delete", path).await?;
+            // The ambiguous status alone fixes the classification, so the
+            // error-body read is best-effort diagnostics and must not mask
+            // the indeterminate outcome.
+            let body = self.read_error_body(response, "delete", path).await;
             if mutation_status_is_indeterminate(status) {
                 return Err(Self::mutation_indeterminate(
                     &Method::DELETE,
@@ -1506,6 +1545,7 @@ impl HttpClient {
                     status,
                 ));
             }
+            let message = body?;
             return Err(AnytypeError::ApiError {
                 code,
                 method: "delete".to_string(),
@@ -1732,6 +1772,17 @@ impl HttpClient {
                     Ok(body) => body,
                     Err(error) => {
                         self.metrics.increment_errors();
+                        // A failed error-body read must not mask an already
+                        // known ambiguous mutation status; the body is
+                        // best-effort diagnostics.
+                        if !replay_safe
+                            && !(status.is_success() || allowed_control_status)
+                            && mutation_status_is_indeterminate(status)
+                        {
+                            return Err(Self::mutation_indeterminate(
+                                &method, path, attempts, status,
+                            ));
+                        }
                         return Err(error);
                     }
                 }
@@ -1878,12 +1929,12 @@ impl HttpClient {
             self.metrics.increment_errors();
             let status = response.status();
             let code = status.as_u16();
-            let message = String::from_utf8_lossy(
-                &self
-                    .read_bounded(response, error_body_limit, "post", path)
-                    .await?,
-            )
-            .into_owned();
+            // The ambiguous status alone fixes the classification, so the
+            // error-body read is best-effort diagnostics and must not mask
+            // the indeterminate outcome.
+            let body = self
+                .read_bounded(response, error_body_limit, "post", path)
+                .await;
             if mutation_status_is_indeterminate(status) {
                 return Err(Self::mutation_indeterminate(
                     &Method::POST,
@@ -1892,6 +1943,7 @@ impl HttpClient {
                     status,
                 ));
             }
+            let message = String::from_utf8_lossy(&body?).into_owned();
             return Err(AnytypeError::ApiError {
                 code,
                 method: "post".to_string(),
@@ -2204,12 +2256,16 @@ impl HttpClient {
                         StatusCode::TOO_MANY_REQUESTS /* 429 */ => {
                             self.metrics.increment_rate_limit_errors();
                             if !retryable_method {
-                                self.read_error_body(
+                                // The 429 alone fixes the classification;
+                                // the error body is best-effort diagnostics
+                                // and must not mask the indeterminate
+                                // outcome.
+                                let _best_effort_body = self.read_error_body(
                                     response,
                                     req.method.as_str(),
                                     &req.path,
                                 )
-                                .await?;
+                                .await;
                                 return Err(Self::mutation_indeterminate(
                                     &req.method,
                                     &req.path,
@@ -2342,18 +2398,12 @@ impl HttpClient {
                         }
                         _ => {
                             self.metrics.increment_errors();
-                            let message = self.read_error_body(response, req.method.as_str(), &req.path).await?;
+                            // The status alone fixes an indeterminate
+                            // mutation classification, so the error-body
+                            // read is best-effort diagnostics for that path
+                            // and must not mask the outcome.
+                            let body = self.read_error_body(response, req.method.as_str(), &req.path).await;
                             log_http_status(&req, code, "api_error", physical_attempt);
-                            if retry_attempt < MAX_RETRIES
-                                && physical_attempt < MAX_HTTP_REQUEST_ATTEMPTS
-                                && retry_for_status(code)
-                                && retryable_method
-                            {
-                                self.metrics.increment_retries();
-                                log_and_backoff(retry_attempt, "retryable HTTP status").await;
-                                retry_attempt += 1;
-                                continue;
-                            }
                             if !retryable_method
                                 && (code.is_server_error() || retry_for_status(code))
                             {
@@ -2363,6 +2413,17 @@ impl HttpClient {
                                     physical_attempt,
                                     code,
                                 ));
+                            }
+                            let message = body?;
+                            if retry_attempt < MAX_RETRIES
+                                && physical_attempt < MAX_HTTP_REQUEST_ATTEMPTS
+                                && retry_for_status(code)
+                                && retryable_method
+                            {
+                                self.metrics.increment_retries();
+                                log_and_backoff(retry_attempt, "retryable HTTP status").await;
+                                retry_attempt += 1;
+                                continue;
                             }
                             return Err(AnytypeError::ApiError{
                                 code: code.as_u16(),
@@ -3082,6 +3143,98 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn mutation_caller_transport_timeout_reports_indeterminate_outcome() {
+        let policy = HttpTimeoutPolicy {
+            standard_operation: Some(Duration::from_secs(10)),
+            ..HttpTimeoutPolicy::default()
+        };
+        let (client, accepted, server) = deadline_fixture(
+            policy,
+            None,
+            ClientBuilder::new()
+                .no_proxy()
+                .timeout(Duration::from_secs(1)),
+        )
+        .await;
+        let request_client = client.clone();
+        let request = tokio::spawn(async move {
+            request_client
+                .send::<()>(HttpRequest {
+                    method: Method::POST,
+                    path: "/mutation?secret=redacted".to_owned(),
+                    query: Vec::new(),
+                    body: Some(Bytes::from_static(b"secret body")),
+                })
+                .await
+        });
+        accepted.await.expect("mutation accepted");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = request
+            .await
+            .expect("request task")
+            .expect_err("transport timeout");
+        let diagnostic = error.diagnostic().to_string();
+        assert!(diagnostic.contains("timeout_class=transport"));
+        assert!(diagnostic.contains("outcome=mutation_indeterminate"));
+        assert!(diagnostic.contains("elapsed_ms="));
+        assert!(diagnostic.contains("attempts=1"));
+        assert!(!diagnostic.contains("secret"));
+        assert!(matches!(&error, AnytypeError::Http { source, .. } if source.is_timeout()));
+        let metrics = client.metrics_snapshot();
+        assert_eq!(metrics.transport_timeouts().count, 1);
+        assert_eq!(
+            metrics
+                .timeout_outcome_count(crate::http_timeout::TimeoutOutcome::MutationIndeterminate),
+            1
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn connect_refused_mutation_keeps_typed_transport_error() {
+        // Reserve a local port and release it so the connection is refused.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind refused-port probe");
+        let address = listener.local_addr().expect("refused-port address");
+        drop(listener);
+        let client = Arc::new(
+            HttpClient::new(
+                ClientBuilder::new().no_proxy(),
+                format!("http://{address}"),
+                ValidationLimits::default(),
+                test_limits(1024, 2048, 1024),
+                5,
+                HttpTimeoutPolicy::default(),
+                HttpCredentials::new("test-token"),
+            )
+            .expect("refused client"),
+        );
+        let error = client
+            .send::<()>(HttpRequest {
+                method: Method::POST,
+                path: "/mutation".to_owned(),
+                query: Vec::new(),
+                body: Some(Bytes::from_static(b"body")),
+            })
+            .await
+            .expect_err("connection refused");
+        // The mutation was provably never dispatched, so the typed transport
+        // error and its reqwest source survive instead of an indeterminate
+        // outcome.
+        assert!(
+            matches!(&error, AnytypeError::Http { source, .. } if source.is_connect()),
+            "unexpected connect-refused error: {error:?}"
+        );
+        let metrics = client.metrics_snapshot();
+        assert_eq!(
+            metrics
+                .timeout_outcome_count(crate::http_timeout::TimeoutOutcome::MutationIndeterminate),
+            0
+        );
+    }
+
     #[test]
     fn timeout_metrics_use_saturating_arithmetic() {
         let metrics = HttpMetrics::default();
@@ -3269,6 +3422,163 @@ mod tests {
             )
             .await
             .expect("154-second operation fits the long profile");
+    }
+
+    #[tokio::test]
+    async fn scripted_delayed_file_response_completes_within_long_profile() {
+        // A scripted HTTP fixture delivers the complete file response only
+        // after the standard deadline has passed, proving the real wire path
+        // for file requests runs under the long profile. Paused time cannot
+        // complete loopback responses deterministically (auto-advance fires
+        // pending deadline timers before IO readiness is surfaced), so this
+        // runs on the real clock with a two-second scripted delay; the
+        // 154-second policy literal stays covered by the paused
+        // `with_deadline` leg of `delayed_file_response_uses_long_profile`.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind delayed file fixture");
+        let address = listener.local_addr().expect("delayed file fixture address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept delayed file request");
+            let _request = read_fixture_request(&mut socket).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            socket
+                .write_all(&fixture_response("200 OK", "file body", ""))
+                .await
+                .expect("write delayed file response");
+            std::future::pending::<()>().await;
+        });
+        let policy = HttpTimeoutPolicy {
+            standard_operation: Some(Duration::from_secs(1)),
+            long_operation: Some(Duration::from_secs(8)),
+            ..HttpTimeoutPolicy::default()
+        };
+        let client = Arc::new(
+            HttpClient::new(
+                ClientBuilder::new().no_proxy(),
+                format!("http://{address}"),
+                ValidationLimits::default(),
+                test_limits(1024, 2048, 1024),
+                5,
+                policy,
+                HttpCredentials::new("test-token"),
+            )
+            .expect("delayed file client"),
+        );
+        let response = client
+            .file_request(Method::GET, "/v1/files/id", &[], HeaderMap::new())
+            .await
+            .expect("delayed scripted response fits the long profile");
+        assert_eq!(response.status, StatusCode::OK);
+        let metrics = client.metrics_snapshot();
+        assert_eq!(metrics.physical_attempts, 1);
+        assert_eq!(
+            metrics
+                .timeout(crate::http_timeout::HttpTimeoutClass::LongOperation)
+                .count,
+            0
+        );
+        assert_eq!(
+            metrics
+                .timeout(crate::http_timeout::HttpTimeoutClass::StandardOperation)
+                .count,
+            0
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn each_paginated_page_receives_a_fresh_standard_deadline() {
+        use super::GetPaged;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind paged fixture");
+        let address = listener.local_addr().expect("paged fixture address");
+        let (page_two_tx, mut page_two_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept page one");
+            let _request = read_fixture_request(&mut socket).await;
+            let body =
+                r#"{"data":[1],"pagination":{"has_more":true,"limit":1,"offset":1,"total":2}}"#;
+            socket
+                .write_all(&fixture_response("200 OK", body, ""))
+                .await
+                .expect("write page one");
+            let (mut stalled, _) = listener.accept().await.expect("accept page two");
+            let _request = read_fixture_request(&mut stalled).await;
+            let _ = page_two_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let client = Arc::new(
+            HttpClient::new(
+                ClientBuilder::new().no_proxy(),
+                format!("http://{address}"),
+                ValidationLimits::default(),
+                test_limits(1024, 2048, 1024),
+                5,
+                one_second_standard_policy(),
+                HttpCredentials::new("test-token"),
+            )
+            .expect("paged client"),
+        );
+        let paged_client = client.clone();
+        let (first_item_tx, first_item_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let mut task = tokio::spawn(async move {
+            let paged = paged_client
+                .get_request_paged::<u32>("/v1/paged", QueryWithFilters::default())
+                .await?;
+            let mut stream = paged.into_stream();
+            let first = stream.next().await.expect("first page item")?;
+            assert_eq!(first, 1);
+            let _ = first_item_tx.send(());
+            resume_rx.await.expect("resume signal");
+            // The next poll triggers the page-two refill request.
+            stream
+                .next()
+                .await
+                .expect("page-two outcome")
+                .map(|_| unreachable!("page two never completes"))
+        });
+        if first_item_rx.await.is_err() {
+            let finished = task.await;
+            panic!("paged task failed before first item: {finished:?}");
+        }
+        // Wait out more than the whole one-second standard deadline between
+        // pages. A budget shared across pages would already be expired when
+        // page two dispatches, so its request would never reach the wire.
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        resume_tx.send(()).expect("send resume");
+        tokio::select! {
+            dispatched = &mut page_two_rx => {
+                dispatched.expect("page two dispatched");
+            }
+            finished = &mut task => {
+                panic!("paged task finished before page-two dispatch: {finished:?}");
+            }
+        }
+        let error = task
+            .await
+            .expect("paged task")
+            .expect_err("page-two deadline");
+        // A fresh page-two deadline expires after roughly its own second of
+        // waiting, not the 1.5-second inter-page wait already elapsed.
+        assert!(
+            matches!(
+                &error,
+                AnytypeError::HttpTimeout {
+                    class: crate::http_timeout::HttpTimeoutClass::StandardOperation,
+                    elapsed,
+                    ..
+                } if *elapsed >= Duration::from_secs(1) && *elapsed < Duration::from_millis(1_400)
+            ),
+            "unexpected page-two error: {error:?}"
+        );
+        server.abort();
     }
 
     #[tokio::test(start_paused = true)]
@@ -3644,6 +3954,8 @@ mod tests {
                 .no_verify()
                 .create()
                 .await
+        } else if *method == Method::DELETE {
+            client.object(TEST_SPACE_ID, TEST_OBJECT_ID).delete().await
         } else {
             client
                 .update_object(TEST_SPACE_ID, TEST_OBJECT_ID)
@@ -3684,6 +3996,74 @@ mod tests {
         .await;
         assert_public_mutation_sent_once(Method::POST, "504 Gateway Timeout", 504, 99).await;
         assert_public_mutation_sent_once(Method::PATCH, "504 Gateway Timeout", 504, 0).await;
+    }
+
+    #[tokio::test]
+    async fn public_delete_is_sent_exactly_once_for_ambiguous_statuses() {
+        // DELETE was auto-replayed by the previous release's method-semantics
+        // rule; this wire fixture pins the at-most-once regression directly.
+        assert_public_mutation_sent_once(Method::DELETE, "429 Too Many Requests", 429, 0).await;
+        assert_public_mutation_sent_once(
+            Method::DELETE,
+            "500 Internal Server Error",
+            500,
+            crate::config::RATE_LIMIT_MAX_RETRIES_DEFAULT,
+        )
+        .await;
+        assert_public_mutation_sent_once(Method::DELETE, "408 Request Timeout", 408, 99).await;
+        assert_public_mutation_sent_once(Method::DELETE, "504 Gateway Timeout", 504, 0).await;
+    }
+
+    #[tokio::test]
+    async fn put_has_no_replay_permission_and_reports_indeterminate() {
+        // No PUT endpoint exists today; pin the exclusion so a future PUT
+        // endpoint cannot silently inherit replay permission.
+        assert!(!super::is_idempotent_method(&Method::PUT));
+        assert!(!super::is_idempotent_method(&Method::POST));
+        assert!(!super::is_idempotent_method(&Method::PATCH));
+        assert!(!super::is_idempotent_method(&Method::DELETE));
+        assert!(super::is_idempotent_method(&Method::GET));
+        assert!(super::is_idempotent_method(&Method::HEAD));
+        assert!(super::is_idempotent_method(&Method::OPTIONS));
+
+        const PUT_REJECTION: &[u8] = b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\nput rejection";
+        let (client, response_written, server) = deadline_fixture(
+            one_second_standard_policy(),
+            Some(PUT_REJECTION),
+            ClientBuilder::new().no_proxy(),
+        )
+        .await;
+        let request_client = client.clone();
+        let request = tokio::spawn(async move {
+            request_client
+                .send::<()>(HttpRequest {
+                    method: Method::PUT,
+                    path: "/put".to_owned(),
+                    query: Vec::new(),
+                    body: Some(Bytes::from_static(b"body")),
+                })
+                .await
+        });
+        response_written.await.expect("response written");
+        let error = request
+            .await
+            .expect("request task")
+            .expect_err("server rejection");
+        assert!(
+            matches!(
+                &error,
+                AnytypeError::HttpMutationIndeterminate {
+                    status: Some(500),
+                    attempts: 1,
+                    ..
+                }
+            ),
+            "unexpected PUT error: {error:?}"
+        );
+        let metrics = client.metrics_snapshot();
+        assert_eq!(metrics.physical_attempts, 1);
+        assert_eq!(metrics.retries, 0);
+        server.abort();
     }
 
     async fn assert_public_redirect_is_not_followed(
@@ -3808,6 +4188,7 @@ mod tests {
         for (method, retry_limit) in [
             (Method::POST, 0),
             (Method::PATCH, crate::config::RATE_LIMIT_MAX_RETRIES_DEFAULT),
+            (Method::DELETE, 0),
         ] {
             // An empty fixture response closes the connection after the full
             // request has arrived but before an HTTP status is available.

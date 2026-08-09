@@ -134,7 +134,9 @@ once. A logical deadline or transport failure after dispatch returns an
 indeterminate mutation outcome. A 408, 429, 504, or other server failure is
 also indeterminate because the server may have applied the write before
 returning or losing the response. Observe fresh server state before deciding
-whether to retry.
+whether to retry. Connection-establishment and request-construction failures
+occur before any possible dispatch, keep their typed transport error and
+reqwest source, and are safe to retry immediately.
 
 The client disables reqwest's lower-level retry and redirect handling so every
 additional send passes through this method-aware policy and its metrics. A 3xx

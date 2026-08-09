@@ -21,6 +21,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `POST`, `PATCH`, `DELETE`, and unapproved `PUT` dispatch once; ambiguous
   transport, timeout, 408, 429, 504, and server failures require a fresh state
   observation before application retry.
+- Classify mutation failures precisely at the dispatch boundary. Connection
+  and request-construction failures that provably precede dispatch keep their
+  typed transport error and reqwest source instead of an indeterminate
+  outcome, a response completed exactly at deadline expiry is returned rather
+  than converted to a timeout, and a failed error-body read no longer masks an
+  already-known ambiguous mutation status. Established SSE caller transport
+  timeouts emit the standard structured tracing observation.
 
 - Reconcile the maintained HTTP/gRPC coverage inventory with the completed
   any-dm9k campaign. Remaining gaps now distinguish direct crate coverage from

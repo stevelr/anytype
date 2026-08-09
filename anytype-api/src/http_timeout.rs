@@ -226,6 +226,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_profile_values_are_pinned_to_policy_literals() {
+        // The policy authority approves exactly 120/600/120/120 seconds with
+        // idle and lifetime disabled; a constant edit must fail here rather
+        // than slide through Default-vs-Default comparisons.
+        let policy = HttpTimeoutPolicy::default();
+        assert_eq!(policy.standard_operation, Some(Duration::from_secs(120)));
+        assert_eq!(policy.long_operation, Some(Duration::from_secs(600)));
+        assert_eq!(policy.sse_open, Some(Duration::from_secs(120)));
+        assert_eq!(policy.sse_error_body, Some(Duration::from_secs(120)));
+        assert_eq!(policy.sse_idle, None);
+        assert_eq!(policy.sse_total_lifetime, None);
+        assert_eq!(DEFAULT_STANDARD_HTTP_TIMEOUT, Duration::from_secs(120));
+        assert_eq!(DEFAULT_LONG_HTTP_TIMEOUT, Duration::from_secs(600));
+        assert_eq!(DEFAULT_SSE_OPEN_TIMEOUT, Duration::from_secs(120));
+        assert_eq!(DEFAULT_SSE_ERROR_BODY_TIMEOUT, Duration::from_secs(120));
+        assert_eq!(MAX_HTTP_TIMEOUT, Duration::from_secs(3_600));
+    }
+
+    #[test]
     fn inherited_environment_contract_is_exact() {
         assert_eq!(
             HttpTimeoutPolicy::from_environment(None).expect("defaults"),
