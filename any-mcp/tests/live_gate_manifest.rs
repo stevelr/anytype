@@ -21,6 +21,8 @@ const ADMITTED_IGNORED_LIB_TESTS: &[&str] = &[
     "server::headless_integration::headless_artifact_bounded_metadata_direct_scenarios",
     "server::headless_integration::headless_artifact_direct_transport_matrix_scenario",
     "server::headless_integration::headless_artifact_dynamic_filesystem_direct_scenarios",
+    "server::headless_integration::headless_artifact_failed_operation_cleanup_direct_scenarios",
+    "server::headless_integration::headless_artifact_partial_write_direct_scenarios",
     "server::headless_integration::headless_artifact_policy_direct_scenarios",
     "server::headless_integration::headless_artifact_traversal_direct_scenarios",
     "server::headless_integration::headless_create_body_canonicalization_is_verified_once",
@@ -89,9 +91,13 @@ const EXCLUDED_IGNORED_LIB_TESTS: &[(&str, &str)] = &[
 const HEADLESS_STDIO_IGNORED_TESTS: &[&str] = &[
     "headless_artifact_adversarial_spawned_stdio_scenarios",
     "headless_artifact_content_spawned_scenarios",
+    "headless_artifact_crash06_mid_frame_scenario",
+    "headless_artifact_crash_restart_scenarios",
+    "headless_artifact_exact_cancellation_spawned_scenarios",
     "headless_artifact_lifecycle_and_payload_scenarios",
     "headless_artifact_policy_spawned_scenarios",
     "headless_artifact_spawned_transport_matrix_scenario",
+    "headless_artifact_validator_flood_spawned_scenarios",
     "headless_body_blocks_direct_stable_preview_and_object_show",
     "headless_body_blocks_shared_direct_stable_preview_scenarios",
     "headless_stdio_all_optional_toolsets_compose_in_rw_and_preview_ro_children",
@@ -219,7 +225,7 @@ fn compact_whitespace(value: &str) -> String {
 
 #[test]
 fn ignored_library_manifest_is_closed_and_filter_safe() {
-    assert_eq!(ADMITTED_IGNORED_LIB_TESTS.len(), 36);
+    assert_eq!(ADMITTED_IGNORED_LIB_TESTS.len(), 38);
     assert_sorted_unique(ADMITTED_IGNORED_LIB_TESTS);
     assert!(
         ADMITTED_IGNORED_LIB_TESTS
@@ -247,7 +253,7 @@ fn ignored_library_manifest_is_closed_and_filter_safe() {
         .chain(excluded.iter().copied())
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    assert_eq!(declared.len(), 46, "manifest contains duplicate entries");
+    assert_eq!(declared.len(), 48, "manifest contains duplicate entries");
     assert_eq!(ignored_tests("lib", false), declared);
 }
 
@@ -255,7 +261,7 @@ fn ignored_library_manifest_is_closed_and_filter_safe() {
 fn whole_binary_live_target_manifests_are_closed() {
     assert_sorted_unique(HEADLESS_STDIO_IGNORED_TESTS);
     assert_sorted_unique(DISCUSSIONS_STDIO_IGNORED_TESTS);
-    assert_eq!(HEADLESS_STDIO_IGNORED_TESTS.len(), 26);
+    assert_eq!(HEADLESS_STDIO_IGNORED_TESTS.len(), 30);
     assert_eq!(DISCUSSIONS_STDIO_IGNORED_TESTS.len(), 1);
     assert_eq!(
         inventory_drift(
