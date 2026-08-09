@@ -68,8 +68,38 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Verified authenticated Streamable HTTP interoperability with MCP Inspector
   2.1.0 and Claude Code 2.1.220, including lifecycle, SSE, catalog parity, and
   session termination.
+- Add a spawned crash-restart acceptance owner that kills production children
+  mid-upload, mid-import-dispatch, and mid-export-commit, then proves restart
+  recovery: previous-generation handles return the byte-uniform `not_found`,
+  the space holds at most one dispatched candidate, an interrupted export
+  destination is absent or hash-correct, a second process on an owned staging
+  root is rejected at startup without disturbing the first, and a full
+  happy-path import succeeds after recovery. Three acceptance-only production
+  points pause inside atomic export publication and after import and document
+  dispatch to make the kill and cancellation windows exact.
+- Prove offline that a staging cleanup pass never removes an unindexed entry,
+  that the request-rate ceiling sheds a real wire burst and resumes, that the
+  listener refuses duplicated and whitespace-bearing `Authorization` headers,
+  and that query, prefix, oversized-path, and percent-encoded rejections all
+  precede authentication. A dedicated failing-call burst now backs the
+  diagnostic-flood row, asserting byte-uniform bounded refusals.
+- Require every executed failure-robustness inventory row to state checkable
+  evidence: an offline unit owner or a recorded live-owner run. A row cannot
+  be promoted without evidence, and a live-only row cannot claim offline
+  proof, so the implemented count can no longer drift from executable tests.
 
 ### Fixed
+
+- Send env-configured acceptance gate nonces at the full 64-hex-character
+  length production requires, so spawned child gates arm instead of rejecting
+  their configuration at startup.
+- End the kill-mid-frame stdout capture exactly at its pause point instead of
+  draining the pipe after the kill, so the truncated-fragment evidence is
+  deterministic rather than dependent on flush timing.
+- Signal a validator's process group only while its leader is still unreaped,
+  observing exit with a no-reap wait first. The previous order signalled the
+  group after the leader was reaped, leaving a window where a recycled pid
+  could route the kill to an unrelated process group.
 
 - Keep configured validator process groups under the kill-on-drop guard until
   stdout, stderr, exit status, and result-shape validation all succeed. A

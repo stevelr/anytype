@@ -1873,7 +1873,18 @@ accepts only complete JSON-RPC frames followed by one bounded, truncated final
 fragment. Their inventory status advances only after the live owner passes.
 Cleanup owners likewise assert failed import/export rollback, single-use
 release, TTL invalidation, required-validator refusal, and read-only catalog
-isolation without promoting those rows before live execution.
+isolation without promoting those rows before live execution. A cleanup pass
+is separately proven offline to never remove an entry absent from the staging
+state index. A spawned crash-restart owner kills production children
+mid-upload, during the Anytype import dispatch, and inside the atomic export
+commit, then requires byte-uniform `not_found` for every previous-generation
+handle, at most one dispatched candidate object, an absent or hash-correct
+export destination, startup rejection of a second process on an owned staging
+root, and a complete happy-path import after recovery. Every executed
+failure-robustness row must additionally state its checkable evidence — an
+offline unit owner or a recorded live-owner run — and the inventory test
+rejects a promotion without evidence or an offline claim on a live-only
+owner.
 Flood owners measure aggregate status at maximum staged-record occupancy and
 bound/redact the spawned child's diagnostic burst.
 Implemented coverage exercises traversal and native-path grammar,

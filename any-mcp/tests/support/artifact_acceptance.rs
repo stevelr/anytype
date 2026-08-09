@@ -221,7 +221,7 @@ macro_rules! adversarial_case_ids {
                     Self::Mal13 => validator_platform_status(),
                     Self::Hand01 | Self::Hand02 | Self::Hand06 | Self::Hand07 | Self::Hand08
                     | Self::Hand09 | Self::Hand10 | Self::Hand11 | Self::Hand12 | Self::Hand13
-                    | Self::Hand14 | Self::Hand15 | Self::Flood06 => {
+                    | Self::Hand14 | Self::Hand15 | Self::Flood06 | Self::Clean05 => {
                         AdversarialCaseStatus::Executed
                     }
                     _ => AdversarialCaseStatus::Pending,
@@ -489,6 +489,10 @@ pub enum AdversarialRobustnessWitness {
     StagingProtocol,
     /// Spawned lifecycle acceptance exercises cancellation and process restart.
     SpawnedLifecycle,
+    /// Spawned crash acceptance kills production children and proves recovery.
+    SpawnedCrashRestart,
+    /// Spawned mid-frame capture proves bounded truncated-frame evidence.
+    SpawnedMidFrameCapture,
     /// Validator unit tests exercise bounded drains and process teardown.
     ValidatorContainment,
     /// Direct adversarial acceptance proves exact Anytype and root cleanup.
@@ -504,11 +508,28 @@ impl AdversarialRobustnessWitness {
         match self {
             Self::StagingProtocol => "artifact_staging::tests",
             Self::SpawnedLifecycle => "headless_artifact_lifecycle_and_payload_scenarios",
+            Self::SpawnedCrashRestart => "headless_artifact_crash_restart_scenarios",
+            Self::SpawnedMidFrameCapture => "headless_artifact_crash06_mid_frame_scenario",
             Self::ValidatorContainment => "artifact_validators::tests",
             Self::DirectTeardown => "headless_artifact_adversarial_direct_scenarios",
             Self::ReadOnlyCatalog => "headless_artifact_policy_scenario",
         }
     }
+
+    /// Returns whether this owner surface runs offline in ordinary CI.
+    #[must_use]
+    pub const fn is_offline(self) -> bool {
+        matches!(self, Self::StagingProtocol | Self::ValidatorContainment)
+    }
+}
+
+/// How an `Executed` robustness row is proven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdversarialRobustnessEvidence {
+    /// An offline unit test in the owner surface executes the case in CI.
+    OfflineUnit,
+    /// The owner surface recorded the case in a verified live server run.
+    LiveOwner,
 }
 
 impl AdversarialCaseId {
@@ -548,21 +569,21 @@ impl AdversarialCaseId {
             | Self::Clean03
             | Self::Clean04
             | Self::Clean05 => Some(AdversarialRobustnessWitness::StagingProtocol),
-            Self::Hand04
-            | Self::Part08
+            Self::Part08
             | Self::Part09
             | Self::Part10
             | Self::Part12
+            | Self::Flood04
+            | Self::Flood05
+            | Self::Flood07 => Some(AdversarialRobustnessWitness::SpawnedLifecycle),
+            Self::Hand04
             | Self::Crash01
             | Self::Crash02
             | Self::Crash03
             | Self::Crash04
             | Self::Crash05
-            | Self::Crash06
-            | Self::Crash07
-            | Self::Flood04
-            | Self::Flood05
-            | Self::Flood07 => Some(AdversarialRobustnessWitness::SpawnedLifecycle),
+            | Self::Crash07 => Some(AdversarialRobustnessWitness::SpawnedCrashRestart),
+            Self::Crash06 => Some(AdversarialRobustnessWitness::SpawnedMidFrameCapture),
             Self::Flood01 | Self::Flood02 | Self::Flood03 => {
                 Some(AdversarialRobustnessWitness::ValidatorContainment)
             }
@@ -570,6 +591,36 @@ impl AdversarialCaseId {
                 Some(AdversarialRobustnessWitness::DirectTeardown)
             }
             Self::Clean07 | Self::Clean08 => Some(AdversarialRobustnessWitness::ReadOnlyCatalog),
+            _ => None,
+        }
+    }
+
+    /// Returns the proof backing an `Executed` robustness row.
+    ///
+    /// `None` marks a row that must still be `Pending`. The inventory test
+    /// requires exact agreement between this table and `status()`, and an
+    /// [`AdversarialRobustnessEvidence::OfflineUnit`] entry must name an
+    /// offline owner surface, so a row cannot be promoted without stating
+    /// checkable evidence and a live-only row cannot claim offline proof.
+    /// `LiveOwner` entries are added only after the named owner test has
+    /// recorded the case against a live headless server.
+    #[must_use]
+    pub const fn robustness_executed_evidence(self) -> Option<AdversarialRobustnessEvidence> {
+        match self {
+            Self::Hand01
+            | Self::Hand02
+            | Self::Hand06
+            | Self::Hand07
+            | Self::Hand08
+            | Self::Hand09
+            | Self::Hand10
+            | Self::Hand11
+            | Self::Hand12
+            | Self::Hand13
+            | Self::Hand14
+            | Self::Hand15
+            | Self::Flood06
+            | Self::Clean05 => Some(AdversarialRobustnessEvidence::OfflineUnit),
             _ => None,
         }
     }
@@ -11459,7 +11510,7 @@ mod tests {
 
         let partition = adversarial_case_partition().collect::<Vec<_>>();
         assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
-        let implemented = 85;
+        let implemented = 86;
         assert_eq!(
             partition
                 .iter()
@@ -11502,6 +11553,22 @@ mod tests {
                 .robustness_witness()
                 .unwrap_or_else(|| panic!("{} has no executable robustness owner", case.as_str()));
             assert!(!witness.as_str().is_empty());
+            let executed = case.status() == AdversarialCaseStatus::Executed;
+            let evidence = case.robustness_executed_evidence();
+            assert_eq!(
+                executed,
+                evidence.is_some(),
+                "{} must be Executed exactly when it states checkable evidence",
+                case.as_str()
+            );
+            if evidence == Some(AdversarialRobustnessEvidence::OfflineUnit) {
+                assert!(
+                    witness.is_offline(),
+                    "{} claims offline proof but its owner {} is live-only",
+                    case.as_str(),
+                    witness.as_str()
+                );
+            }
         }
         assert_eq!(
             AdversarialCaseId::Hlink06.status(),

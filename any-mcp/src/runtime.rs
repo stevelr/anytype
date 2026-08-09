@@ -75,6 +75,7 @@ pub struct RuntimeContext {
     settlement_active: Arc<AtomicUsize>,
     settlement_notify: Arc<Notify>,
     settlement_gate: Arc<Mutex<SettlementAdmissionGate>>,
+    #[cfg_attr(not(any(test, feature = "acceptance-harness")), allow(dead_code))]
     artifact_acceptance_gates: ArtifactAcceptanceGates,
     client_roots: Arc<ClientRootsGate>,
 }

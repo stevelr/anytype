@@ -128,9 +128,10 @@ impl ProtocolProcess {
     /// Spawns a child whose stdout reader stops after the first complete frame
     /// and the first byte of the following frame.
     ///
-    /// The reader resumes only after [`Self::terminate`] has killed the child,
-    /// making a kill-mid-frame capture deterministic without changing the
-    /// production stdio implementation.
+    /// The reader is released only after [`Self::terminate`] has killed the
+    /// child, and its capture ends exactly at the pause point: it never drains
+    /// bytes the child flushed after the pause, so the captured tail is
+    /// deterministically one truncated fragment of the interrupted frame.
     #[cfg(feature = "acceptance-harness")]
     #[allow(dead_code)]
     pub fn spawn_paused_in_second_frame(
@@ -524,7 +525,6 @@ fn read_stdout_paused_in_second_frame(
     let mut all = Vec::new();
     let mut line = Vec::new();
     let mut complete_frames = 0_usize;
-    let mut paused = false;
     loop {
         let available = reader.fill_buf()?;
         if available.is_empty() {
@@ -534,11 +534,7 @@ fn read_stdout_paused_in_second_frame(
             .iter()
             .position(|byte| *byte == b'\n')
             .map_or(available.len(), |position| position + 1);
-        let chunk_len = if complete_frames == 1 && !paused {
-            1
-        } else {
-            chunk_len
-        };
+        let chunk_len = if complete_frames == 1 { 1 } else { chunk_len };
         let next_line_len = line
             .len()
             .checked_add(chunk_len)
@@ -568,14 +564,17 @@ fn read_stdout_paused_in_second_frame(
                         "bounded stdout frame queue unavailable: {error}"
                     ))
                 })?;
-        } else if complete_frames == 1 && !paused {
-            paused = true;
+        } else if complete_frames == 1 {
             ready
                 .send(())
                 .map_err(|_| std::io::Error::other("mid-frame observer unavailable"))?;
             release
                 .recv()
                 .map_err(|_| std::io::Error::other("mid-frame release unavailable"))?;
+            // The capture deliberately ends at the pause point. Draining after
+            // the kill could pick up the flushed remainder of the interrupted
+            // frame from the pipe and destroy the truncated-fragment evidence.
+            return Ok(all);
         }
     }
 }

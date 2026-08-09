@@ -2003,6 +2003,27 @@ async fn settle_reserved_import(
             },
         )
         .await;
+    // The upload was dispatched and its candidate is recorded: this is the
+    // exact post-dispatch window the acceptance harness pauses for the
+    // PART-10 cancellation and CRASH-02 crash cases.
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if !runtime
+        .artifact_acceptance_gates()
+        .reach(ArtifactAcceptanceGatePoint::ImportPostDispatch, key)
+        .await
+    {
+        runtime
+            .artifact_operations()
+            .set_outcome(
+                key,
+                OperationOutcome::ImportCandidate {
+                    candidate: candidate.clone(),
+                    validator_findings: validator_findings.clone(),
+                },
+            )
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
     if let Err(source_error) = source.verify_unchanged() {
         if source_error == ArtifactToolError::Conflict {
             runtime
@@ -3237,6 +3258,20 @@ async fn document_import_update(
             },
         )
         .await;
+    // The body update was dispatched and its candidate is recorded: this is
+    // the exact post-dispatch window the acceptance harness pauses for the
+    // PART-12 cancellation case.
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    if !runtime
+        .artifact_acceptance_gates()
+        .reach(
+            ArtifactAcceptanceGatePoint::DocumentPostDispatch,
+            acceptance_key,
+        )
+        .await
+    {
+        return Err(ArtifactToolError::Indeterminate);
+    }
     verify_document_candidate(
         runtime,
         &space_id,

@@ -35,8 +35,14 @@ pub enum ArtifactAcceptanceGatePoint {
     ImportFirstUploadChunk,
     /// The final export namespace check succeeded and publication is next.
     ExportPrepublication,
+    /// The export destination is linked but its publication is not settled.
+    ExportAtomicPublication,
+    /// The import upload was dispatched and a candidate object is recorded.
+    ImportPostDispatch,
     /// A document import is about to perform its final source check.
     DocumentFinalRevalidation,
+    /// The document mutation was dispatched and its candidate is recorded.
+    DocumentPostDispatch,
 }
 
 /// Capability-directory environment variable used only by the private child.
@@ -289,7 +295,10 @@ impl AcceptanceGateConfig {
         let point = match point {
             "import-first-upload-chunk" => ArtifactAcceptanceGatePoint::ImportFirstUploadChunk,
             "export-prepublication" => ArtifactAcceptanceGatePoint::ExportPrepublication,
+            "export-atomic-publication" => ArtifactAcceptanceGatePoint::ExportAtomicPublication,
+            "import-post-dispatch" => ArtifactAcceptanceGatePoint::ImportPostDispatch,
             "document-final-revalidation" => ArtifactAcceptanceGatePoint::DocumentFinalRevalidation,
+            "document-post-dispatch" => ArtifactAcceptanceGatePoint::DocumentPostDispatch,
             "import-before-dispatch" => ArtifactAcceptanceGatePoint::ImportBeforeDispatch,
             _ => return Err(AcceptanceGateSetupError::Configuration),
         };
@@ -316,13 +325,16 @@ impl AcceptanceGateConfig {
     ) -> Result<ArtifactAcceptanceGateLease, AcceptanceGateSetupError> {
         let operation = match self.point {
             ArtifactAcceptanceGatePoint::ImportFirstUploadChunk
-            | ArtifactAcceptanceGatePoint::ImportBeforeDispatch => {
+            | ArtifactAcceptanceGatePoint::ImportBeforeDispatch
+            | ArtifactAcceptanceGatePoint::ImportPostDispatch => {
                 operation_key(b"import", &self.raw_key)
             }
-            ArtifactAcceptanceGatePoint::ExportPrepublication => {
+            ArtifactAcceptanceGatePoint::ExportPrepublication
+            | ArtifactAcceptanceGatePoint::ExportAtomicPublication => {
                 operation_key(b"export", &self.raw_key)
             }
-            ArtifactAcceptanceGatePoint::DocumentFinalRevalidation => {
+            ArtifactAcceptanceGatePoint::DocumentFinalRevalidation
+            | ArtifactAcceptanceGatePoint::DocumentPostDispatch => {
                 operation_key(b"document", &self.raw_key)
             }
         };

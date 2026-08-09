@@ -391,6 +391,10 @@ async fn run_validator(
         read_bounded(stderr, stderr_limit),
         wait_for_validator(&mut child, child_id, validator.config.timeout),
     );
+    // Every `wait_for_validator` branch signals the process group before it
+    // reaps the leader, so once the join settles the leader pid may already
+    // be recycled and must never be signalled again.
+    process_group.disarm();
     input_result?;
     let stdout = stdout?;
     let stderr = stderr?;
@@ -402,11 +406,29 @@ async fn run_validator(
     if media_type.len() > validator.config.field_bytes || validator.config.fields == 0 {
         return Err(ValidatorExecutionError);
     }
-    terminate_process_group(child_id);
-    process_group.disarm();
     Ok(media_type)
 }
 
+#[cfg(unix)]
+async fn wait_for_validator(
+    child: &mut tokio::process::Child,
+    child_id: Option<u32>,
+    timeout: std::time::Duration,
+) -> Result<std::process::ExitStatus, ValidatorExecutionError> {
+    // Observe leader exit without reaping so its pid — and therefore the
+    // private process-group id — stays reserved while descendants are
+    // signalled. Signalling after the reap could hit a recycled pid.
+    let exited = wait_for_leader_exit_without_reap(child_id, timeout).await;
+    terminate_process_group(child_id);
+    if exited {
+        return child.wait().await.map_err(|_| ValidatorExecutionError);
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    Err(ValidatorExecutionError)
+}
+
+#[cfg(not(unix))]
 async fn wait_for_validator(
     child: &mut tokio::process::Child,
     child_id: Option<u32>,
@@ -421,6 +443,36 @@ async fn wait_for_validator(
             Err(ValidatorExecutionError)
         }
     }
+}
+
+/// Waits until the leader has exited, leaving it unreaped, or until the
+/// bounded deadline elapses. Returns whether an exit was observed.
+#[cfg(unix)]
+async fn wait_for_leader_exit_without_reap(
+    child_id: Option<u32>,
+    timeout: std::time::Duration,
+) -> bool {
+    let Some(child_id) = child_id.and_then(|value| libc::id_t::try_from(value).ok()) else {
+        return false;
+    };
+    let waited = tokio::task::spawn_blocking(move || {
+        // SAFETY: `info` is written by the kernel before use; `WNOWAIT` keeps
+        // the child waitable for the owning tokio `Child` to reap afterwards.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                child_id,
+                &raw mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            ) == 0
+        }
+    });
+    // On timeout the blocking wait stays parked until the subsequent group
+    // and direct kills make the child exit, then ends with the detached task.
+    tokio::time::timeout(timeout, waited)
+        .await
+        .is_ok_and(|joined| joined.unwrap_or(false))
 }
 
 struct ProcessGroupGuard {

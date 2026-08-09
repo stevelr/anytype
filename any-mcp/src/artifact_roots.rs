@@ -776,12 +776,13 @@ impl AtomicExport {
             .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
         self.verify_export_namespace()?;
         #[cfg(any(test, feature = "acceptance-harness"))]
-        if let Some((gates, operation)) = self.acceptance_gate.take() {
+        if let Some((gates, operation)) = self.acceptance_gate.as_ref() {
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
-            if !handle
-                .block_on(gates.reach(ArtifactAcceptanceGatePoint::ExportPrepublication, operation))
-            {
+            if !handle.block_on(gates.reach(
+                ArtifactAcceptanceGatePoint::ExportPrepublication,
+                *operation,
+            )) {
                 return Err(RootAccessError::new(RootProblem::Indeterminate));
             }
         }
@@ -795,6 +796,20 @@ impl AtomicExport {
                 return Err(RootAccessError::new(RootProblem::Collision));
             }
             Err(_) => return Err(RootAccessError::new(RootProblem::Containment)),
+        }
+        // The destination link exists but its publication is not yet settled:
+        // this is the exact atomic-commit window the acceptance harness pauses
+        // for cancellation and crash cases (PART-09, CRASH-03).
+        #[cfg(any(test, feature = "acceptance-harness"))]
+        if let Some((gates, operation)) = self.acceptance_gate.take() {
+            let handle = tokio::runtime::Handle::try_current()
+                .map_err(|_| RootAccessError::new(RootProblem::Indeterminate))?;
+            if !handle.block_on(gates.reach(
+                ArtifactAcceptanceGatePoint::ExportAtomicPublication,
+                operation,
+            )) {
+                return Err(RootAccessError::new(RootProblem::Indeterminate));
+            }
         }
         if self.verify_export_namespace().is_err() {
             drop(file);

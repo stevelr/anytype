@@ -763,6 +763,20 @@ impl StdioDriver {
         Ok(id)
     }
 
+    /// Sends one `tools/call` frame without reading a response, for crash
+    /// scenarios that kill the child while the call is paused at a gate.
+    #[cfg(feature = "acceptance-harness")]
+    fn send_tool_call_only(&mut self, name: &'static str, arguments: Value) {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.process.send(json!({
+            "jsonrpc":"2.0",
+            "id":id,
+            "method":"tools/call",
+            "params":{"name":name,"arguments":arguments}
+        }));
+    }
+
     /// Cancels one gated call and requires both its exact conflict result and
     /// a subsequent ping response.
     #[cfg(feature = "acceptance-harness")]
@@ -6082,7 +6096,9 @@ struct ChildArtifactGate {
 impl ChildArtifactGate {
     fn create(base: &Path, point: &str, key: &str) -> TestResult<Self> {
         let digest = Sha256::digest(format!("{}:{}:{}", point, key, unique_suffix()).as_bytes());
-        let nonce = digest[..16]
+        // Production requires exactly 64 lowercase hex characters; the full
+        // 32-byte digest encodes to exactly that.
+        let nonce = digest
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
@@ -6747,6 +6763,7 @@ async fn run_spawned_artifact_adversarial_default(
                 execution.merge(
                     run_artifact_dynamic_filesystem_stdio_sentinels(&mut driver, &run).await?,
                 )?;
+                run_artifact_diagnostic_flood_burst(&mut driver).await?;
             }
             Ok::<_, String>(execution)
         })
@@ -6815,6 +6832,32 @@ async fn run_spawned_artifact_adversarial_default(
         record_artifact_log_needle(audit_needles, needle)?;
     }
     Ok(execution)
+}
+
+/// FLOOD-07: a rapid burst of failing calls must produce byte-uniform bounded
+/// refusals that never echo the offered handle. The caller separately asserts
+/// the aggregate child diagnostic ceiling and the redaction audit after
+/// shutdown, so the burst plus those checks form the complete case evidence.
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_diagnostic_flood_burst(driver: &mut OwnedStdioDriver) -> Result<(), String> {
+    let mut expected: Option<Value> = None;
+    for index in 0..48_u32 {
+        let error = driver
+            .call_tool_error(
+                "artifact_release",
+                json!({"handle": format!("flood07-burst-{index}-{}", unique_suffix())}),
+            )
+            .await?;
+        if error.code() != "not_found" {
+            return Err("FLOOD-07 burst produced a non-uniform error class".to_owned());
+        }
+        match &expected {
+            None => expected = Some(error.normalized_result().clone()),
+            Some(first) if first == error.normalized_result() => {}
+            Some(_) => return Err("FLOOD-07 burst responses diverged".to_owned()),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -8255,6 +8298,512 @@ async fn headless_artifact_exact_cancellation_spawned_scenarios() {
         );
     }
     assert_artifact_server_log_clean(&log_baseline, &audit_needles, "exact-cancellation");
+}
+
+/// Kills production children mid-operation and proves post-crash recovery:
+/// HAND-04 and CRASH-01/02/03/05/07 from the failure-robustness matrix.
+#[cfg(feature = "acceptance-harness")]
+async fn run_artifact_crash_restart_cases(
+    ctx: &TestContext,
+    cleanup: [Arc<Mutex<ChildCleanupRecord>>; 6],
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> TestResult<AdversarialExecution> {
+    let [
+        first,
+        restarted,
+        import_gated,
+        import_restarted,
+        export_gated,
+        export_restarted,
+    ] = cleanup;
+    let mut execution = AdversarialExecution::default();
+    run_crash_generation_cases(ctx, first, restarted, audit_needles, &mut execution)
+        .await
+        .map_err(|_| sentinel_assertion("crash generation cases failed"))?;
+    run_crash_import_dispatch_case(
+        ctx,
+        import_gated,
+        import_restarted,
+        audit_needles,
+        &mut execution,
+    )
+    .await
+    .map_err(|_| sentinel_assertion("crash import-dispatch case failed"))?;
+    run_crash_export_commit_case(
+        ctx,
+        export_gated,
+        export_restarted,
+        audit_needles,
+        &mut execution,
+    )
+    .await
+    .map_err(|_| sentinel_assertion("crash export-commit case failed"))?;
+    execution.record_quota_not_applicable();
+    Ok(execution)
+}
+
+/// CRASH-01 (kill mid-upload, restart, reuse every pre-kill handle), HAND-04
+/// (previous-generation handle payload uniformity), CRASH-05 (second process
+/// on the same staging root), and CRASH-07 (full happy-path import after
+/// recovery) against one shared policy fixture.
+#[cfg(feature = "acceptance-harness")]
+async fn run_crash_generation_cases(
+    ctx: &TestContext,
+    first_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    restarted_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    execution: &mut AdversarialExecution,
+) -> Result<(), String> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create(&ctx.space_id)
+            .map_err(|_| "create crash generation fixture".to_owned())?,
+    );
+    record_artifact_fixture_log_needle(&policy, audit_needles)
+        .map_err(|_| "record crash fixture needle".to_owned())?;
+    let first_child = spawn_disposable_artifact_driver(
+        ctx,
+        first_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+    )
+    .map_err(|_| "spawn crash generation child".to_owned())?;
+    lock_driver(&first_child)
+        .as_mut()
+        .ok_or_else(|| "crash generation child disappeared".to_owned())?
+        .initialize();
+    let mut first_driver = OwnedStdioDriver {
+        driver: Arc::clone(&first_child),
+    };
+
+    // CRASH-01 setup: one record paused mid-upload plus one untouched
+    // reservation, so the kill invalidates handles in different states.
+    let payload = vec![0x6d; 2 * ACCEPTANCE_TRANSFER_CHUNK_BYTES];
+    let mid_upload = allocate_stage_upload(
+        &mut first_driver,
+        &ctx.space_id,
+        payload.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    record_artifact_stage_log_needle(audit_needles, mid_upload.handle().as_bytes())
+        .map_err(|_| "record crash mid-upload needle".to_owned())?;
+    let first_chunk = &payload[..ACCEPTANCE_TRANSFER_CHUNK_BYTES];
+    let partial = reqwest::Client::new()
+        .put(mid_upload.url())
+        .bearer_auth(mid_upload.handle())
+        .header("content-type", ARTIFACT_FILE_MEDIA_TYPE)
+        .header(
+            "content-range",
+            format!(
+                "bytes 0-{}/{}",
+                ACCEPTANCE_TRANSFER_CHUNK_BYTES - 1,
+                payload.len()
+            ),
+        )
+        .body(first_chunk.to_vec())
+        .send()
+        .await
+        .map_err(|_| "send crash mid-upload chunk".to_owned())?;
+    if partial.status() != reqwest::StatusCode::NO_CONTENT {
+        return Err("crash mid-upload chunk was not committed".to_owned());
+    }
+    let untouched = allocate_stage_upload(
+        &mut first_driver,
+        &ctx.space_id,
+        1,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        None,
+    )
+    .await?;
+    record_artifact_stage_log_needle(audit_needles, untouched.handle().as_bytes())
+        .map_err(|_| "record crash untouched needle".to_owned())?;
+
+    // CRASH-05: a second production process on the same private staging root
+    // must be rejected at startup while the first keeps serving.
+    run_second_staging_owner_rejection(ctx, &policy, audit_needles).await?;
+    if stage_head_status(&mid_upload).await? != reqwest::StatusCode::OK {
+        return Err("first owner stopped serving after the rejected second owner".to_owned());
+    }
+    execution
+        .record_executed(AdversarialCaseId::Crash05)
+        .map_err(|_| "record CRASH-05".to_owned())?;
+
+    // CRASH-01: kill without cleanup and restart on the same staging root.
+    let _terminated = terminate_registered_artifact_child(&first_child)?;
+    let second_child = spawn_disposable_artifact_driver(
+        ctx,
+        restarted_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+    )
+    .map_err(|_| "spawn restarted crash child".to_owned())?;
+    lock_driver(&second_child)
+        .as_mut()
+        .ok_or_else(|| "restarted crash child disappeared".to_owned())?
+        .initialize();
+    let mut second_driver = OwnedStdioDriver {
+        driver: Arc::clone(&second_child),
+    };
+    let unknown = second_driver
+        .call_tool_error(
+            "artifact_release",
+            json!({"handle": format!("hand04-{}", unique_suffix())}),
+        )
+        .await?;
+    if unknown.code() != "not_found" {
+        return Err("fresh unknown handle did not return not_found".to_owned());
+    }
+    for stale in [&mid_upload, &untouched] {
+        if stage_head_status(stale).await? != reqwest::StatusCode::NOT_FOUND {
+            return Err("pre-kill staging handle survived the restart".to_owned());
+        }
+        let released = second_driver
+            .call_tool_error("artifact_release", json!({"handle": stale.handle()}))
+            .await?;
+        // HAND-04: a previous-generation handle is byte-uniform with an
+        // unknown handle, so restart leaks no generation oracle.
+        if released.code() != "not_found"
+            || released.normalized_result() != unknown.normalized_result()
+        {
+            return Err("previous-generation handle was distinguishable".to_owned());
+        }
+    }
+    if !policy
+        .staging_snapshot()
+        .map_err(|_| "inspect crash staging root".to_owned())?
+        .is_reaped()
+    {
+        return Err("restart did not reap the killed generation's staging state".to_owned());
+    }
+    execution
+        .record_executed(AdversarialCaseId::Crash01)
+        .map_err(|_| "record CRASH-01".to_owned())?;
+    execution
+        .record_executed(AdversarialCaseId::Hand04)
+        .map_err(|_| "record HAND-04".to_owned())?;
+
+    // CRASH-07: recovery is complete, not degraded - a full happy-path
+    // import through the restarted child succeeds.
+    let source = format!("crash07-{}.bin", unique_suffix());
+    policy
+        .seed_import(&source, ARTIFACT_FILE_PAYLOAD)
+        .map_err(|_| "seed CRASH-07 import".to_owned())?;
+    let imported = second_driver
+        .call_tool(
+            "file_import",
+            json!({
+                "space": ctx.space_id,
+                "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": source}},
+                "name": format!("crash07-{}.bin", unique_suffix()),
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+                "idempotency_key": format!("crash07-{}", unique_suffix()),
+            }),
+        )
+        .await?;
+    let file_id = imported
+        .get("file_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "CRASH-07 import omitted file_id".to_owned())?;
+    ctx.register_file(file_id);
+    execution
+        .record_executed(AdversarialCaseId::Crash07)
+        .map_err(|_| "record CRASH-07".to_owned())?;
+    finish_registered_artifact_child(&second_child, None)?;
+    Ok(())
+}
+
+/// CRASH-05 helper: spawns a second production child on an already-owned
+/// staging root and requires the exact bounded startup rejection.
+#[cfg(feature = "acceptance-harness")]
+async fn run_second_staging_owner_rejection(
+    ctx: &TestContext,
+    policy: &Arc<ArtifactPolicyFixture>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+) -> Result<(), String> {
+    let fixture_needle = artifact_fixture_log_needle(policy)
+        .map_err(|_| "derive crash second-owner needle".to_owned())?;
+    record_artifact_log_needle(audit_needles, &fixture_needle)
+        .map_err(|_| "record crash second-owner needle".to_owned())?;
+    let credential_needles = disposable_child_credential_needles(ctx)
+        .map_err(|_| "derive crash second-owner credentials".to_owned())?;
+    let environment = ctx
+        .disposable_child_environment()
+        .ok_or_else(|| "crash second owner omitted child environment".to_owned())?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    environment
+        .configure(&mut command)
+        .map_err(|_| "configure crash second owner".to_owned())?;
+    configure_stdio_command(&mut command, DriverOptions::STANDARD, Some("artifacts"));
+    command.env("ANY_MCP_CONFIG", policy.config_path());
+    let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(10));
+    let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
+        .err()
+        .ok_or_else(|| "second staging owner served a frame".to_owned())?;
+    let panic_text = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic");
+    if panic_text != "bounded protocol process failed: child_eof" {
+        return Err("second staging owner did not fail with bounded EOF".to_owned());
+    }
+    let failure = process
+        .take_failure()
+        .ok_or_else(|| "second staging owner omitted process evidence".to_owned())?;
+    if failure.category != "child_eof"
+        || failure.output.exit_category != "exit_code"
+        || !failure.output.stdout.is_empty()
+    {
+        return Err("second staging owner violated the startup output contract".to_owned());
+    }
+    let stderr = std::str::from_utf8(&failure.output.stderr)
+        .map_err(|_| "second staging owner stderr was not UTF-8".to_owned())?;
+    let lines = stderr
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let category = match lines.as_slice() {
+        [line]
+            if line
+                .strip_suffix(
+                    "any-mcp startup or service failure \
+                     reason=unable to initialize configured artifact staging",
+                )
+                .is_some_and(|prefix| {
+                    prefix
+                        .split_ascii_whitespace()
+                        .any(|field| field == "ERROR")
+                }) =>
+        {
+            "unable to initialize configured artifact staging"
+        }
+        _ => "unexpected startup category",
+    };
+    ExpectedOutcome::StartupRejected {
+        category: "unable to initialize configured artifact staging",
+    }
+    .assert_matches(ObservedOutcome::StartupRejected { category })
+    .map_err(|_| "second staging owner startup category diverged".to_owned())?;
+    if contains_bytes(&failure.output.stderr, &fixture_needle)
+        || credential_needles
+            .iter()
+            .any(|needle| contains_bytes(&failure.output.stderr, needle))
+    {
+        return Err("second staging owner diagnostics exposed private state".to_owned());
+    }
+    Ok(())
+}
+
+/// CRASH-02: kill during the Anytype import dispatch, restart, and prove the
+/// space holds at most one candidate object.
+#[cfg(feature = "acceptance-harness")]
+async fn run_crash_import_dispatch_case(
+    ctx: &TestContext,
+    gated_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    restarted_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    execution: &mut AdversarialExecution,
+) -> Result<(), String> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create(&ctx.space_id)
+            .map_err(|_| "create crash import fixture".to_owned())?,
+    );
+    record_artifact_fixture_log_needle(&policy, audit_needles)
+        .map_err(|_| "record crash import needle".to_owned())?;
+    let before = cancellation_object_ids(ctx).await?;
+    let key = format!("crash02-{}", unique_suffix());
+    let (child, gate) = spawn_disposable_gated_artifact_driver(
+        ctx,
+        gated_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+        "import-post-dispatch",
+        key.clone(),
+    )
+    .map_err(|_| "spawn crash import child".to_owned())?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| "crash import child disappeared".to_owned())?
+        .initialize();
+    let source = format!("crash02-{}.bin", unique_suffix());
+    policy
+        .seed_import(&source, ARTIFACT_FILE_PAYLOAD)
+        .map_err(|_| "seed CRASH-02 import".to_owned())?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| "crash import child disappeared".to_owned())?
+        .send_tool_call_only(
+            "file_import",
+            json!({
+                "space": ctx.space_id,
+                "source": {"local": {"root": ArtifactPolicyFixture::IMPORT_ROOT, "path": source}},
+                "name": format!("crash02-{}.bin", unique_suffix()),
+                "media_type": ARTIFACT_FILE_MEDIA_TYPE,
+                "idempotency_key": key,
+            }),
+        );
+    gate.wait_ready()
+        .map_err(|_| "CRASH-02 dispatch never reached its gate".to_owned())?;
+    let _terminated = terminate_registered_artifact_child(&child)?;
+    let restarted = spawn_disposable_artifact_driver(
+        ctx,
+        restarted_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+    )
+    .map_err(|_| "spawn restarted import child".to_owned())?;
+    lock_driver(&restarted)
+        .as_mut()
+        .ok_or_else(|| "restarted import child disappeared".to_owned())?
+        .initialize();
+    let after = cancellation_object_ids(ctx).await?;
+    if !before.is_subset(&after) || after.len() > before.len().saturating_add(1) {
+        return Err("CRASH-02 dispatched more than one candidate object".to_owned());
+    }
+    for file_id in after.difference(&before) {
+        ctx.register_file(file_id);
+    }
+    if !policy
+        .staging_snapshot()
+        .map_err(|_| "inspect crash import staging root".to_owned())?
+        .is_reaped()
+    {
+        return Err("CRASH-02 restart left private staging state".to_owned());
+    }
+    execution
+        .record_executed(AdversarialCaseId::Crash02)
+        .map_err(|_| "record CRASH-02".to_owned())?;
+    finish_registered_artifact_child(&restarted, None)?;
+    Ok(())
+}
+
+/// CRASH-03: kill during the atomic export commit, restart, and prove the
+/// destination is absent or complete and hash-correct - never partial.
+#[cfg(feature = "acceptance-harness")]
+async fn run_crash_export_commit_case(
+    ctx: &TestContext,
+    gated_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    restarted_cleanup: Arc<Mutex<ChildCleanupRecord>>,
+    audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    execution: &mut AdversarialExecution,
+) -> Result<(), String> {
+    let policy = Arc::new(
+        ArtifactPolicyFixture::create(&ctx.space_id)
+            .map_err(|_| "create crash export fixture".to_owned())?,
+    );
+    record_artifact_fixture_log_needle(&policy, audit_needles)
+        .map_err(|_| "record crash export needle".to_owned())?;
+    let key = format!("crash03-{}", unique_suffix());
+    let (child, gate) = spawn_disposable_gated_artifact_driver(
+        ctx,
+        gated_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+        "export-atomic-publication",
+        key.clone(),
+    )
+    .map_err(|_| "spawn crash export child".to_owned())?;
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| "crash export child disappeared".to_owned())?
+        .initialize();
+    let file_id = seed_cancellation_file(ctx, &child, &policy, "crash03").await?;
+    let destination = format!("crash03-{}.bin", unique_suffix());
+    lock_driver(&child)
+        .as_mut()
+        .ok_or_else(|| "crash export child disappeared".to_owned())?
+        .send_tool_call_only(
+            "file_export",
+            json!({
+                "space": ctx.space_id,
+                "file_id": file_id,
+                "destination": {
+                    "local": {"root": ArtifactPolicyFixture::EXPORT_ROOT, "path": destination}
+                },
+                "idempotency_key": key,
+            }),
+        );
+    gate.wait_ready()
+        .map_err(|_| "CRASH-03 commit never reached its gate".to_owned())?;
+    let _terminated = terminate_registered_artifact_child(&child)?;
+    let restarted = spawn_disposable_artifact_driver(
+        ctx,
+        restarted_cleanup,
+        Arc::clone(&policy),
+        DriverOptions::STANDARD,
+    )
+    .map_err(|_| "spawn restarted export child".to_owned())?;
+    lock_driver(&restarted)
+        .as_mut()
+        .ok_or_else(|| "restarted export child disappeared".to_owned())?
+        .initialize();
+    let path = policy.export_root().join(&destination);
+    if path.exists() {
+        let published = std::fs::read(&path).map_err(|_| "read CRASH-03 destination".to_owned())?;
+        if published != ARTIFACT_FILE_PAYLOAD {
+            return Err("CRASH-03 destination was partial or changed".to_owned());
+        }
+    }
+    if !policy
+        .staging_snapshot()
+        .map_err(|_| "inspect crash export staging root".to_owned())?
+        .is_reaped()
+    {
+        return Err("CRASH-03 restart left private staging state".to_owned());
+    }
+    execution
+        .record_executed(AdversarialCaseId::Crash03)
+        .map_err(|_| "record CRASH-03".to_owned())?;
+    finish_registered_artifact_child(&restarted, None)?;
+    Ok(())
+}
+
+#[cfg(feature = "acceptance-harness")]
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
+async fn headless_artifact_crash_restart_scenarios() {
+    let cleanup = std::array::from_fn(|_| Arc::new(Mutex::new(ChildCleanupRecord::NotRun)));
+    let callback_cleanup = cleanup.clone();
+    let log_baseline = artifact_server_log_baseline();
+    let audit_needles = Arc::new(Mutex::new(Vec::new()));
+    let callback_audit_needles = Arc::clone(&audit_needles);
+    let outcome = Box::pin(with_disposable_space_context(
+        "any-mcp-artifact-crash-restart",
+        move |ctx| {
+            Box::pin(async move {
+                record_artifact_credential_log_needles(ctx.as_ref(), &callback_audit_needles)?;
+                let execution = run_artifact_crash_restart_cases(
+                    ctx.as_ref(),
+                    callback_cleanup,
+                    &callback_audit_needles,
+                )
+                .await?;
+                execution
+                    .assert_exact(&[
+                        AdversarialCaseId::Hand04,
+                        AdversarialCaseId::Crash01,
+                        AdversarialCaseId::Crash02,
+                        AdversarialCaseId::Crash03,
+                        AdversarialCaseId::Crash05,
+                        AdversarialCaseId::Crash07,
+                    ])
+                    .map_err(|_| sentinel_assertion("crash-restart inventory diverged"))
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe crash-restart acceptance");
+    require_completed(outcome, "crash-restart acceptance")
+        .expect("prefix-authorized disposable admission");
+    for record in &cleanup {
+        assert_eq!(
+            *record.lock().expect("crash-restart cleanup record"),
+            ChildCleanupRecord::Stopped
+        );
+    }
+    assert_artifact_server_log_clean(&log_baseline, &audit_needles, "crash-restart");
 }
 
 #[cfg(feature = "acceptance-harness")]

@@ -2227,6 +2227,10 @@ mod tests {
     }
 
     async fn test_staging() -> TestStaging {
+        test_staging_with_limits("").await
+    }
+
+    async fn test_staging_with_limits(limits_toml: &str) -> TestStaging {
         let suffix = getrandom::u64().expect("test randomness");
         let root = std::env::temp_dir().join(format!("any-mcp-stage-{suffix:016x}"));
         std::fs::create_dir(&root).expect("create staging root");
@@ -2235,10 +2239,16 @@ mod tests {
         drop(probe);
         let base = format!("http://127.0.0.1:{port}/artifacts/v1/");
         let root_toml = root.to_string_lossy().replace('\\', "\\\\");
+        let limits_section = if limits_toml.is_empty() {
+            String::new()
+        } else {
+            format!("[limits]\n{limits_toml}\n")
+        };
         let config = ArtifactConfig::from_toml(&format!(
             "schema_version = 1\n\
              [spaces]\n\
              read_only = false\n\
+             {limits_section}\
              [staging]\n\
              enabled = true\n\
              root = \"{root_toml}\"\n\
@@ -2329,7 +2339,9 @@ mod tests {
             .write_all(&request)
             .await
             .expect("write raw staging request");
-        stream.shutdown().await.expect("finish raw staging request");
+        // Deliberately no write-side shutdown: the server aborts half-closed
+        // connections before a routed handler can respond. Every raw request
+        // carries `Connection: close`, so the read still terminates.
         let mut response = Vec::new();
         tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
             .await
@@ -2346,7 +2358,10 @@ mod tests {
             line if line.starts_with(b"HTTP/1.1 405 ") => StatusCode::METHOD_NOT_ALLOWED,
             line if line.starts_with(b"HTTP/1.1 429 ") => StatusCode::TOO_MANY_REQUESTS,
             line if line.starts_with(b"HTTP/1.1 503 ") => StatusCode::SERVICE_UNAVAILABLE,
-            _ => panic!("unexpected raw staging status category"),
+            line => panic!(
+                "unexpected raw staging status category: {}",
+                String::from_utf8_lossy(line)
+            ),
         }
     }
 
@@ -2856,6 +2871,54 @@ mod tests {
             .await
             .expect("query-bearing request");
         assert_eq!(query.status(), StatusCode::NOT_FOUND);
+
+        // HAND-12: every rejected request shape must be refused before the
+        // authentication stage. An unauthenticated probe would receive 401
+        // from the later bearer parse, so 404 proves the ordering.
+        let parsed = url::Url::parse(&allocation.url).expect("parse HAND-12 URL");
+        let origin = format!(
+            "{}://{}:{}",
+            parsed.scheme(),
+            parsed.host_str().expect("HAND-12 host"),
+            parsed.port_or_known_default().expect("HAND-12 port"),
+        );
+        let unauthenticated_query = client
+            .head(format!("{}?handle={}", allocation.url, allocation.handle))
+            .send()
+            .await
+            .expect("unauthenticated query request");
+        assert_eq!(unauthenticated_query.status(), StatusCode::NOT_FOUND);
+        let wrong_prefix = client
+            .head(allocation.url.replace("/artifacts/v1/", "/artifacts/v2/"))
+            .send()
+            .await
+            .expect("wrong-prefix request");
+        assert_eq!(wrong_prefix.status(), StatusCode::NOT_FOUND);
+        let oversized_path = client
+            .head(format!("{origin}/artifacts/v1/{}", "a".repeat(300)))
+            .send()
+            .await
+            .expect("oversized-path request");
+        assert_eq!(oversized_path.status(), StatusCode::NOT_FOUND);
+        let host = parsed.host_str().expect("HAND-12 host");
+        let port = parsed.port_or_known_default().expect("HAND-12 port");
+        let percent_path = format!(
+            "HEAD /artifacts/v1/%61{} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n",
+            &allocation.record[2..]
+        )
+        .into_bytes();
+        assert_eq!(
+            raw_staging_status(&allocation.url, percent_path).await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            test.staging
+                .inspect(&allocation.handle)
+                .await
+                .expect("HAND-12 preserved record")
+                .offset,
+            0
+        );
     }
 
     #[tokio::test]
@@ -2969,28 +3032,27 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
 
-        {
-            let mut window = test.staging.state.rate_window.lock().await;
-            window.extend(std::iter::repeat_n(
-                Instant::now(),
-                test.staging.state.limits.staging_requests_per_minute as usize,
-            ));
-        }
-        let rate_limited = client
-            .head(&allocation.url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
-            .await
-            .expect("send HAND-14 request");
-        assert_eq!(rate_limited.status(), StatusCode::TOO_MANY_REQUESTS);
-        test.staging.state.rate_window.lock().await.clear();
-        let resumed = client
-            .head(&allocation.url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
-            .await
-            .expect("resume after HAND-14 window");
-        assert_eq!(resumed.status(), StatusCode::OK);
+        // HAND-10 at the listener: a duplicated Authorization header and a
+        // bearer containing whitespace are refused by the real HTTP stack.
+        let duplicated = format!(
+            "HEAD {} HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: {bearer}\r\nAuthorization: {bearer}\r\nConnection: close\r\n\r\n",
+            parsed.path()
+        )
+        .into_bytes();
+        assert_eq!(
+            raw_staging_status(&allocation.url, duplicated).await,
+            StatusCode::UNAUTHORIZED
+        );
+        let whitespace = format!(
+            "HEAD {} HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: Bearer split {}\r\nConnection: close\r\n\r\n",
+            parsed.path(),
+            allocation.handle
+        )
+        .into_bytes();
+        assert_eq!(
+            raw_staging_status(&allocation.url, whitespace).await,
+            StatusCode::UNAUTHORIZED
+        );
 
         let permits = Arc::clone(&test.staging.state.request_permits)
             .acquire_many_owned(
@@ -3020,6 +3082,111 @@ mod tests {
             .release(&allocation.handle)
             .await
             .expect("release request-grammar fixture");
+    }
+
+    /// HAND-14: a real request burst at the wire exhausts the configured
+    /// per-minute ceiling, the excess request is shed with 429, no record is
+    /// corrupted, and requests resume once the window has passed.
+    #[tokio::test]
+    async fn staging_rate_ceiling_sheds_a_real_burst_and_resumes() {
+        let test = test_staging_with_limits("staging_requests_per_minute = 8").await;
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate HAND-14 fixture");
+        let client = reqwest::Client::new();
+        let bearer = format!("Bearer {}", allocation.handle);
+        for _ in 0..8 {
+            let admitted = client
+                .head(&allocation.url)
+                .header(AUTHORIZATION, &bearer)
+                .send()
+                .await
+                .expect("send HAND-14 burst request");
+            assert_eq!(admitted.status(), StatusCode::OK);
+        }
+        let shed = client
+            .head(&allocation.url)
+            .header(AUTHORIZATION, &bearer)
+            .send()
+            .await
+            .expect("send HAND-14 excess request");
+        assert_eq!(shed.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            test.staging
+                .inspect(&allocation.handle)
+                .await
+                .expect("HAND-14 preserved record")
+                .offset,
+            0
+        );
+        // Simulate only the passage of the rate window; the pruning path in
+        // `admit_rate` still runs against these aged real entries.
+        {
+            let aged = Instant::now()
+                .checked_sub(Duration::from_secs(61))
+                .expect("age HAND-14 window entries");
+            let mut window = test.staging.state.rate_window.lock().await;
+            for entry in window.iter_mut() {
+                *entry = aged;
+            }
+        }
+        let resumed = client
+            .head(&allocation.url)
+            .header(AUTHORIZATION, &bearer)
+            .send()
+            .await
+            .expect("resume after HAND-14 window");
+        assert_eq!(resumed.status(), StatusCode::OK);
+        test.staging
+            .release(&allocation.handle)
+            .await
+            .expect("release HAND-14 fixture");
+    }
+
+    /// CLEAN-05: a cleanup pass over expired records must never remove an
+    /// entry the state index does not own, even one shaped like a record.
+    #[tokio::test]
+    async fn cleanup_pass_never_removes_unindexed_staging_entries() {
+        let test = test_staging().await;
+        let foreign_plain = test.root.join("clean05-foreign.txt");
+        let foreign_shaped = test.root.join(format!("{}.bin", "0".repeat(32)));
+        std::fs::write(&foreign_plain, b"operator data").expect("seed foreign file");
+        std::fs::write(&foreign_shaped, b"unindexed record-shaped file")
+            .expect("seed record-shaped foreign file");
+        let allocation = test
+            .staging
+            .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
+            .await
+            .expect("allocate CLEAN-05 fixture");
+        let expired = {
+            let mut records = test.staging.state.records.write().await;
+            let all = records.len();
+            let claimed = test.staging.take_expired_locked(
+                &mut records,
+                Instant::now() + test.staging.state.limits.staging_ttl + Duration::from_secs(1),
+            );
+            assert_eq!(claimed.len(), all, "every indexed record is claimable");
+            claimed
+        };
+        assert!(!expired.is_empty(), "CLEAN-05 requires one expired record");
+        test.staging.cleanup_expired(expired).await;
+        assert!(
+            matches!(
+                test.staging.inspect(&allocation.handle).await,
+                Err(StagingError::NotFound)
+            ),
+            "expired indexed record is reaped"
+        );
+        assert_eq!(
+            std::fs::read(&foreign_plain).expect("foreign file remains"),
+            b"operator data"
+        );
+        assert_eq!(
+            std::fs::read(&foreign_shaped).expect("record-shaped foreign file remains"),
+            b"unindexed record-shaped file"
+        );
     }
 
     #[test]
