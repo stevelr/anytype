@@ -27,6 +27,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Verified the Streamable HTTP transport against a real headless backend under
+  static-token authentication: the six shared domain scenarios — discovery,
+  documents, views, mutations, markdown no-op, and archive — plus the compact
+  and read-only catalog sentinels all pass on protocol `2025-11-25`, with
+  mutations exercised in a disposable prefix-authorized space.
+
 - Run the artifact data-plane acceptance and adversarial suites on every
   released target of the platform matrix. The portable CI job declares one row
   per target — Linux x86_64/aarch64, macOS aarch64, Windows x86_64/aarch64 —
