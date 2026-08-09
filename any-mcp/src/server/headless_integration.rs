@@ -3291,8 +3291,16 @@ async fn headless_artifact_partial_write_direct_scenarios() {
                     let mut driver = DirectRouterDriver { server: &server };
                     Box::pin(run_artifact_partial_write_protocol_cases(&mut driver, &run))
                         .await
-                        .map_err(|_| TestError::Assertion {
-                            message: "direct partial-write acceptance failed".to_owned(),
+                        .map_err(|error| {
+                            // The inner message is one of the harness's fixed
+                            // categories; surfacing it on stderr keeps
+                            // failures diagnosable without exposing live
+                            // state (the disposable wrapper withholds
+                            // callback messages).
+                            eprintln!("direct partial-write inner failure: {error}");
+                            TestError::Assertion {
+                                message: format!("direct partial-write acceptance failed: {error}"),
+                            }
                         })?
                 };
                 execution

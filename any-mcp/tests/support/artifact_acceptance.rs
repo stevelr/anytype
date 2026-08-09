@@ -230,7 +230,11 @@ macro_rules! adversarial_case_ids {
                     | Self::Clean06 | Self::Clean07 | Self::Clean08 => {
                         AdversarialCaseStatus::Executed
                     }
-                    _ => AdversarialCaseStatus::Pending,
+                    Self::Hand03 | Self::Hand05 | Self::Hand16 | Self::Part01 | Self::Part02
+                    | Self::Part03 | Self::Part04 | Self::Part05 | Self::Part06 | Self::Part07
+                    | Self::Part11 | Self::Crash04 | Self::Flood01 | Self::Flood02
+                    | Self::Flood03 | Self::Flood04 | Self::Flood05 | Self::Flood07
+                    | Self::Clean03 | Self::Clean04 => AdversarialCaseStatus::Executed,
                 }
             }
         }
@@ -651,6 +655,32 @@ impl AdversarialCaseId {
             | Self::Clean06
             | Self::Clean07
             | Self::Clean08 => Some(AdversarialRobustnessEvidence::LiveOwner),
+            // Recorded against a live headless server on 2026-08-09 after the
+            // durable staging merge: the partial-write direct owner
+            // (HAND-05, PART-01..07, PART-11), the lifecycle owner (HAND-03,
+            // HAND-16, CLEAN-03/04, FLOOD-04/05/07), the validator-flood
+            // owner (FLOOD-01..03), and the crash-restart owner's new
+            // corruption rejection (CRASH-04) all passed.
+            Self::Hand03
+            | Self::Hand05
+            | Self::Hand16
+            | Self::Part01
+            | Self::Part02
+            | Self::Part03
+            | Self::Part04
+            | Self::Part05
+            | Self::Part06
+            | Self::Part07
+            | Self::Part11
+            | Self::Crash04
+            | Self::Flood01
+            | Self::Flood02
+            | Self::Flood03
+            | Self::Flood04
+            | Self::Flood05
+            | Self::Flood07
+            | Self::Clean03
+            | Self::Clean04 => Some(AdversarialRobustnessEvidence::LiveOwner),
             _ => None,
         }
     }
@@ -2163,7 +2193,11 @@ async fn run_import_gate_race(
                 return Err("dynamic import race did not reach its exact gate".to_owned());
             }
         }
-        _ = &mut request => return Err("dynamic import race completed before its gate".to_owned()),
+        early = &mut request => {
+            // Fixed error categories only; keeps the gate diagnosis concrete.
+            eprintln!("gated import race early completion: {early:?}");
+            return Err("dynamic import race completed before its gate".to_owned());
+        }
     }
     match mutation {
         ImportRaceMutation::RenameOver => {
@@ -2188,7 +2222,11 @@ async fn run_import_gate_race(
         .map_err(|_| "dynamic import race accepted a changed source".to_owned())?;
     match mutation {
         ImportRaceMutation::RenameOver | ImportRaceMutation::Truncate => {
-            adversarial_tool_error(ExpectedToolErrorKind::Conflict).assert_tool_error(&refusal)?;
+            adversarial_tool_error(ExpectedToolErrorKind::Conflict)
+                .assert_tool_error(&refusal)
+                .inspect_err(|_| {
+                    eprintln!("gate debug: race refusal code={}", refusal.code());
+                })?;
         }
         ImportRaceMutation::Extend => {
             if !matches!(refusal.code(), "bounded_result" | "conflict") {
@@ -3394,6 +3432,7 @@ pub async fn run_artifact_partial_write_protocol_cases(
     if resumed.status != 201 || resumed.upload_offset != Some(5) {
         return Err("PART-03 did not resume to the declared final offset".to_owned());
     }
+    let part03_key = format!("part03-{}", unique_suffix());
     let imported = driver
         .call_tool(
             "file_import",
@@ -3402,7 +3441,7 @@ pub async fn run_artifact_partial_write_protocol_cases(
                 "source": {"staged_handle": allocation.handle()},
                 "name": "part03.bin",
                 "media_type": "text/plain",
-                "idempotency_key": format!("part03-{}", unique_suffix()),
+                "idempotency_key": part03_key,
             }),
         )
         .await?;
@@ -3425,12 +3464,31 @@ pub async fn run_artifact_partial_write_protocol_cases(
     if consumed.code() != "not_found" {
         return Err("HAND-05 did not uniformly refuse the consumed handle".to_owned());
     }
+    // File objects never appear in the space object list, so single dispatch
+    // is proven the same way as PART-10: an idempotent replay reports the
+    // reused verified outcome with the identical file identity.
+    let replayed = driver
+        .call_tool(
+            "file_import",
+            json!({
+                "space": run.ctx.space_id,
+                "source": {"staged_handle": allocation.handle()},
+                "name": "part03.bin",
+                "media_type": "text/plain",
+                "idempotency_key": part03_key,
+            }),
+        )
+        .await?;
+    if replayed.pointer("/reused").and_then(Value::as_bool) != Some(true)
+        || required_str(&replayed, "/file_id")? != required_str(&imported, "/file_id")?
+    {
+        return Err("PART-03 replay did not prove a single verified dispatch".to_owned());
+    }
     release_stage_upload(driver, &allocation).await?;
     execution.record_executed(AdversarialCaseId::Part03)?;
     execution.record_executed(AdversarialCaseId::Hand05)?;
-    let objects_after_resume = artifact_object_ids(run.ctx).await?;
-    if objects_after_resume.len() != objects_before.len().saturating_add(1) {
-        return Err("PART-03 did not create exactly one verified file".to_owned());
+    if artifact_object_ids(run.ctx).await? != objects_before {
+        return Err("PART-03 changed the space object inventory".to_owned());
     }
 
     let allocation = allocate_stage_upload(
@@ -3462,7 +3520,7 @@ pub async fn run_artifact_partial_write_protocol_cases(
         status: oversized.status,
         body: &oversized.body,
     })?;
-    if artifact_object_ids(run.ctx).await? != objects_after_resume {
+    if artifact_object_ids(run.ctx).await? != objects_before {
         return Err("PART-04 changed the Anytype inventory".to_owned());
     }
     release_stage_upload(driver, &allocation).await?;
@@ -3505,7 +3563,7 @@ pub async fn run_artifact_partial_write_protocol_cases(
         )
         .await?;
     if !matches!(incomplete.code(), "not_found" | "conflict")
-        || artifact_object_ids(run.ctx).await? != objects_after_resume
+        || artifact_object_ids(run.ctx).await? != objects_before
     {
         return Err("PART-05 did not refuse the incomplete staged source".to_owned());
     }
@@ -6875,6 +6933,27 @@ impl ArtifactPolicyFixture {
         directory_snapshot(&self.staging, true)
     }
 
+    /// Returns every persisted durable staging record path (CRASH-04 uses
+    /// this to corrupt and later restore one exact record).
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed message when the records directory cannot be read.
+    pub fn staged_record_paths(&self) -> Result<Vec<PathBuf>, String> {
+        let records = self.staging.join("records");
+        let mut paths = Vec::new();
+        let entries = fs::read_dir(&records).map_err(|_| "inspect staging records".to_owned())?;
+        for entry in entries {
+            let entry = entry.map_err(|_| "inspect staging records".to_owned())?;
+            let name = entry.file_name();
+            if staging_state_stem(&name.to_string_lossy(), ".json").is_some() {
+                paths.push(entry.path());
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    }
+
     /// Returns a counts-only exact snapshot of the authorized export directory.
     ///
     /// # Errors
@@ -6910,6 +6989,9 @@ impl ArtifactPolicyFixture {
 }
 
 fn directory_snapshot(path: &Path, staging: bool) -> Result<ArtifactDirectorySnapshot, String> {
+    if staging {
+        return durable_staging_snapshot(path);
+    }
     let mut snapshot = ArtifactDirectorySnapshot::default();
     let entries =
         fs::read_dir(path).map_err(|_| "inspect artifact fixture directory".to_owned())?;
@@ -6922,33 +7004,134 @@ fn directory_snapshot(path: &Path, staging: bool) -> Result<ArtifactDirectorySna
             snapshot.unexpected_entries = snapshot.unexpected_entries.saturating_add(1);
             continue;
         }
+        snapshot.total_file_bytes = snapshot.total_file_bytes.saturating_add(metadata.len());
+        snapshot.ordinary_files = snapshot.ordinary_files.saturating_add(1);
+    }
+    Ok(snapshot)
+}
+
+/// Counts the closed durable staging layout: `instance.lock` plus the
+/// `records/`, `payloads/`, `tmp/`, and `tombstones/` directories.
+///
+/// A record whose durable state is still receiving bytes counts as temporary
+/// (in-progress), a record in any later state counts as a published record,
+/// and an in-flight publish temporary or tombstone counts as temporary.
+/// Payload files contribute bytes only; a payload without its record, a
+/// malformed name, the pre-durable flat layout, and every other entry are
+/// unexpected. `instance.lock` and the four layout directories persist after
+/// a clean shutdown, so a fully reaped root still satisfies
+/// [`ArtifactDirectorySnapshot::is_reaped`].
+fn durable_staging_snapshot(path: &Path) -> Result<ArtifactDirectorySnapshot, String> {
+    const STAGING_DIRECTORIES: [&str; 4] = ["records", "payloads", "tmp", "tombstones"];
+    let mut snapshot = ArtifactDirectorySnapshot::default();
+    let mut record_ids: Vec<String> = Vec::new();
+    let mut payload_ids: Vec<String> = Vec::new();
+    let entries = fs::read_dir(path).map_err(|_| "inspect artifact staging root".to_owned())?;
+    for entry in entries {
+        let entry = entry.map_err(|_| "inspect artifact staging root".to_owned())?;
+        let metadata = entry
+            .metadata()
+            .map_err(|_| "inspect artifact staging root".to_owned())?;
         let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if staging && name == ".any-mcp-staging.lock" {
+        let name = name.to_string_lossy().into_owned();
+        if name == "instance.lock" && metadata.is_file() {
             snapshot.lock_files = snapshot.lock_files.saturating_add(1);
             continue;
         }
-        snapshot.total_file_bytes = snapshot.total_file_bytes.saturating_add(metadata.len());
-        if staging
-            && name
-                .strip_suffix(".bin")
-                .is_some_and(|stem| stem.len() == 32 && stem.bytes().all(lowercase_hex_byte))
-        {
-            snapshot.record_files = snapshot.record_files.saturating_add(1);
-        } else if staging
-            && name
-                .strip_prefix(".any-mcp-")
-                .and_then(|value| value.strip_suffix(".tmp"))
-                .is_some_and(|stem| stem.len() == 16 && stem.bytes().all(lowercase_hex_byte))
-        {
-            snapshot.temporary_files = snapshot.temporary_files.saturating_add(1);
-        } else if staging {
+        if !(metadata.is_dir() && STAGING_DIRECTORIES.contains(&name.as_str())) {
             snapshot.unexpected_entries = snapshot.unexpected_entries.saturating_add(1);
-        } else {
-            snapshot.ordinary_files = snapshot.ordinary_files.saturating_add(1);
+            continue;
+        }
+        let children =
+            fs::read_dir(entry.path()).map_err(|_| "inspect artifact staging child".to_owned())?;
+        for child in children {
+            let child = child.map_err(|_| "inspect artifact staging child".to_owned())?;
+            let child_metadata = child
+                .metadata()
+                .map_err(|_| "inspect artifact staging child".to_owned())?;
+            if !child_metadata.is_file() {
+                snapshot.unexpected_entries = snapshot.unexpected_entries.saturating_add(1);
+                continue;
+            }
+            snapshot.total_file_bytes = snapshot
+                .total_file_bytes
+                .saturating_add(child_metadata.len());
+            let child_name = child.file_name();
+            let child_name = child_name.to_string_lossy().into_owned();
+            match name.as_str() {
+                "records" => match staging_state_stem(&child_name, ".json") {
+                    Some(stem) => match staged_record_in_progress(&child.path()) {
+                        Some(true) => {
+                            record_ids.push(stem.to_owned());
+                            snapshot.temporary_files = snapshot.temporary_files.saturating_add(1);
+                        }
+                        Some(false) => {
+                            record_ids.push(stem.to_owned());
+                            snapshot.record_files = snapshot.record_files.saturating_add(1);
+                        }
+                        None => {
+                            snapshot.unexpected_entries =
+                                snapshot.unexpected_entries.saturating_add(1);
+                        }
+                    },
+                    None => {
+                        snapshot.unexpected_entries = snapshot.unexpected_entries.saturating_add(1);
+                    }
+                },
+                "payloads" => match staging_state_stem(&child_name, ".bin") {
+                    Some(stem) => payload_ids.push(stem.to_owned()),
+                    None => {
+                        snapshot.unexpected_entries = snapshot.unexpected_entries.saturating_add(1);
+                    }
+                },
+                "tombstones" => {
+                    if staging_state_stem(&child_name, ".json").is_some() {
+                        snapshot.temporary_files = snapshot.temporary_files.saturating_add(1);
+                    } else {
+                        snapshot.unexpected_entries = snapshot.unexpected_entries.saturating_add(1);
+                    }
+                }
+                _ => {
+                    let temporary = child_name.strip_suffix(".tmp").is_some_and(|stem| {
+                        stem.split_once('.').is_some_and(|(record, random)| {
+                            record.len() == 32
+                                && record.bytes().all(lowercase_hex_byte)
+                                && random.len() == 16
+                                && random.bytes().all(lowercase_hex_byte)
+                        })
+                    });
+                    if temporary {
+                        snapshot.temporary_files = snapshot.temporary_files.saturating_add(1);
+                    } else {
+                        snapshot.unexpected_entries = snapshot.unexpected_entries.saturating_add(1);
+                    }
+                }
+            }
+        }
+    }
+    for payload in payload_ids {
+        if !record_ids.iter().any(|record| record == &payload) {
+            snapshot.unexpected_entries = snapshot.unexpected_entries.saturating_add(1);
         }
     }
     Ok(snapshot)
+}
+
+fn staging_state_stem<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
+    name.strip_suffix(suffix)
+        .filter(|stem| stem.len() == 32 && stem.bytes().all(lowercase_hex_byte))
+}
+
+/// Reads one durable record's state: `Some(true)` while it is still
+/// receiving bytes, `Some(false)` once terminal, `None` when unreadable.
+fn staged_record_in_progress(path: &Path) -> Option<bool> {
+    let bytes = fs::read(path).ok()?;
+    let document: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    match document.get("state")?.as_str()? {
+        "allocated" | "receiving" => Some(true),
+        "ready" | "available" | "reconciliation" | "consumed" | "cleanup_pending" => Some(false),
+        _ => None,
+    }
 }
 
 fn lowercase_hex_byte(byte: u8) -> bool {
@@ -11540,7 +11723,7 @@ mod tests {
 
         let partition = adversarial_case_partition().collect::<Vec<_>>();
         assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
-        let implemented = 102;
+        let implemented = 122;
         assert_eq!(
             partition
                 .iter()

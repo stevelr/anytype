@@ -1046,6 +1046,33 @@ impl OwnedStdioDriver {
                 .expect("registered stdio child remains owned"),
         )
     }
+
+    /// Runs one blocking driver transaction on the blocking pool so awaiting
+    /// callers (gate-race `select!` arms in particular) never stall the async
+    /// executor. A driver panic (transport deadline) resumes on the awaiting
+    /// task to preserve the pre-existing panic contract.
+    fn drive<'a, T: Send + 'static>(
+        &'a mut self,
+        operation: impl FnOnce(&mut StdioDriver) -> T + Send + 'static,
+    ) -> Pin<Box<dyn Future<Output = T> + 'a>> {
+        let driver = Arc::clone(&self.driver);
+        Box::pin(async move {
+            let joined = tokio::task::spawn_blocking(move || {
+                let mut driver = lock_driver(&driver);
+                operation(
+                    driver
+                        .as_mut()
+                        .expect("registered stdio child remains owned"),
+                )
+            })
+            .await;
+            match joined {
+                Ok(result) => result,
+                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Err(_) => panic!("stdio driver task cancelled"),
+            }
+        })
+    }
 }
 
 impl McpDriver for OwnedStdioDriver {
@@ -1054,8 +1081,7 @@ impl McpDriver for OwnedStdioDriver {
         name: &'static str,
         arguments: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
-        let result = self.with_driver(|driver| driver.call_tool_sync(name, arguments));
-        Box::pin(std::future::ready(result))
+        self.drive(move |driver| driver.call_tool_sync(name, arguments))
     }
 
     fn call_tool_error<'a>(
@@ -1063,44 +1089,39 @@ impl McpDriver for OwnedStdioDriver {
         name: &'static str,
         arguments: Value,
     ) -> Pin<Box<dyn Future<Output = Result<ToolErrorEvidence, String>> + 'a>> {
-        let result = self.with_driver(|driver| driver.call_tool_error_sync(name, arguments));
-        Box::pin(std::future::ready(result))
+        self.drive(move |driver| driver.call_tool_error_sync(name, arguments))
     }
 
     fn list_tools<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + 'a>> {
-        let result = self.with_driver(StdioDriver::list_tools_sync);
-        Box::pin(std::future::ready(result))
+        self.drive(StdioDriver::list_tools_sync)
     }
 
     fn list_tool_descriptors<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, String>> + 'a>> {
-        let result = self.with_driver(StdioDriver::list_tool_descriptors_sync);
-        Box::pin(std::future::ready(result))
+        self.drive(StdioDriver::list_tool_descriptors_sync)
     }
 
     fn list_resources<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
-        let result = self.with_driver(StdioDriver::list_resources_sync);
-        Box::pin(std::future::ready(result))
+        self.drive(StdioDriver::list_resources_sync)
     }
 
     fn list_resource_templates<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
-        let result = self.with_driver(StdioDriver::list_resource_templates_sync);
-        Box::pin(std::future::ready(result))
+        self.drive(StdioDriver::list_resource_templates_sync)
     }
 
     fn read_resource<'a>(
         &'a mut self,
         uri: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + 'a>> {
-        let result = self.with_driver(|driver| driver.read_resource_sync(uri));
-        Box::pin(std::future::ready(result))
+        let uri = uri.to_owned();
+        self.drive(move |driver| driver.read_resource_sync(&uri))
     }
 }
 
@@ -6208,7 +6229,14 @@ impl ArtifactGateLease for ChildArtifactGateLease {
         &'a mut self,
         _timeout: Duration,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { tokio::task::block_in_place(|| self.0.wait_ready().is_ok()) })
+        // `block_in_place` panics on a current-thread test runtime; a
+        // dedicated blocking task waits on the child gate on every flavor.
+        let gate = self.0.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || gate.wait_ready().is_ok())
+                .await
+                .unwrap_or(false)
+        })
     }
 
     fn release(&self) {
@@ -6541,7 +6569,10 @@ async fn run_spawned_validator_flood_cases(
     cleanup: [Arc<Mutex<ChildCleanupRecord>>; 2],
     audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> TestResult<AdversarialExecution> {
-    let executable = PathBuf::from(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    // Production pins validator executables under a 128 MiB hash ceiling
+    // with a non-writable mode, so the flood fixtures pin the dedicated
+    // small validator binary rather than the debug process-test binary.
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_any-mcp-validator-fixture"));
     let optional = Arc::new(
         ArtifactPolicyFixture::create_with_validator_executable(
             &ctx.space_id,
@@ -6602,7 +6633,7 @@ async fn run_spawned_validator_flood_cases(
         ctx.register_file(file_id);
         let expected = [json!({"id": "mime", "status": "failed"})];
         if imported
-            .get("validators")
+            .pointer("/receipt/validators")
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             != Some(expected.as_slice())
@@ -6611,6 +6642,11 @@ async fn run_spawned_validator_flood_cases(
                 .len()
                 > ARTIFACT_FRAME_CEILING_BYTES as usize
         {
+            // Bounded fixed-category findings only (id/status pairs).
+            eprintln!(
+                "validator-flood {label} findings diverged: {:?}",
+                imported.pointer("/receipt/validators")
+            );
             return Err(sentinel_assertion(
                 "validator flood result was not one bounded finding",
             ));
@@ -6705,7 +6741,12 @@ async fn headless_artifact_validator_flood_spawned_scenarios() {
                     callback_cleanup,
                     &callback_audit_needles,
                 )
-                .await?;
+                .await
+                .inspect_err(|error| {
+                    // Fixed harness category only; the disposable wrapper
+                    // withholds callback messages.
+                    eprintln!("validator-flood inner failure: {error:?}");
+                })?;
                 execution
                     .assert_exact(&[
                         AdversarialCaseId::Flood01,
@@ -6910,15 +6951,54 @@ async fn run_spawned_artifact_gated_race(
         let mut driver = OwnedStdioDriver {
             driver: Arc::clone(&child),
         };
-        match case {
-            AdversarialCaseId::Race01 => run_artifact_race01(&mut driver, &run, key).await,
-            AdversarialCaseId::Race04 => run_artifact_race04(&mut driver, &run, key).await,
-            _ => Err("unsupported stable gated race case".to_owned()),
+        let attempt = AssertUnwindSafe(async {
+            match case {
+                AdversarialCaseId::Race01 => run_artifact_race01(&mut driver, &run, key).await,
+                AdversarialCaseId::Race04 => run_artifact_race04(&mut driver, &run, key).await,
+                _ => Err("unsupported stable gated race case".to_owned()),
+            }
+        })
+        .catch_unwind()
+        .await;
+        match attempt {
+            Ok(result) => result,
+            Err(_) => Err("gated race request hit its transport deadline".to_owned()),
         }
     };
-    finish_registered_artifact_child(&child, None)
-        .map_err(|_| sentinel_assertion("gated artifact child did not stop cleanly"))?;
-    observed.map_err(|_| sentinel_assertion("gated artifact race failed"))?;
+    let mut owned = lock_driver(&child)
+        .take()
+        .ok_or_else(|| sentinel_assertion("registered gated child disappeared"))?;
+    if observed.is_err()
+        && let Some(failure) = owned.process.take_failure()
+    {
+        // Child stderr carries only fixed diagnostic categories (the log
+        // audit proves needle absence); print it for gate diagnosis.
+        eprintln!(
+            "gated race child failure category={} stderr:\n{}",
+            failure.category,
+            String::from_utf8_lossy(&failure.output.stderr)
+        );
+    }
+    let finished = if observed.is_err() {
+        owned.terminate()
+    } else {
+        owned.try_finish()
+    }
+    .map_err(|_| sentinel_assertion("gated artifact child did not stop cleanly"))?;
+    if observed.is_err() {
+        eprintln!(
+            "gated race child stderr:\n{}",
+            String::from_utf8_lossy(&finished.1.stderr)
+        );
+    }
+    artifact_child_process_evidence(&finished.1, None)
+        .map_err(|_| sentinel_assertion("gated artifact child evidence"))?;
+    observed
+        .inspect_err(|error| {
+            // Fixed harness category only.
+            eprintln!("gated artifact race case={case:?} inner failure: {error}");
+        })
+        .map_err(|_| sentinel_assertion("gated artifact race failed"))?;
     let mut execution = AdversarialExecution::default();
     execution
         .record_executed(case)
@@ -7151,7 +7231,14 @@ async fn headless_artifact_adversarial_spawned_stdio_scenarios() {
                         control,
                         &callback_audit_needles,
                     )
-                    .await?;
+                    .await
+                    .inspect_err(|error| {
+                        // Fixed harness category only; the disposable wrapper
+                        // withholds callback messages.
+                        eprintln!(
+                            "spawned adversarial control={control:?} inner failure: {error:?}"
+                        );
+                    })?;
                     let startup = run_alias07_startup_rejection(
                         ctx.as_ref(),
                         control,
@@ -7748,11 +7835,14 @@ async fn run_artifact_ttl_acceptance(
     )
     .await?;
     record_artifact_stage_log_needle(audit_needles, uniform.handle().as_bytes())?;
+    // HAND-07 requires a resolvable, policy-admitted space B: a valid-format
+    // foreign space ID passes resolution without I/O (this scenario's policy
+    // omits `allowed`), so the refusal is the staging space binding itself.
     let wrong_space = driver
         .call_tool_error(
             "file_import",
             json!({
-                "space": "any-mcp-acceptance-uniform-other-space",
+                "space": "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7",
                 "source": {"staged_handle": uniform.handle()},
                 "name": "hand07.bin",
                 "media_type": ARTIFACT_FILE_MEDIA_TYPE,
@@ -7763,6 +7853,12 @@ async fn run_artifact_ttl_acceptance(
     if unknown.normalized_result() != expired.normalized_result()
         || wrong_space.normalized_result() != expired.normalized_result()
     {
+        eprintln!(
+            "HAND-16 divergence: expired={:?} unknown={:?} wrong_space={:?}",
+            expired.normalized_result(),
+            unknown.normalized_result(),
+            wrong_space.normalized_result(),
+        );
         return Err("HAND-16 MCP not-found payloads were distinguishable".to_owned());
     }
     let client = reqwest::Client::new();
@@ -8443,8 +8539,9 @@ async fn run_crash_generation_cases(
         .map_err(|_| "record crash untouched needle".to_owned())?;
 
     // CRASH-05: a second production process on the same private staging root
-    // must be rejected at startup while the first keeps serving.
-    run_second_staging_owner_rejection(ctx, &policy, audit_needles).await?;
+    // must be rejected at startup while the first keeps serving. The durable
+    // layout reports the fixed `invalid staging policy` category.
+    run_staging_startup_rejection(ctx, &policy, audit_needles, "invalid staging policy").await?;
     if stage_head_status(&mid_upload).await? != reqwest::StatusCode::OK {
         return Err("first owner stopped serving after the rejected second owner".to_owned());
     }
@@ -8454,6 +8551,50 @@ async fn run_crash_generation_cases(
 
     // CRASH-01: kill without cleanup and restart on the same staging root.
     let _terminated = terminate_registered_artifact_child(&first_child)?;
+
+    // CRASH-04: with the killed generation's durable records still on disk,
+    // corrupt one persisted record and require the exact reconciliation
+    // startup rejection, with no ambiguous file deleted. Restoring the
+    // original bytes afterwards lets the CRASH-01 restart proceed.
+    let record_paths = policy
+        .staged_record_paths()
+        .map_err(|_| "inventory durable records for CRASH-04".to_owned())?;
+    let corrupted_path = record_paths
+        .first()
+        .ok_or_else(|| "CRASH-04 requires one persisted durable record".to_owned())?;
+    let original_bytes =
+        std::fs::read(corrupted_path).map_err(|_| "capture CRASH-04 record bytes".to_owned())?;
+    let corrupt_bytes = b"{\"format_version\":1,\"crash04\":true}".to_vec();
+    std::fs::write(corrupted_path, &corrupt_bytes)
+        .map_err(|_| "corrupt CRASH-04 record".to_owned())?;
+    let before_rejection = policy
+        .staging_snapshot()
+        .map_err(|_| "snapshot CRASH-04 staging state".to_owned())?;
+    run_staging_startup_rejection(
+        ctx,
+        &policy,
+        audit_needles,
+        "artifact state reconciliation failed",
+    )
+    .await
+    .map_err(|_| "CRASH-04 startup rejection diverged".to_owned())?;
+    let retained_bytes =
+        std::fs::read(corrupted_path).map_err(|_| "reread CRASH-04 record".to_owned())?;
+    if retained_bytes != corrupt_bytes {
+        return Err("CRASH-04 rejection modified the corrupt record".to_owned());
+    }
+    let after_rejection = policy
+        .staging_snapshot()
+        .map_err(|_| "resnapshot CRASH-04 staging state".to_owned())?;
+    if after_rejection != before_rejection {
+        return Err("CRASH-04 rejection deleted or altered staging entries".to_owned());
+    }
+    std::fs::write(corrupted_path, &original_bytes)
+        .map_err(|_| "restore CRASH-04 record".to_owned())?;
+    execution
+        .record_executed(AdversarialCaseId::Crash04)
+        .map_err(|_| "record CRASH-04".to_owned())?;
+
     let second_child = spawn_disposable_artifact_driver(
         ctx,
         restarted_cleanup,
@@ -8536,13 +8677,15 @@ async fn run_crash_generation_cases(
     Ok(())
 }
 
-/// CRASH-05 helper: spawns a second production child on an already-owned
-/// staging root and requires the exact bounded startup rejection.
+/// CRASH-04/CRASH-05 helper: spawns a production child against a staging
+/// root that must be refused, and requires the exact bounded startup
+/// rejection with the supplied fixed reason.
 #[cfg(feature = "acceptance-harness")]
-async fn run_second_staging_owner_rejection(
+async fn run_staging_startup_rejection(
     ctx: &TestContext,
     policy: &Arc<ArtifactPolicyFixture>,
     audit_needles: &Arc<Mutex<Vec<Vec<u8>>>>,
+    expected_reason: &'static str,
 ) -> Result<(), String> {
     let fixture_needle = artifact_fixture_log_needle(policy)
         .map_err(|_| "derive crash second-owner needle".to_owned())?;
@@ -8586,25 +8729,23 @@ async fn run_second_staging_owner_rejection(
         .lines()
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
+    let expected_suffix = format!("any-mcp startup or service failure reason={expected_reason}");
     let category = match lines.as_slice() {
         [line]
             if line
-                .strip_suffix(
-                    "any-mcp startup or service failure \
-                     reason=unable to initialize configured artifact staging",
-                )
+                .strip_suffix(expected_suffix.as_str())
                 .is_some_and(|prefix| {
                     prefix
                         .split_ascii_whitespace()
                         .any(|field| field == "ERROR")
                 }) =>
         {
-            "unable to initialize configured artifact staging"
+            expected_reason
         }
         _ => "unexpected startup category",
     };
     ExpectedOutcome::StartupRejected {
-        category: "unable to initialize configured artifact staging",
+        category: expected_reason,
     }
     .assert_matches(ObservedOutcome::StartupRejected { category })
     .map_err(|_| "second staging owner startup category diverged".to_owned())?;
@@ -8809,6 +8950,7 @@ async fn headless_artifact_crash_restart_scenarios() {
                         AdversarialCaseId::Crash01,
                         AdversarialCaseId::Crash02,
                         AdversarialCaseId::Crash03,
+                        AdversarialCaseId::Crash04,
                         AdversarialCaseId::Crash05,
                         AdversarialCaseId::Crash07,
                     ])
@@ -9042,9 +9184,14 @@ async fn run_artifact_payload_acceptance(
     if !policy.staging_snapshot()?.is_reaped() {
         return Err("payload scenario left private staging state".to_owned());
     }
+    // FLOOD-07 runs on this owner (its registered lifecycle witness): a
+    // failing-call burst must stay byte-uniform, and the caller's child
+    // evidence plus post-run log audit bound and redact the diagnostics.
+    run_artifact_diagnostic_flood_burst(&mut driver).await?;
     catalog.compare(&artifact_catalog_snapshot(&mut driver).await?)?;
     let mut execution = AdversarialExecution::default();
     execution.record_executed(AdversarialCaseId::Flood05)?;
+    execution.record_executed(AdversarialCaseId::Flood07)?;
     execution.record_quota_not_applicable();
     Ok(execution)
 }
@@ -9190,13 +9337,18 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                             )
                             .await
                             .and_then(|execution| {
-                                execution.assert_exact(&[AdversarialCaseId::Flood05])
+                                execution.assert_exact(&[
+                                    AdversarialCaseId::Flood05,
+                                    AdversarialCaseId::Flood07,
+                                ])
                             })
                         }
                     };
-                    result.map_err(|_| {
+                    result.map_err(|error| {
+                        // The inner message is a fixed harness category;
+                        // surfacing it keeps live failures diagnosable.
                         eprintln!(
-                            "artifact lifecycle scenario={} outcome=failed",
+                            "artifact lifecycle scenario={} outcome=failed error={error:?}",
                             scenario.as_str()
                         );
                         sentinel_assertion("artifact lifecycle scenario failed")

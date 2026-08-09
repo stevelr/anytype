@@ -55,6 +55,7 @@ const MAX_IDEMPOTENCY_KEY_CHARS: usize = 256;
 const NONCE_HEX_BYTES: usize = 64;
 const MARKER_CONTENT_BYTES: usize = NONCE_HEX_BYTES + 1;
 const GATE_DEADLINE: Duration = Duration::from_secs(30);
+const GATE_REACH_DEADLINE: Duration = Duration::from_secs(180);
 const GATE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// A redacted error from private acceptance-child setup.
@@ -286,17 +287,27 @@ impl ArtifactAcceptanceGates {
         let Some(gate) = gate else {
             return true;
         };
-        let _ = gate.entered.send(true);
+        let entered_sent = gate.entered.send(true);
         let failed = gate.failed.clone();
         let mut released = gate.released;
         if *released.borrow() {
             return !failed.load(Ordering::Acquire);
         }
-        tokio::time::timeout(Duration::from_secs(30), released.changed())
+        let outcome = tokio::time::timeout(Duration::from_secs(30), released.changed())
             .await
             .is_ok_and(|result| {
                 result.is_ok() && *released.borrow() && !failed.load(Ordering::Acquire)
-            })
+            });
+        if !outcome {
+            // Fixed diagnostic categories only; the acceptance child audit
+            // proves this stream stays needle-free.
+            eprintln!(
+                "acceptance gate reach failed entered_send_ok={} failed_flag={}",
+                entered_sent.is_ok(),
+                failed.load(Ordering::Acquire)
+            );
+        }
+        outcome
     }
 }
 
@@ -529,11 +540,18 @@ impl GateDirectory {
 }
 
 async fn coordinate_gate(directory: GateDirectory, lease: ArtifactAcceptanceGateLease) {
-    let deadline = tokio::time::Instant::now() + GATE_DEADLINE;
-    if !wait_for_reach(&lease, deadline).await {
+    // Scenario setup (live-space inventories, fixture seeding, uploads) can
+    // consume real time before production reaches the armed point, so the
+    // reach wait gets its own generous bound. The strict deadline starts at
+    // reach: once production is paused, the test must release promptly.
+    let reach_deadline = tokio::time::Instant::now() + GATE_REACH_DEADLINE;
+    if !wait_for_reach(&lease, reach_deadline).await {
+        eprintln!("acceptance gate coordinator: reach never signaled");
         return;
     }
+    let deadline = tokio::time::Instant::now() + GATE_DEADLINE;
     if directory.create_marker(&directory.ready).is_err() {
+        eprintln!("acceptance gate coordinator: ready marker creation failed");
         lease.fail_closed();
         return;
     }
@@ -545,12 +563,14 @@ async fn coordinate_gate(directory: GateDirectory, lease: ArtifactAcceptanceGate
                 return;
             }
             Err(_) => {
+                eprintln!("acceptance gate coordinator: release marker invalid");
                 lease.fail_closed();
                 return;
             }
             Ok(false) => {}
         }
         if tokio::time::Instant::now() >= deadline {
+            eprintln!("acceptance gate coordinator: deadline elapsed");
             lease.fail_closed();
             return;
         }

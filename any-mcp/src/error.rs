@@ -159,20 +159,7 @@ pub fn mutation_rejection_is_definitive(error: &anytype::error::AnytypeError) ->
         // a rate-limited or timed-out mutation may have been applied.
         AnytypeError::ApiError { code, .. } => matches!(
             code,
-            400 | 401
-                | 403
-                | 404
-                | 405
-                | 409
-                | 410
-                | 411
-                | 412
-                | 413
-                | 414
-                | 415
-                | 416
-                | 417
-                | 422
+            400 | 401 | 403 | 404 | 405 | 409 | 410 | 411 | 412 | 413 | 414 | 415 | 416 | 417 | 422
         ),
 
         // A transport failure, partial/oversized/malformed response, exhausted

@@ -27,6 +27,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Retire the last pending adversarial robustness rows: all 122 matrix cases
+  now state executed evidence. The crash-restart owner adds the CRASH-04
+  durable-record corruption rejection (`artifact state reconciliation
+  failed`, corrupt bytes retained byte-for-byte, restart succeeds after
+  restoration); the validator-flood owner runs FLOOD-01/02/03 against a
+  dedicated small pinned validator fixture binary (production hashes pinned
+  executables under a 128 MiB ceiling that debug test binaries exceed); the
+  lifecycle owner carries the FLOOD-07 failing-call burst registered to it;
+  and the partial-write, TTL, and quota owners recorded HAND-03/05/16,
+  PART-01..07, PART-11, FLOOD-04/05, and CLEAN-03/04 live.
+
 - Make artifact staging durable across crashes and restarts. The staging root
   is now a closed layout (`instance.lock`, `records/`, `payloads/`, `tmp/`,
   `tombstones/`) in which every state transition is flushed before it becomes
@@ -142,6 +153,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Repair the live acceptance harness against the durable staging layout and
+  live-server contracts: staging snapshots walk the closed durable layout
+  and classify in-progress versus published records from their durable
+  state; the spawned stdio driver runs its blocking transactions on the
+  blocking pool so gate-race selects are actually raced; the acceptance-gate
+  coordinator bounds its reach wait separately from its post-reach release
+  deadline; single-dispatch proofs use idempotent replay because file
+  objects never appear in the space object list; the HAND-07 cross-space
+  probe uses a valid-format foreign space ID so the refusal is the staging
+  space binding; and the second-owner startup rejection expects the durable
+  layout's fixed `invalid staging policy` category.
 - Send env-configured acceptance gate nonces at the full 64-hex-character
   length production requires, so spawned child gates arm instead of rejecting
   their configuration at startup.

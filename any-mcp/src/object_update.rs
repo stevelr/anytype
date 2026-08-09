@@ -1879,7 +1879,10 @@ mod tests {
         )
         .await;
         assert_eq!(result_code(&result), "conflict");
-        assert_eq!(result_message(&result), ToolError::mutation_indeterminate().message());
+        assert_eq!(
+            result_message(&result),
+            ToolError::mutation_indeterminate().message()
+        );
         assert!(
             !serde_json::to_string(&result)
                 .unwrap()

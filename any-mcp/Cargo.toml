@@ -28,6 +28,14 @@ name = "any-mcp-process-test"
 path = "src/bin/process_test.rs"
 
 [[bin]]
+# Tiny scripted validator used by the FLOOD acceptance cases: production
+# pins validator executables under a 128 MiB hash ceiling, which the debug
+# process-test binary exceeds.
+name = "any-mcp-validator-fixture"
+path = "src/bin/validator_fixture.rs"
+required-features = ["acceptance-harness"]
+
+[[bin]]
 name = "any-mcp-views-write-acceptance"
 path = "src/bin/views_write_acceptance.rs"
 required-features = ["acceptance-harness"]
