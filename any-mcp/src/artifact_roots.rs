@@ -685,6 +685,7 @@ pub struct AtomicExport {
     maximum_bytes: u64,
     written: u64,
     published: bool,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
     #[cfg(any(test, feature = "acceptance-harness"))]
     acceptance_gate: Option<(ArtifactAcceptanceGates, [u8; 32])>,
 }
@@ -709,6 +710,20 @@ impl AtomicExport {
         operation: [u8; 32],
     ) -> Self {
         self.acceptance_gate = Some((gates, operation));
+        self
+    }
+
+    /// Binds the caller's request cancellation to this one publication.
+    ///
+    /// A commit that observes the cancellation before its atomic publication
+    /// aborts cleanly: the private temporary is discarded and the destination
+    /// is never created. A cancellation that arrives after publication has
+    /// started never rolls the destination back.
+    pub(crate) fn with_cancellation(
+        mut self,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.cancellation = Some(cancellation);
         self
     }
     /// Removes an unpublished private destination without discarding its
@@ -785,6 +800,17 @@ impl AtomicExport {
             )) {
                 return Err(RootAccessError::new(RootProblem::Indeterminate));
             }
+        }
+        // A cancellation observed before the atomic link must leave nothing:
+        // the retained private temporary is removed by this export's drop and
+        // the destination name is never created.
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            drop(file);
+            return Err(RootAccessError::new(RootProblem::Cancelled));
         }
         match self.parent.hard_link(
             Path::new(&self.temporary_name),
@@ -1033,6 +1059,7 @@ impl RootAccessError {
             RootProblem::TooLarge => RootAccessErrorKind::TooLarge,
             RootProblem::Collision => RootAccessErrorKind::Collision,
             RootProblem::Changed => RootAccessErrorKind::Changed,
+            RootProblem::Cancelled => RootAccessErrorKind::Cancelled,
             RootProblem::Indeterminate => RootAccessErrorKind::Indeterminate,
             #[cfg(not(any(unix, windows)))]
             RootProblem::Platform => RootAccessErrorKind::Platform,
@@ -1051,6 +1078,7 @@ impl fmt::Display for RootAccessError {
             RootProblem::TooLarge => "Artifact exceeds the configured size limit.",
             RootProblem::Collision => "Artifact export destination already exists.",
             RootProblem::Changed => "Artifact source changed during the operation.",
+            RootProblem::Cancelled => "Artifact export was cancelled before publication.",
             RootProblem::Indeterminate => "Artifact export publication is indeterminate.",
             #[cfg(not(any(unix, windows)))]
             RootProblem::Platform => "Artifact root controls are unavailable on this platform.",
@@ -1082,6 +1110,8 @@ pub enum RootAccessErrorKind {
     Collision,
     /// An anchored source or destination changed during the operation.
     Changed,
+    /// The operation was cancelled before publication; nothing was published.
+    Cancelled,
     /// Publication may have completed but could not be proven.
     Indeterminate,
     /// Secure root controls are unavailable on this target.
@@ -1099,6 +1129,7 @@ enum RootProblem {
     TooLarge,
     Collision,
     Changed,
+    Cancelled,
     Indeterminate,
     #[cfg(not(any(unix, windows)))]
     Platform,
@@ -1525,6 +1556,7 @@ fn begin_atomic_export_at(
                     maximum_bytes,
                     written: 0,
                     published: false,
+                    cancellation: None,
                     #[cfg(any(test, feature = "acceptance-harness"))]
                     acceptance_gate: None,
                 });

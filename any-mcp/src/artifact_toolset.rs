@@ -1245,9 +1245,9 @@ fn classify_root_error(error: &RootAccessError) -> ArtifactToolError {
             ArtifactToolError::NotFound
         }
         RootAccessErrorKind::TooLarge => ArtifactToolError::Bounded,
-        RootAccessErrorKind::Collision | RootAccessErrorKind::Changed => {
-            ArtifactToolError::Conflict
-        }
+        RootAccessErrorKind::Collision
+        | RootAccessErrorKind::Changed
+        | RootAccessErrorKind::Cancelled => ArtifactToolError::Conflict,
         RootAccessErrorKind::Indeterminate => ArtifactToolError::Indeterminate,
         RootAccessErrorKind::Activation | RootAccessErrorKind::ClientRoots => {
             ArtifactToolError::Upstream
@@ -2450,6 +2450,7 @@ async fn file_export(
     };
     let receipt = match completion {
         ExportCompletion::Local { root_id } => {
+            let destination = destination.with_cancellation(cancellation.clone());
             #[cfg(any(test, feature = "acceptance-harness"))]
             let destination =
                 destination.with_acceptance_gate(runtime.artifact_acceptance_gates().clone(), key);

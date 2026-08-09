@@ -777,15 +777,19 @@ impl StdioDriver {
         }));
     }
 
-    /// Cancels one gated call and requires both its exact conflict result and
-    /// a subsequent ping response.
+    /// Cancels one gated call and proves the server remains responsive.
+    ///
+    /// Per the MCP cancellation contract the cancelled request itself should
+    /// receive no response frame; when production does answer anyway (the
+    /// cancellation raced completion) the response must be the fixed conflict
+    /// result. The case invariants are asserted separately by each owner.
     #[cfg(feature = "acceptance-harness")]
     fn cancel_tool_call_exact(
         &mut self,
         name: &'static str,
         arguments: Value,
         gate: &ChildArtifactGate,
-    ) -> Result<ToolErrorEvidence, String> {
+    ) -> Result<(), String> {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         self.process.send(json!({
@@ -814,20 +818,25 @@ impl StdioDriver {
         }));
         let first = self.process.read_frame();
         self.process.record_response(&first);
-        let second = self.process.read_frame();
-        self.process.record_response(&second);
-        let [cancelled, ping] = correlate_response_pair([id, ping_id], [first, second])?;
+        let ping = if first["id"].as_u64() == Some(ping_id) {
+            first
+        } else {
+            let second = self.process.read_frame();
+            self.process.record_response(&second);
+            let [cancelled, ping] = correlate_response_pair([id, ping_id], [first, second])?;
+            let result = cancelled
+                .get("result")
+                .ok_or_else(|| "exact artifact cancellation omitted its tool result".to_owned())?;
+            let evidence = ToolErrorEvidence::from_result(result, false)?;
+            if evidence.code() != "conflict" {
+                return Err("exact artifact cancellation did not return conflict".to_owned());
+            }
+            ping
+        };
         if ping["result"] != json!({}) {
             return Err("artifact child did not respond after exact cancellation".to_owned());
         }
-        let result = cancelled
-            .get("result")
-            .ok_or_else(|| "exact artifact cancellation omitted its tool result".to_owned())?;
-        let evidence = ToolErrorEvidence::from_result(result, false)?;
-        if evidence.code() != "conflict" {
-            return Err("exact artifact cancellation did not return conflict".to_owned());
-        }
-        Ok(evidence)
+        Ok(())
     }
 
     fn list_tool_descriptors_sync(&mut self) -> Result<Vec<Value>, String> {
@@ -2049,8 +2058,8 @@ fn run_spawned_read_only_cleanup_cases(
     child: &Arc<Mutex<Option<StdioDriver>>>,
     policy: &ArtifactPolicyFixture,
 ) -> Result<AdversarialExecution, String> {
-    const NOT_FOUND_MESSAGE: &str =
-        "The requested Anytype entity was not found. Verify its identifier and space.";
+    const READ_ONLY_MESSAGE: &str =
+        "This Anytype server is read-only. Mutating workflows are disabled.";
     let staging_before = policy.staging_snapshot()?;
     let export_before = policy.export_snapshot()?;
     let mut execution = AdversarialExecution::default();
@@ -2058,47 +2067,46 @@ fn run_spawned_read_only_cleanup_cases(
     let driver = guard
         .as_mut()
         .ok_or_else(|| "registered read-only artifact child disappeared".to_owned())?;
+    // The read-only catalog removes every artifact mutation tool, and a call
+    // to a removed name is answered by the fixed bounded read-only refusal
+    // before argument decoding, so a stale client catalog cannot reach a
+    // handler, a root, or Anytype. The arguments below are deliberately not
+    // schema-valid for any artifact tool.
     for name in ARTIFACT_TOOL_NAMES
         .into_iter()
         .filter(|name| *name != "artifact_status")
     {
-        let response = driver.request("tools/call", json!({"name": name, "arguments": {}}));
-        let object = response
-            .as_object()
-            .ok_or_else(|| "CLEAN-07 response was not an object".to_owned())?;
-        let error = response
-            .get("error")
-            .and_then(Value::as_object)
-            .ok_or_else(|| "CLEAN-07 mutation was routed in read-only mode".to_owned())?;
-        if object.len() != 3
-            || response["jsonrpc"] != "2.0"
-            || error.len() != 2
-            || error.get("code") != Some(&json!(-32601))
-            || error.get("message") != Some(&json!("Method not found"))
+        let evidence = driver.call_tool_error_sync(name, json!({"secret-unparsed": true}))?;
+        if evidence.code() != "validation"
+            || evidence
+                .normalized_result()
+                .pointer("/structuredContent/message")
+                .and_then(Value::as_str)
+                != Some(READ_ONLY_MESSAGE)
         {
-            return Err("CLEAN-07 did not return exact method-not-found".to_owned());
+            return Err("CLEAN-07 did not return the fixed read-only refusal".to_owned());
         }
     }
     execution.record_executed(AdversarialCaseId::Clean07)?;
 
+    // `artifact_status` deliberately accepts no arguments, so a supplied
+    // handle is refused by strict schema decoding before any handler,
+    // staging, or Anytype access - there is no handle parameter to probe.
     let handle = format!("clean08-{}", unique_suffix());
     execution.record_forbidden_log_needle(handle.as_bytes())?;
     let response = driver.request(
         "tools/call",
         json!({"name": "artifact_status", "arguments": {"handle": handle}}),
     );
-    let result = response
-        .get("result")
-        .ok_or_else(|| "CLEAN-08 did not return a bounded tool result".to_owned())?;
-    let refusal = ToolErrorEvidence::from_result(result, driver.options.preview)?;
-    if refusal.code() != "not_found"
-        || refusal
-            .normalized_result()
-            .pointer("/structuredContent/message")
-            .and_then(Value::as_str)
-            != Some(NOT_FOUND_MESSAGE)
+    let error = response
+        .get("error")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "CLEAN-08 supplied-handle call was routed to a handler".to_owned())?;
+    if error.get("code") != Some(&json!(-32602))
+        || error.get("message") != Some(&json!("Tool arguments do not match the declared schema."))
+        || response.pointer("/error/data/code").and_then(Value::as_str) != Some("validation")
     {
-        return Err("CLEAN-08 did not return the uniform not-found result".to_owned());
+        return Err("CLEAN-08 did not return the strict schema refusal".to_owned());
     }
     drop(guard);
     if policy.staging_snapshot()? != staging_before || policy.export_snapshot()? != export_before {
@@ -7303,7 +7311,10 @@ async fn run_spawned_artifact_policy_scenario(
             .and_then(|execution| {
                 execution.assert_exact(&[AdversarialCaseId::Clean07, AdversarialCaseId::Clean08])
             })
-            .map_err(|_| sentinel_assertion("spawned read-only cleanup cases failed"))?;
+            .map_err(|error| {
+                eprintln!("read-only cleanup fixed-category error: {error}");
+                sentinel_assertion("spawned read-only cleanup cases failed")
+            })?;
     }
 
     // Stop this scenario's child before reporting, so a failure never leaves a
@@ -8106,12 +8117,18 @@ async fn run_file_import_post_dispatch_cancellation_case(
         .and_then(Value::as_str)
         .ok_or_else(|| "PART-10 replay omitted file_id".to_owned())?;
     ctx.register_file(file_id);
-    let after_retry = cancellation_object_ids(ctx).await?;
-    if after_retry.len() != before.len().saturating_add(1)
-        || !before.is_subset(&after_retry)
-        || !after_retry.contains(file_id)
+    // The idempotency-ledger proof that no second upload was dispatched is
+    // the replay flag: a fresh dispatch would report `reused: false`. The
+    // space listing cannot carry this evidence because freshly imported file
+    // objects are not returned by the object list.
+    if imported.get("reused").and_then(Value::as_bool) != Some(true)
+        || imported.pointer("/receipt/sha256").and_then(Value::as_str) != Some(expected.as_str())
     {
         return Err("PART-10 retry dispatched a duplicate or lost its candidate".to_owned());
+    }
+    let after_retry = cancellation_object_ids(ctx).await?;
+    if after_retry.len() > before.len().saturating_add(1) || !before.is_subset(&after_retry) {
+        return Err("PART-10 retry changed unrelated space inventory".to_owned());
     }
     release_stage_upload(&mut driver, &allocation).await?;
     if !policy.staging_snapshot()?.is_reaped() {
@@ -8170,19 +8187,20 @@ async fn run_document_post_dispatch_cancellation_case(
     if after_cancel.contains("PART-12 old") == after_cancel.contains("PART-12 new") {
         return Err("PART-12 produced a spliced or unrecognized body".to_owned());
     }
-    let updated = OwnedStdioDriver {
+    // The pause point is after the body dispatch, so the update is applied
+    // deterministically. A replay with the original expected hash must then
+    // receive the definitive conflict from the body precondition - never a
+    // second dispatch and never a spliced body.
+    if !after_cancel.contains("PART-12 new") {
+        return Err("PART-12 post-dispatch cancellation lost the applied update".to_owned());
+    }
+    let replay = OwnedStdioDriver {
         driver: Arc::clone(child),
     }
-    .call_tool("document_import_update", arguments)
+    .call_tool_error("document_import_update", arguments)
     .await?;
-    let new_sha256 = updated
-        .get("canonical_sha256")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "PART-12 replay omitted canonical hash".to_owned())?;
-    if artifact_sha256(after_cancel.as_bytes()) != old_sha256
-        && artifact_sha256(after_cancel.as_bytes()) != new_sha256
-    {
-        return Err("PART-12 cancellation body was neither old nor new".to_owned());
+    if replay.code() != "conflict" {
+        return Err("PART-12 replay did not classify the applied update".to_owned());
     }
     Ok(())
 }
@@ -8244,7 +8262,13 @@ async fn run_exact_cancellation_cases(
             }
             _ => Err("exact cancellation inventory contained an unrelated case".to_owned()),
         };
-        result.map_err(|_| sentinel_assertion("exact cancellation case failed"))?;
+        result.map_err(|error| {
+            eprintln!(
+                "exact cancellation case={} fixed-category error: {error}",
+                case.as_str()
+            );
+            sentinel_assertion("exact cancellation case failed")
+        })?;
         finish_registered_artifact_child(&child, None)
             .map_err(|_| sentinel_assertion("stop exact cancellation child"))?;
         execution

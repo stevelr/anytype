@@ -2861,11 +2861,15 @@ async fn run_direct_read_only_cleanup_cases(
     server: &AnyMcpServer,
     policy: &ArtifactPolicyFixture,
 ) -> Result<AdversarialExecution, String> {
-    const NOT_FOUND_MESSAGE: &str =
-        "The requested Anytype entity was not found. Verify its identifier and space.";
+    const READ_ONLY_MESSAGE: &str =
+        "This Anytype server is read-only. Mutating workflows are disabled.";
     let staging_before = policy.staging_snapshot()?;
     let export_before = policy.export_snapshot()?;
     let mut execution = AdversarialExecution::default();
+    // The read-only catalog removes every artifact mutation tool; a call to a
+    // removed name receives the fixed bounded read-only refusal before
+    // argument decoding. The arguments are deliberately not schema-valid for
+    // any artifact tool, so reaching a handler would fail differently.
     for name in live_scenario::ARTIFACT_TOOL_NAMES
         .into_iter()
         .filter(|name| *name != "artifact_status")
@@ -2873,43 +2877,46 @@ async fn run_direct_read_only_cleanup_cases(
         let cancellation = CancellationToken::new();
         let result = server
             .dispatch_tool(
-                CallToolRequestParams::new(name).with_arguments(arguments(json!({}))),
+                CallToolRequestParams::new(name)
+                    .with_arguments(arguments(json!({"secret-unparsed": true}))),
                 &cancellation,
             )
-            .await;
-        let error = result
-            .err()
-            .ok_or_else(|| "CLEAN-07 mutation was routed in read-only mode".to_owned())?;
-        if error.code != rmcp::model::ErrorCode::METHOD_NOT_FOUND
-            || error.message.as_ref() != "Method not found"
+            .await
+            .map_err(|_| "CLEAN-07 mutation was routed in read-only mode".to_owned())?;
+        let value = serde_json::to_value(result)
+            .map_err(|_| "serialize CLEAN-07 refusal result".to_owned())?;
+        let refusal = ToolErrorEvidence::from_result(&value, false)?;
+        if refusal.code() != "validation"
+            || refusal
+                .normalized_result()
+                .pointer("/structuredContent/message")
+                .and_then(Value::as_str)
+                != Some(READ_ONLY_MESSAGE)
         {
-            return Err("CLEAN-07 did not return exact method-not-found".to_owned());
+            return Err("CLEAN-07 did not return the fixed read-only refusal".to_owned());
         }
     }
     execution.record_executed(AdversarialCaseId::Clean07)?;
 
+    // `artifact_status` deliberately accepts no arguments: a supplied handle
+    // is refused by strict schema decoding before any handler, staging, or
+    // Anytype access - there is no handle parameter to probe.
     let handle = format!("clean08-{}", unique_suffix());
     execution.record_forbidden_log_needle(handle.as_bytes())?;
     let cancellation = CancellationToken::new();
-    let result = server
+    let error = server
         .dispatch_tool(
             CallToolRequestParams::new("artifact_status")
                 .with_arguments(arguments(json!({"handle": handle}))),
             &cancellation,
         )
         .await
-        .map_err(|_| "CLEAN-08 did not return a bounded tool result".to_owned())?;
-    let value =
-        serde_json::to_value(result).map_err(|_| "serialize CLEAN-08 status result".to_owned())?;
-    let refusal = ToolErrorEvidence::from_result(&value, false)?;
-    if refusal.code() != "not_found"
-        || refusal
-            .normalized_result()
-            .pointer("/structuredContent/message")
-            .and_then(Value::as_str)
-            != Some(NOT_FOUND_MESSAGE)
+        .err()
+        .ok_or_else(|| "CLEAN-08 supplied-handle call was routed to a handler".to_owned())?;
+    if error.code != rmcp::model::ErrorCode::INVALID_PARAMS
+        || error.message.as_ref() != "Tool arguments do not match the declared schema."
     {
-        return Err("CLEAN-08 did not return the uniform not-found result".to_owned());
+        return Err("CLEAN-08 did not return the strict schema refusal".to_owned());
     }
     if policy.staging_snapshot()? != staging_before || policy.export_snapshot()? != export_before {
         return Err("read-only cleanup cases changed private artifact state".to_owned());

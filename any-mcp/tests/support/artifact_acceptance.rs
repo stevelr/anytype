@@ -224,6 +224,12 @@ macro_rules! adversarial_case_ids {
                     | Self::Hand14 | Self::Hand15 | Self::Flood06 | Self::Clean05 => {
                         AdversarialCaseStatus::Executed
                     }
+                    Self::Hand04 | Self::Part08 | Self::Part09 | Self::Part10 | Self::Part12
+                    | Self::Crash01 | Self::Crash02 | Self::Crash03 | Self::Crash05
+                    | Self::Crash06 | Self::Crash07 | Self::Clean01 | Self::Clean02
+                    | Self::Clean06 | Self::Clean07 | Self::Clean08 => {
+                        AdversarialCaseStatus::Executed
+                    }
                     _ => AdversarialCaseStatus::Pending,
                 }
             }
@@ -489,6 +495,8 @@ pub enum AdversarialRobustnessWitness {
     StagingProtocol,
     /// Spawned lifecycle acceptance exercises cancellation and process restart.
     SpawnedLifecycle,
+    /// Spawned gated cancellation proves the exact pause-point contract.
+    SpawnedExactCancellation,
     /// Spawned crash acceptance kills production children and proves recovery.
     SpawnedCrashRestart,
     /// Spawned mid-frame capture proves bounded truncated-frame evidence.
@@ -508,11 +516,14 @@ impl AdversarialRobustnessWitness {
         match self {
             Self::StagingProtocol => "artifact_staging::tests",
             Self::SpawnedLifecycle => "headless_artifact_lifecycle_and_payload_scenarios",
+            Self::SpawnedExactCancellation => {
+                "headless_artifact_exact_cancellation_spawned_scenarios"
+            }
             Self::SpawnedCrashRestart => "headless_artifact_crash_restart_scenarios",
             Self::SpawnedMidFrameCapture => "headless_artifact_crash06_mid_frame_scenario",
             Self::ValidatorContainment => "artifact_validators::tests",
-            Self::DirectTeardown => "headless_artifact_adversarial_direct_scenarios",
-            Self::ReadOnlyCatalog => "headless_artifact_policy_scenario",
+            Self::DirectTeardown => "headless_artifact_failed_operation_cleanup_direct_scenarios",
+            Self::ReadOnlyCatalog => "headless_artifact_policy_direct_scenarios",
         }
     }
 
@@ -569,13 +580,12 @@ impl AdversarialCaseId {
             | Self::Clean03
             | Self::Clean04
             | Self::Clean05 => Some(AdversarialRobustnessWitness::StagingProtocol),
-            Self::Part08
-            | Self::Part09
-            | Self::Part10
-            | Self::Part12
-            | Self::Flood04
-            | Self::Flood05
-            | Self::Flood07 => Some(AdversarialRobustnessWitness::SpawnedLifecycle),
+            Self::Part08 | Self::Part09 | Self::Part10 | Self::Part12 => {
+                Some(AdversarialRobustnessWitness::SpawnedExactCancellation)
+            }
+            Self::Flood04 | Self::Flood05 | Self::Flood07 => {
+                Some(AdversarialRobustnessWitness::SpawnedLifecycle)
+            }
             Self::Hand04
             | Self::Crash01
             | Self::Crash02
@@ -621,6 +631,26 @@ impl AdversarialCaseId {
             | Self::Hand15
             | Self::Flood06
             | Self::Clean05 => Some(AdversarialRobustnessEvidence::OfflineUnit),
+            // Recorded against a live headless server on 2026-08-09: gated
+            // cancellation (PART), crash/restart (HAND-04, CRASH), mid-frame
+            // capture (CRASH-06), direct teardown (CLEAN-01/02/06), and the
+            // read-only catalog (CLEAN-07/08) owners all passed.
+            Self::Hand04
+            | Self::Part08
+            | Self::Part09
+            | Self::Part10
+            | Self::Part12
+            | Self::Crash01
+            | Self::Crash02
+            | Self::Crash03
+            | Self::Crash05
+            | Self::Crash06
+            | Self::Crash07
+            | Self::Clean01
+            | Self::Clean02
+            | Self::Clean06
+            | Self::Clean07
+            | Self::Clean08 => Some(AdversarialRobustnessEvidence::LiveOwner),
             _ => None,
         }
     }
@@ -11510,7 +11540,7 @@ mod tests {
 
         let partition = adversarial_case_partition().collect::<Vec<_>>();
         assert_eq!(partition.len(), AdversarialCaseId::ALL.len());
-        let implemented = 86;
+        let implemented = 102;
         assert_eq!(
             partition
                 .iter()

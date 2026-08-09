@@ -101,6 +101,23 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   evidence: an offline unit owner or a recorded live-owner run. A row cannot
   be promoted without evidence, and a live-only row cannot claim offline
   proof, so the implemented count can no longer drift from executable tests.
+- Abort a local file export whose request cancellation is observed before the
+  atomic publication link: the private temporary is discarded, the destination
+  is never created, and the outcome classifies as a conflict. A cancellation
+  arriving after publication has started never rolls the destination back.
+- Record the first verified live-server runs for the gated cancellation owner
+  (PART-08/09/10/12 through the export-prepublication, atomic-publication,
+  import-post-dispatch, and document-post-dispatch points), the crash-restart
+  owner (HAND-04, CRASH-01/02/03/05/07), the mid-frame capture (CRASH-06),
+  direct failed-operation teardown (CLEAN-01/02/06), and the read-only
+  catalog owners (CLEAN-07/08), and promote those sixteen rows to executed
+  with live-owner evidence. The verified cancellation driver now follows the
+  MCP contract: a cancelled request normally receives no response frame, and
+  any response that does arrive must be the fixed conflict result. CLEAN-07
+  asserts the fixed bounded read-only refusal and CLEAN-08 the strict
+  schema refusal, matching the production dispatch design; the PART-10
+  replay proves single dispatch through the idempotency `reused` flag and
+  the PART-12 replay expects the definitive body-precondition conflict.
 
 ### Fixed
 
