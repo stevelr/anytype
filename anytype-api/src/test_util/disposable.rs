@@ -36,6 +36,7 @@ const LEDGER_VERSION: u8 = 2;
 const PROCESS_GATE_ENV: &str = "ANYTYPE_DISPOSABLE_TEST_PROCESS";
 const RECOVER_STOPPED_RUN_ENV: &str = "ANYTYPE_DISPOSABLE_RECOVER_STOPPED_RUN";
 const CHILD_ENV_LIMIT: usize = 16_384;
+#[cfg(unix)]
 const ARG_MAX_RESERVE: usize = 4_096;
 const READINESS_TIMEOUT: Duration = Duration::from_secs(20);
 const READINESS_MAX_ATTEMPTS: usize = 50;
@@ -897,6 +898,7 @@ fn unlink_private_at(
 }
 
 fn create_private_directory(path: &Path) -> TestResult<()> {
+    #[allow(unused_mut)]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -1449,9 +1451,10 @@ fn validate_child_block(
     arguments: &[String],
     arg_max: Option<usize>,
 ) -> TestResult<()> {
-    let mut units = std::mem::size_of::<usize>();
+    let mut units: usize;
     #[cfg(unix)]
     {
+        units = std::mem::size_of::<usize>();
         for (name, value) in entries {
             units = units
                 .checked_add(name.len())
@@ -3794,9 +3797,11 @@ mod tests {
         for invalid in ["", ".leading", "has space", "line\nbreak", &"x".repeat(129)] {
             assert!(!valid_service(invalid));
         }
-        let small = vec![("ANYTYPE_KEYSTORE".to_owned(), "env".to_owned())];
         #[cfg(unix)]
-        assert!(validate_child_block(&small, "any-mcp", &[], Some(32_768)).is_ok());
+        {
+            let small = [("ANYTYPE_KEYSTORE".to_owned(), "env".to_owned())];
+            assert!(validate_child_block(&small, "any-mcp", &[], Some(32_768)).is_ok());
+        }
         let huge = vec![(
             "ANYTYPE_KEY_HTTP_TOKEN".to_owned(),
             "x".repeat(CHILD_ENV_LIMIT),

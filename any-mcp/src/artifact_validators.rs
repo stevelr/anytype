@@ -231,7 +231,7 @@ fn pin_executable(config: &ValidatorConfig) -> Result<Option<File>, ValidatorAct
         let _ = config;
         // Retained-handle execution needs a reviewed fexecve or restricted
         // Windows Job implementation before other platforms can be enabled.
-        return Ok(None);
+        Ok(None)
     }
     #[cfg(target_os = "linux")]
     {
