@@ -247,11 +247,14 @@ mod tests {
     use super::*;
 
     fn temporary_file(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "any-mcp-command-{}-{}-{name}",
-            std::process::id(),
-            getrandom::u64().unwrap_or(0)
-        ))
+        std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .join(format!(
+                "any-mcp-command-{}-{}-{name}",
+                std::process::id(),
+                getrandom::u64().unwrap_or(0)
+            ))
     }
 
     #[test]

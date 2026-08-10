@@ -2251,11 +2251,14 @@ mod tests {
             os::unix::fs::{PermissionsExt, symlink},
         };
 
-        let temporary = std::env::temp_dir().join(format!(
-            "any-mcp-config-{}-{}",
-            std::process::id(),
-            getrandom::u64().unwrap_or(0)
-        ));
+        let temporary = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .join(format!(
+                "any-mcp-config-{}-{}",
+                std::process::id(),
+                getrandom::u64().unwrap_or(0)
+            ));
         fs::create_dir(&temporary).expect("temporary directory");
         let file = temporary.join("config.toml");
         fs::write(&file, MINIMAL).expect("write config");

@@ -7154,8 +7154,10 @@ impl ArtifactPolicyFixture {
         if space_id.is_empty() || space_id.len() > 512 {
             return Err("artifact fixture requires an exact space identity".to_owned());
         }
-        let base =
-            std::env::temp_dir().join(format!("any-mcp-artifact-harness-{}", unique_suffix()));
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .map_err(|_| "resolve artifact acceptance temporary directory".to_owned())?
+            .join(format!("any-mcp-artifact-harness-{}", unique_suffix()));
         let import = base.join("import");
         let export = base.join("export");
         let staging = base.join("staging");

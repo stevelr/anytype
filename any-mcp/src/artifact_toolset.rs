@@ -4421,11 +4421,14 @@ mod tests {
 
     #[tokio::test]
     async fn document_predispatch_conflict_releases_reservation() {
-        let base = std::env::temp_dir().join(format!(
-            "any-mcp-document-predispatch-{}-{}",
-            std::process::id(),
-            getrandom::u64().unwrap_or(0)
-        ));
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .join(format!(
+                "any-mcp-document-predispatch-{}-{}",
+                std::process::id(),
+                getrandom::u64().unwrap_or(0)
+            ));
         let import = base.join("import");
         let export = base.join("export");
         std::fs::create_dir_all(&import).expect("create import fixture");

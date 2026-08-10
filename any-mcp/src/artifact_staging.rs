@@ -3758,7 +3758,10 @@ mod tests {
 
     async fn test_staging_with_limits(limits_toml: &str) -> TestStaging {
         let suffix = getrandom::u64().expect("test randomness");
-        let root = std::env::temp_dir().join(format!("any-mcp-stage-{suffix:016x}"));
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .join(format!("any-mcp-stage-{suffix:016x}"));
         std::fs::create_dir(&root).expect("create staging root");
         #[cfg(unix)]
         {
@@ -5490,7 +5493,10 @@ mod tests {
     #[tokio::test]
     async fn full_activation_recovers_retained_dispatched_evidence() {
         let suffix = getrandom::u64().expect("test randomness");
-        let root = std::env::temp_dir().join(format!("any-mcp-stage-{suffix:016x}"));
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .join(format!("any-mcp-stage-{suffix:016x}"));
         std::fs::create_dir(&root).expect("create staging root");
         #[cfg(unix)]
         {

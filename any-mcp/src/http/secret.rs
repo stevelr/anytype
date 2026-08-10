@@ -246,8 +246,11 @@ mod tests {
 
     #[test]
     fn rejects_directories() {
+        let temporary = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temporary directory");
         assert!(matches!(
-            load_err(&std::env::temp_dir()),
+            load_err(&temporary),
             StaticTokenError::NotRegularFile | StaticTokenError::Permissions
         ));
     }
