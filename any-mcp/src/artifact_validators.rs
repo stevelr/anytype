@@ -739,7 +739,43 @@ mod tests {
         ]);
         candidates
             .into_iter()
-            .find_map(|path| path.canonicalize().ok().filter(|target| target.is_file()))
+            .filter_map(|path| path.canonicalize().ok())
+            .find(|target| fixture_executable_is_activatable(target))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixture_executable_is_activatable(path: &std::path::Path) -> bool {
+        let Ok(mut file) = open_executable_no_follow(path) else {
+            return false;
+        };
+        let Ok(metadata) = file.metadata() else {
+            return false;
+        };
+        if metadata.len() > EXECUTABLE_BYTES || !safe_executable_metadata(&metadata) {
+            return false;
+        }
+        let mut magic = [0_u8; 4];
+        file.read(&mut magic)
+            .ok()
+            .is_some_and(|read| native_binary_magic(&magic[..read]))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fixture_discovery_rejects_a_user_writable_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let suffix = getrandom::u64().expect("random suffix");
+        let path =
+            std::env::temp_dir().join(format!("any-mcp-writable-validator-fixture-{suffix:016x}"));
+        let native = find_fixture_executable("true").expect("platform true executable");
+        std::fs::copy(native, &path).expect("copy native executable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("make fixture writable");
+
+        assert!(!fixture_executable_is_activatable(&path));
+
+        std::fs::remove_file(path).expect("remove writable fixture");
     }
 
     #[cfg(target_os = "linux")]
