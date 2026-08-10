@@ -87,6 +87,9 @@ use crate::{
     verify::{VerifyConfig, VerifyPolicy, resolve_verify, verify_available},
 };
 
+const ARCHIVED_PAGE_DEFAULT_LIMIT: u32 = 100;
+const ARCHIVED_COUNT_PAGE_SIZE: u32 = 500;
+
 /// Model type for spaces.
 ///
 /// Determines whether this is a regular workspace or a chat space.
@@ -779,6 +782,10 @@ pub struct DeleteAllArchivedResult {
 /// Request builder for listing archived objects in a space.
 ///
 /// Obtained via [`AnytypeClient::list_archived`].
+///
+/// The gRPC search response validates its `SetString` type IDs, but does not
+/// include the type key or display metadata needed for [`Object`] `r#type`.
+/// Archived results therefore leave that field as `None`.
 #[derive(Debug)]
 pub struct ListArchivedRequest<'a> {
     client: &'a AnytypeClient,
@@ -806,6 +813,9 @@ impl<'a> ListArchivedRequest<'a> {
     }
 
     /// Sets the pagination limit (max items per page).
+    ///
+    /// [`Self::list`] rejects values outside `1..=1000` before opening a gRPC
+    /// connection.
     #[must_use]
     pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
@@ -819,7 +829,7 @@ impl<'a> ListArchivedRequest<'a> {
         self
     }
 
-    /// Filters archived objects by type ids.
+    /// Filters archived objects by type IDs.
     #[must_use]
     pub fn types(mut self, type_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.type_ids = type_ids.into_iter().map(Into::into).collect();
@@ -829,16 +839,18 @@ impl<'a> ListArchivedRequest<'a> {
     /// Executes the archived-list request.
     pub async fn list(self) -> Result<PagedResult<Object>> {
         self.limits.validate_id(&self.space_id, "space_id")?;
-        {
-            return search_archived_objects(
-                self.client,
-                &self.space_id,
-                self.limit,
-                self.offset,
-                &self.type_ids,
-            )
-            .await;
+        validate_archived_page_input(self.limit, self.offset)?;
+        for type_id in &self.type_ids {
+            self.limits.validate_id(type_id, "type_id")?;
         }
+        search_archived_objects(
+            self.client,
+            &self.space_id,
+            self.limit,
+            self.offset,
+            &self.type_ids,
+        )
+        .await
     }
 }
 
@@ -1523,12 +1535,11 @@ impl AnytypeClient {
         let space_id = space_id.as_ref();
         let mut offset = 0_u32;
         let mut count = 0_u64;
-        const BATCH: u32 = 500;
 
         loop {
             let page = self
                 .list_archived(space_id)
-                .limit(BATCH)
+                .limit(ARCHIVED_COUNT_PAGE_SIZE)
                 .offset(offset)
                 .list()
                 .await?;
@@ -1537,10 +1548,46 @@ impl AnytypeClient {
             if !page.pagination.has_more || page.items.is_empty() {
                 break;
             }
-            offset = offset.saturating_add(BATCH);
+            offset = offset.saturating_add(ARCHIVED_COUNT_PAGE_SIZE);
         }
 
         Ok(count)
+    }
+
+    /// Counts archived objects in a space within an explicit page budget.
+    ///
+    /// Each page requests at most 500 rows. `max_pages` must be nonzero. The
+    /// method uses at most `2 * max_pages` gRPC requests because each page can
+    /// retry once with the legacy archive relation key. It returns an error when
+    /// the budget cannot prove that the final full page is exhausted, which
+    /// prevents a truncated count from being reported as exact.
+    pub async fn count_archived_bounded(
+        &self,
+        space_id: impl AsRef<str>,
+        max_pages: u32,
+    ) -> Result<u64> {
+        let space_id = space_id.as_ref();
+        self.config.limits.validate_id(space_id, "space_id")?;
+        if max_pages == 0 {
+            return Err(archived_validation_error(
+                "archived count page budget must be at least one",
+            ));
+        }
+
+        let mut state = ArchivedCountState::new(max_pages);
+
+        loop {
+            let page = self
+                .list_archived(space_id)
+                .limit(ARCHIVED_COUNT_PAGE_SIZE)
+                .offset(state.offset)
+                .list()
+                .await?;
+
+            if let Some(count) = state.record_page(page.items.len())? {
+                return Ok(count);
+            }
+        }
     }
 
     /// Permanently deletes archived objects by object id in batches of 200.
@@ -1723,7 +1770,8 @@ async fn search_archived_objects(
     offset: Option<u32>,
     type_ids: &[String],
 ) -> Result<PagedResult<Object>> {
-    let limit = limit.unwrap_or(100);
+    validate_archived_page_input(limit, offset)?;
+    let limit = limit.unwrap_or(ARCHIVED_PAGE_DEFAULT_LIMIT);
     let offset = offset.unwrap_or(0);
 
     // Some anytype-heart builds use "isArchived", others may expose "archived".
@@ -1739,20 +1787,26 @@ async fn search_archived_objects(
     };
 
     let result_count = response.results.len();
-    let items: Vec<Object> = response
+    validate_archived_page_result_count(result_count, limit)?;
+    let items = response
         .results
         .into_iter()
-        .filter_map(|result| archived_object_from_search_result(space_id, result))
-        .collect();
+        .map(|result| archived_object_from_search_result(space_id, result))
+        .collect::<Result<Vec<_>>>()?;
 
     let has_more = result_count == limit as usize;
+    let total = (offset as usize)
+        .checked_add(result_count)
+        .ok_or_else(|| archived_page_error("archived search pagination total overflow"))?;
     let response = PaginatedResponse {
         items,
         pagination: PaginationMeta {
             has_more,
             limit,
             offset,
-            total: offset as usize + result_count,
+            // SearchWithMeta does not expose upstream pagination metadata. This
+            // is the number of rows observed through this page, not a total.
+            total,
         },
     };
     Ok(PagedResult::from_response(response))
@@ -1861,15 +1915,17 @@ fn dataview_filter_type_in(type_ids: &[String]) -> model::block::content::datavi
 fn archived_object_from_search_result(
     space_id: &str,
     result: model::search::Result,
-) -> Option<Object> {
+) -> Result<Object> {
     let details = result.details.unwrap_or_default();
     let id = normalized_search_result_id(result.object_id, &details)?;
+    crate::validation::ValidationLimits::default()
+        .validate_id(&id, "archived search result object_id")?;
     let archived = struct_bool_field(&details, "isArchived")
         .or_else(|| struct_bool_field(&details, "archived"))
         .unwrap_or(true);
     let name = struct_string_field(&details, "name");
 
-    Some(Object {
+    Ok(Object {
         archived,
         icon: None,
         id,
@@ -1880,7 +1936,7 @@ fn archived_object_from_search_result(
         properties: Vec::new(),
         snippet: None,
         space_id: space_id.to_string(),
-        r#type: None,
+        r#type: archived_type_from_search_details(&details)?,
     })
 }
 
@@ -1906,15 +1962,166 @@ fn struct_string_field(details: &prost_types::Struct, key: &str) -> Option<Strin
         })
 }
 
-fn normalized_search_result_id(object_id: String, details: &prost_types::Struct) -> Option<String> {
+fn normalized_search_result_id(object_id: String, details: &prost_types::Struct) -> Result<String> {
     if !object_id.is_empty() {
-        return Some(object_id);
+        return Ok(object_id);
     }
-    let fallback = struct_string_field(details, "id")?;
+    let fallback = struct_string_field(details, "id")
+        .ok_or_else(|| archived_page_error("archived search result has no object id"))?;
     if fallback.is_empty() {
-        None
+        Err(archived_page_error(
+            "archived search result has an empty object id",
+        ))
     } else {
-        Some(fallback)
+        Ok(fallback)
+    }
+}
+
+fn archived_type_from_search_details(details: &prost_types::Struct) -> Result<Option<Type>> {
+    let Some(type_value) = details.fields.get("type") else {
+        return Ok(None);
+    };
+    let id = archived_type_id_from_value(type_value)?;
+    crate::validation::ValidationLimits::default()
+        .validate_id(&id, "archived search type metadata id")?;
+
+    // SearchWithMeta exposes the type relation as a SetString containing only
+    // the type ID. A Type additionally requires a valid key, so returning a
+    // partial Type would violate the public Object contract.
+    Ok(None)
+}
+
+fn archived_type_id_from_value(value: &Value) -> Result<String> {
+    let Some(kind) = value.kind.as_ref() else {
+        return Err(archived_page_error(
+            "archived search type metadata has no value",
+        ));
+    };
+    let type_id = match kind {
+        prost_types::value::Kind::ListValue(values) => match values.values.as_slice() {
+            [
+                Value {
+                    kind: Some(prost_types::value::Kind::StringValue(type_id)),
+                },
+            ] => type_id.clone(),
+            _ => {
+                return Err(archived_page_error(
+                    "archived search type metadata must contain exactly one type id",
+                ));
+            }
+        },
+        // Retain compatibility with heart versions that encode the singleton
+        // SetString relation directly rather than as a protobuf ListValue.
+        prost_types::value::Kind::StringValue(type_id) => type_id.clone(),
+        _ => {
+            return Err(archived_page_error(
+                "archived search type metadata has an invalid value",
+            ));
+        }
+    };
+    if type_id.is_empty() {
+        return Err(archived_page_error(
+            "archived search type metadata has an empty type id",
+        ));
+    }
+    Ok(type_id)
+}
+
+fn validate_archived_page_input(limit: Option<u32>, offset: Option<u32>) -> Result<()> {
+    if limit.is_some_and(|value| value == 0 || value > crate::config::MAX_PAGINATION_LIMIT) {
+        return Err(archived_validation_error(&format!(
+            "archived search limit must be between 1 and {}",
+            crate::config::MAX_PAGINATION_LIMIT
+        )));
+    }
+    if offset.is_some_and(|value| value > i32::MAX as u32) {
+        return Err(archived_validation_error(
+            "archived search offset exceeds the gRPC i32 range",
+        ));
+    }
+    Ok(())
+}
+
+fn archived_count_continuation_offset(
+    offset: u32,
+    returned: usize,
+    page_size: u32,
+    remaining_pages: u32,
+) -> Result<Option<u32>> {
+    validate_archived_page_result_count(returned, page_size)?;
+    if returned < page_size as usize {
+        return Ok(None);
+    }
+    if remaining_pages == 0 {
+        return Err(archived_page_error(
+            "archived count page budget cannot prove that a full final page is exhausted",
+        ));
+    }
+    offset
+        .checked_add(page_size)
+        .map(Some)
+        .ok_or_else(|| archived_page_error("archived count offset overflow"))
+}
+
+#[derive(Debug)]
+struct ArchivedCountState {
+    count: u64,
+    offset: u32,
+    logical_pages: u32,
+    max_pages: u32,
+}
+
+impl ArchivedCountState {
+    fn new(max_pages: u32) -> Self {
+        Self {
+            count: 0,
+            offset: 0,
+            logical_pages: 0,
+            max_pages,
+        }
+    }
+
+    fn record_page(&mut self, returned: usize) -> Result<Option<u64>> {
+        if self.logical_pages >= self.max_pages {
+            return Err(archived_page_error(
+                "archived count page budget was exhausted before reading a page",
+            ));
+        }
+        self.count = self.count.saturating_add(returned as u64);
+        self.logical_pages += 1;
+        let remaining_pages = self.max_pages - self.logical_pages;
+        let Some(next_offset) = archived_count_continuation_offset(
+            self.offset,
+            returned,
+            ARCHIVED_COUNT_PAGE_SIZE,
+            remaining_pages,
+        )?
+        else {
+            return Ok(Some(self.count));
+        };
+        self.offset = next_offset;
+        Ok(None)
+    }
+}
+
+fn validate_archived_page_result_count(result_count: usize, limit: u32) -> Result<()> {
+    if result_count > limit as usize {
+        return Err(archived_page_error(
+            "archived search returned more rows than its requested page limit",
+        ));
+    }
+    Ok(())
+}
+
+fn archived_page_error(message: &str) -> AnytypeError {
+    AnytypeError::Other {
+        message: message.to_owned(),
+    }
+}
+
+fn archived_validation_error(message: &str) -> AnytypeError {
+    AnytypeError::Validation {
+        message: message.to_owned(),
     }
 }
 
@@ -2183,5 +2390,354 @@ mod tests {
             .expect_err("mismatched space identity");
         assert!(matches!(error, AnytypeError::Other { .. }));
         assert!(!error.to_string().contains("different-space-id"));
+    }
+
+    const ARCHIVED_TEST_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y";
+
+    fn string_value(value: &str) -> Value {
+        Value {
+            kind: Some(prost_types::value::Kind::StringValue(value.to_owned())),
+        }
+    }
+
+    #[test]
+    fn archived_page_input_rejects_invalid_boundaries() {
+        for limit in [Some(0), Some(crate::config::MAX_PAGINATION_LIMIT + 1)] {
+            assert!(matches!(
+                validate_archived_page_input(limit, None),
+                Err(AnytypeError::Validation { .. })
+            ));
+        }
+        assert!(matches!(
+            validate_archived_page_input(None, Some(i32::MAX as u32 + 1)),
+            Err(AnytypeError::Validation { .. })
+        ));
+        assert!(
+            validate_archived_page_input(
+                Some(crate::config::MAX_PAGINATION_LIMIT),
+                Some(i32::MAX as u32)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn archived_page_result_count_rejects_rows_beyond_the_requested_limit() {
+        assert!(validate_archived_page_result_count(500, 500).is_ok());
+        assert!(validate_archived_page_result_count(501, 500).is_err());
+    }
+
+    #[test]
+    fn archived_count_requires_a_continuation_probe_after_a_full_page() {
+        assert_eq!(
+            archived_count_continuation_offset(0, 0, 500, 0)
+                .expect("an empty page proves exhaustion"),
+            None
+        );
+        assert_eq!(
+            archived_count_continuation_offset(0, 499, 500, 0)
+                .expect("short page proves exhaustion"),
+            None
+        );
+        assert_eq!(
+            archived_count_continuation_offset(0, 500, 500, 1)
+                .expect("remaining page can probe a full page"),
+            Some(500)
+        );
+        assert!(matches!(
+            archived_count_continuation_offset(0, 500, 500, 0),
+            Err(AnytypeError::Other { .. })
+        ));
+        assert!(matches!(
+            archived_count_continuation_offset(500, 500, 500, 0),
+            Err(AnytypeError::Other { .. })
+        ));
+    }
+
+    #[derive(Clone, Copy)]
+    struct ArchivedCountScriptStep {
+        returned: usize,
+        used_relation_fallback: bool,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ArchivedCountScriptResult {
+        count: u64,
+        logical_pages: u32,
+        upstream_requests: u32,
+    }
+
+    fn run_archived_count_script(
+        max_pages: u32,
+        steps: &[ArchivedCountScriptStep],
+    ) -> Result<ArchivedCountScriptResult> {
+        let mut state = ArchivedCountState::new(max_pages);
+        let mut upstream_requests = 0;
+        for step in steps {
+            upstream_requests += if step.used_relation_fallback { 2 } else { 1 };
+            if let Some(count) = state.record_page(step.returned)? {
+                return Ok(ArchivedCountScriptResult {
+                    count,
+                    logical_pages: state.logical_pages,
+                    upstream_requests,
+                });
+            }
+        }
+        Err(archived_page_error(
+            "archived count script ended before it proved exhaustion",
+        ))
+    }
+
+    #[test]
+    fn archived_count_state_machine_proves_exact_counts_within_request_caps() {
+        let zero = run_archived_count_script(
+            1,
+            &[ArchivedCountScriptStep {
+                returned: 0,
+                used_relation_fallback: false,
+            }],
+        )
+        .expect("empty first page is exact");
+        assert_eq!(
+            zero,
+            ArchivedCountScriptResult {
+                count: 0,
+                logical_pages: 1,
+                upstream_requests: 1,
+            }
+        );
+
+        let partial = run_archived_count_script(
+            1,
+            &[ArchivedCountScriptStep {
+                returned: 499,
+                used_relation_fallback: true,
+            }],
+        )
+        .expect("short first page is exact");
+        assert_eq!(partial.count, 499);
+        assert_eq!(partial.logical_pages, 1);
+        assert_eq!(partial.upstream_requests, 2);
+
+        let exact_500 = run_archived_count_script(
+            2,
+            &[
+                ArchivedCountScriptStep {
+                    returned: 500,
+                    used_relation_fallback: false,
+                },
+                ArchivedCountScriptStep {
+                    returned: 0,
+                    used_relation_fallback: true,
+                },
+            ],
+        )
+        .expect("empty continuation probe proves an exact full page");
+        assert_eq!(exact_500.count, 500);
+        assert_eq!(exact_500.logical_pages, 2);
+        assert_eq!(exact_500.upstream_requests, 3);
+
+        let exact_1000 = run_archived_count_script(
+            3,
+            &[
+                ArchivedCountScriptStep {
+                    returned: 500,
+                    used_relation_fallback: true,
+                },
+                ArchivedCountScriptStep {
+                    returned: 500,
+                    used_relation_fallback: false,
+                },
+                ArchivedCountScriptStep {
+                    returned: 0,
+                    used_relation_fallback: true,
+                },
+            ],
+        )
+        .expect("second continuation probe proves an exact multiple");
+        assert_eq!(exact_1000.count, 1000);
+        assert_eq!(exact_1000.logical_pages, 3);
+        assert_eq!(exact_1000.upstream_requests, 5);
+        assert!(exact_1000.upstream_requests <= 2 * exact_1000.logical_pages);
+    }
+
+    #[test]
+    fn archived_count_state_machine_rejects_bad_pages_and_unproven_budgets() {
+        assert!(
+            run_archived_count_script(
+                1,
+                &[ArchivedCountScriptStep {
+                    returned: 501,
+                    used_relation_fallback: false,
+                }],
+            )
+            .is_err()
+        );
+        assert!(
+            run_archived_count_script(
+                1,
+                &[ArchivedCountScriptStep {
+                    returned: 500,
+                    used_relation_fallback: false,
+                }],
+            )
+            .is_err()
+        );
+        assert!(
+            run_archived_count_script(
+                2,
+                &[
+                    ArchivedCountScriptStep {
+                        returned: 500,
+                        used_relation_fallback: true,
+                    },
+                    ArchivedCountScriptStep {
+                        returned: 500,
+                        used_relation_fallback: true,
+                    },
+                ],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn archived_search_request_preserves_page_and_type_filters() {
+        let request = archived_search_request(
+            ARCHIVED_TEST_ID,
+            "isArchived",
+            500,
+            12,
+            &[ARCHIVED_TEST_ID.to_owned()],
+        );
+
+        assert_eq!(request.limit, 500);
+        assert_eq!(request.offset, 12);
+        assert_eq!(request.filters.len(), 2);
+        assert_eq!(request.filters[0].relation_key, "isArchived");
+        assert_eq!(request.filters[1].relation_key, "type");
+    }
+
+    fn set_string_value(values: &[&str]) -> Value {
+        Value {
+            kind: Some(prost_types::value::Kind::ListValue(ListValue {
+                values: values.iter().map(|value| string_value(value)).collect(),
+            })),
+        }
+    }
+
+    #[test]
+    fn archived_search_result_validates_but_omits_set_string_type_metadata() {
+        let details = prost_types::Struct {
+            fields: BTreeMap::from([("type".to_owned(), set_string_value(&[ARCHIVED_TEST_ID]))]),
+        };
+        let object = archived_object_from_search_result(
+            ARCHIVED_TEST_ID,
+            model::search::Result {
+                object_id: ARCHIVED_TEST_ID.to_owned(),
+                details: Some(details),
+                meta: Vec::new(),
+            },
+        )
+        .expect("the real SetString type relation must be validated");
+
+        assert!(object.r#type.is_none());
+    }
+
+    #[test]
+    fn archived_search_result_validates_but_omits_scalar_set_string_type_metadata() {
+        let details = prost_types::Struct {
+            fields: BTreeMap::from([("type".to_owned(), string_value(ARCHIVED_TEST_ID))]),
+        };
+        let object = archived_object_from_search_result(
+            ARCHIVED_TEST_ID,
+            model::search::Result {
+                object_id: ARCHIVED_TEST_ID.to_owned(),
+                details: Some(details),
+                meta: Vec::new(),
+            },
+        )
+        .expect("the scalar SetString type relation must be validated");
+
+        assert!(object.r#type.is_none());
+    }
+
+    #[test]
+    fn archived_search_result_rejects_malformed_set_string_type_ids() {
+        let details = prost_types::Struct {
+            fields: BTreeMap::from([("type".to_owned(), set_string_value(&["not-an-object-id"]))]),
+        };
+
+        assert!(
+            archived_object_from_search_result(
+                ARCHIVED_TEST_ID,
+                model::search::Result {
+                    object_id: ARCHIVED_TEST_ID.to_owned(),
+                    details: Some(details),
+                    meta: Vec::new(),
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn archived_search_result_rejects_non_singleton_set_string_type_ids() {
+        let details = prost_types::Struct {
+            fields: BTreeMap::from([(
+                "type".to_owned(),
+                set_string_value(&[ARCHIVED_TEST_ID, ARCHIVED_TEST_ID]),
+            )]),
+        };
+
+        assert!(
+            archived_object_from_search_result(
+                ARCHIVED_TEST_ID,
+                model::search::Result {
+                    object_id: ARCHIVED_TEST_ID.to_owned(),
+                    details: Some(details),
+                    meta: Vec::new(),
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn archived_search_result_rejects_missing_or_malformed_ids() {
+        let missing = archived_object_from_search_result(
+            ARCHIVED_TEST_ID,
+            model::search::Result {
+                object_id: String::new(),
+                details: None,
+                meta: Vec::new(),
+            },
+        );
+        assert!(missing.is_err());
+
+        let malformed = archived_object_from_search_result(
+            ARCHIVED_TEST_ID,
+            model::search::Result {
+                object_id: "not-an-object-id".to_owned(),
+                details: None,
+                meta: Vec::new(),
+            },
+        );
+        assert!(malformed.is_err());
+    }
+
+    #[tokio::test]
+    async fn archived_count_rejects_a_zero_page_budget_without_upstream_work() {
+        let client = AnytypeClient::new("archived-count-boundary-test")
+            .expect("client construction must not require a connection");
+        let error = client
+            .count_archived_bounded(ARCHIVED_TEST_ID, 0)
+            .await
+            .expect_err("zero page budget must fail before opening a connection");
+
+        assert!(matches!(
+            error,
+            AnytypeError::Validation { ref message } if message.contains("page budget")
+        ));
     }
 }

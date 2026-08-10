@@ -213,6 +213,33 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+    use crate::test_util::scripted_http::{
+        ScriptedHttpContentType, ScriptedHttpFixture, ScriptedHttpResponse,
+    };
+
+    const EMPTY_PAGE: &str =
+        r#"{"data":[],"pagination":{"has_more":false,"limit":25,"offset":3,"total":0}}"#;
+
+    fn scripted_client(address: std::net::SocketAddr) -> AnytypeClient {
+        let mut config = ClientConfig::default().app_name("search-wire-shape");
+        config.base_url = Some(format!("http://{address}"));
+        config.keystore = Some("env".to_owned());
+        let client = AnytypeClient::with_config(config).expect("create scripted search client");
+        client.set_api_key(HttpCredentials::new("fixture-token"));
+        client
+    }
+
+    async fn scripted_search_client() -> (AnytypeClient, ScriptedHttpFixture) {
+        let fixture = ScriptedHttpFixture::start(vec![ScriptedHttpResponse::new(
+            reqwest::StatusCode::OK,
+            ScriptedHttpContentType::Json,
+            EMPTY_PAGE,
+        )])
+        .await
+        .expect("start scripted search fixture");
+        let client = scripted_client(fixture.address());
+        (client, fixture)
+    }
 
     fn sentinel_client(address: std::net::SocketAddr) -> AnytypeClient {
         let mut config = ClientConfig::default().app_name("search-limit-validation");
@@ -253,6 +280,103 @@ mod tests {
                 .await
                 .is_err(),
             "invalid search limits must not open a connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_search_omits_body_fields_and_pagination_parameters() {
+        let (client, fixture) = scripted_search_client().await;
+
+        client
+            .search_global()
+            .execute()
+            .await
+            .expect("default scripted search response");
+
+        let requests = fixture.finish().await.expect("default search request");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method(), "POST");
+        assert_eq!(requests[0].path(), "/v1/search");
+        assert_eq!(requests[0].body(), b"{}");
+    }
+
+    #[tokio::test]
+    async fn search_forwards_nested_filters_sort_and_pagination_without_body_defaults() {
+        let (client, fixture) = scripted_search_client().await;
+        let filters = FilterExpression::and(
+            vec![Filter::text_contains("name", "draft")],
+            vec![FilterExpression::or(
+                vec![
+                    Filter::select_in("status", ["open", "blocked"]),
+                    Filter::number_greater("priority", 2),
+                ],
+                Vec::new(),
+            )],
+        );
+
+        client
+            .search_global()
+            .text("quarterly plan")
+            .types(["page", "task"])
+            .sort_desc("last_modified_date")
+            .filters(filters)
+            .limit(25)
+            .offset(3)
+            .execute()
+            .await
+            .expect("scripted search response");
+
+        let requests = fixture.finish().await.expect("populated search request");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method(), "POST");
+        assert_eq!(requests[0].path(), "/v1/search?limit=25&offset=3");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(requests[0].body())
+                .expect("search request body is JSON"),
+            serde_json::json!({
+                "query": "quarterly plan",
+                "types": ["page", "task"],
+                "sort": {"direction": "desc", "property_key": "last_modified_date"},
+                "filters": {
+                    "conditions": [
+                        {"condition": "contains", "property_key": "name", "text": "draft"}
+                    ],
+                    "filters": [{
+                        "conditions": [
+                            {"condition": "in", "property_key": "status", "select": "open,blocked"},
+                            {"condition": "gt", "property_key": "priority", "number": 2}
+                        ],
+                        "operator": "or"
+                    }],
+                    "operator": "and"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_space_id_fails_before_http() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind malformed space sentinel");
+        let address = listener
+            .local_addr()
+            .expect("malformed space sentinel address");
+        let client = sentinel_client(address);
+
+        let error = client
+            .search_in("")
+            .execute()
+            .await
+            .expect_err("empty space ID must fail validation");
+        assert!(matches!(error, AnytypeError::Validation { .. }));
+        assert_eq!(client.http_metrics().logical_operations, 0);
+        assert_eq!(client.http_metrics().physical_attempts, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "malformed space ID must not open a connection"
         );
     }
 }

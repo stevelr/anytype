@@ -52,6 +52,20 @@ target = "test_chat_stream"
 test = "rest_chat_stream_receives_initial_message"
 serial_group = "disposable_anytype_api"
 
+# Protected credentials authorize a prefix-owned disposable space. The harness
+# removes each registered chat and message, then independently proves absence.
+[[required]]
+target = "test_chats"
+test = "direct_grpc_chat_listing_space_chat_and_edit_text_read_back"
+serial_group = "disposable_anytype_api"
+
+# The two chat subscriptions share protected stream credentials. The harness
+# verifies registered-resource cleanup before deleting the disposable space.
+[[required]]
+target = "test_chat_stream"
+test = "chat_stream_selectively_unsubscribes_one_of_two_chats"
+serial_group = "disposable_anytype_api"
+
 [[required]]
 target = "test_chat_prerequisites"
 test = "test_rest_chat_timestamp_history_and_edit_prerequisites"

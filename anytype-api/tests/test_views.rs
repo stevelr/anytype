@@ -209,6 +209,109 @@ async fn view_list_objects_with_retry(
     })
 }
 
+async fn second_view_continuation_pages(
+    ctx: &anytype::test_util::TestContext,
+    collection_id: &str,
+    view_id: &str,
+    expected_object_ids: &BTreeSet<String>,
+) -> TestResult<()> {
+    for attempt in 0..20 {
+        let mut observed_object_ids = BTreeSet::new();
+        let mut complete = true;
+        for offset in 0_u32..3 {
+            let page = match ctx
+                .client
+                .view_list_objects(&ctx.space_id, collection_id)
+                .view(view_id)
+                .limit(1)
+                .offset(offset)
+                .list()
+                .await
+            {
+                Ok(page) => page,
+                Err(AnytypeError::NotFound { .. }) => {
+                    complete = false;
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let Some(object) = page.items.first() else {
+                complete = false;
+                break;
+            };
+            if page.pagination.offset != offset
+                || page.pagination.total != expected_object_ids.len()
+                || page.pagination.has_more != (offset < 2)
+                || page.items.len() != 1
+                || object.space_id != ctx.space_id
+                || object.archived
+                || !expected_object_ids.contains(&object.id)
+                || !observed_object_ids.insert(object.id.clone())
+            {
+                complete = false;
+                break;
+            }
+        }
+        if complete && observed_object_ids == *expected_object_ids {
+            return Ok(());
+        }
+        if attempt < 19 {
+            sleep(Duration::from_millis(250)).await;
+        }
+    }
+    Err(TestError::Assertion {
+        message: "second-view continuation evidence did not converge".to_owned(),
+    })
+}
+
+async fn exact_view_members(
+    ctx: &anytype::test_util::TestContext,
+    collection_id: &str,
+    view_id: &str,
+    expected_object_ids: &BTreeSet<String>,
+) -> TestResult<()> {
+    for attempt in 0..20 {
+        let page = match ctx
+            .client
+            .view_list_objects(&ctx.space_id, collection_id)
+            .view(view_id)
+            .limit(100)
+            .offset(0)
+            .list()
+            .await
+        {
+            Ok(page) => page,
+            Err(AnytypeError::NotFound { .. }) => {
+                if attempt < 19 {
+                    sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let object_ids = page
+            .items
+            .iter()
+            .map(|object| object.id.clone())
+            .collect::<BTreeSet<_>>();
+        if page.pagination.offset == 0
+            && !page.pagination.has_more
+            && page.pagination.total == expected_object_ids.len()
+            && page.items.len() == object_ids.len()
+            && object_ids == *expected_object_ids
+        {
+            return Ok(());
+        }
+        if attempt < 19 {
+            sleep(Duration::from_millis(250)).await;
+        }
+    }
+    Err(TestError::Assertion {
+        message: "exact view membership evidence did not converge".to_owned(),
+    })
+}
+
 struct OwnedCollectionAndSet {
     collection: Object,
     set: Object,
@@ -480,27 +583,127 @@ async fn test_view_list_objects_collection_and_set() {
             callback_flag.store(true, Ordering::SeqCst);
             Box::pin(async move {
                 let fixtures = create_owned_collection_and_set(&ctx).await?;
+                let second_view = ctx
+                    .create_collection_view_fixture(
+                        &fixtures.collection.id,
+                        format!("Owned Collection Second View {}", unique_suffix()),
+                    )
+                    .await?;
+                let selected_member_name =
+                    format!("Owned Collection Second View Member {}", unique_suffix());
+                let mut selected_members = Vec::with_capacity(3);
+                for _ in 0..3 {
+                    let member = retry_definitive_rate_limit(
+                        "second-view continuation member setup",
+                        || async {
+                            ctx.client
+                                .new_object(&ctx.space_id, "page")
+                                .name(&selected_member_name)
+                                .no_verify()
+                                .create()
+                                .await
+                        },
+                    )
+                    .await?;
+                    ctx.register_object(&member.id);
+                    selected_members.push(member);
+                }
+                let default_only_member = retry_definitive_rate_limit(
+                    "second-view default-only member setup",
+                    || async {
+                        ctx.client
+                            .new_object(&ctx.space_id, "page")
+                            .name(format!(
+                                "Owned Collection Default-only Member {}",
+                                unique_suffix()
+                            ))
+                            .no_verify()
+                            .create()
+                            .await
+                    },
+                )
+                .await?;
+                ctx.register_object(&default_only_member.id);
+                let all_member_ids = selected_members
+                    .iter()
+                    .map(|member| member.id.clone())
+                    .chain(std::iter::once(default_only_member.id.clone()))
+                    .collect::<BTreeSet<_>>();
+                let selected_member_ids = selected_members
+                    .iter()
+                    .map(|member| member.id.clone())
+                    .collect::<BTreeSet<_>>();
+                if selected_member_ids.len() != selected_members.len()
+                    || all_member_ids.len() != selected_members.len() + 1
+                {
+                    return Err(TestError::Assertion {
+                        message: "cleanup-owned second-view members are not unique".to_owned(),
+                    });
+                }
                 ctx.client
                     .view_add_objects(
                         &ctx.space_id,
                         &fixtures.collection.id,
-                        [&fixtures.source.id],
+                        all_member_ids.iter().cloned(),
                     )
                     .await?;
 
                 let collection_views = list_views_with_retry(&ctx, &fixtures.collection.id).await?;
-                let collection_view =
-                    collection_views
-                        .items
-                        .first()
-                        .ok_or_else(|| TestError::Assertion {
-                            message: "cleanup-owned collection has no default view".to_owned(),
-                        })?;
-                wait_for_owned_view_member(
+                let second_views = collection_views
+                    .items
+                    .iter()
+                    .filter(|view| {
+                        view.id == second_view.id
+                            && view.name.as_deref() == Some(second_view.name.as_str())
+                    })
+                    .collect::<Vec<_>>();
+                if second_views.len() != 1 {
+                    return Err(TestError::Assertion {
+                        message: "cleanup-owned second view identity is not exact".to_owned(),
+                    });
+                }
+                let default_views = collection_views
+                    .items
+                    .iter()
+                    .filter(|view| view.id != second_view.id)
+                    .collect::<Vec<_>>();
+                let [default_view] = default_views.as_slice() else {
+                    return Err(TestError::Assertion {
+                        message: "cleanup-owned collection has no exact default view".to_owned(),
+                    });
+                };
+                exact_view_members(
                     &ctx,
                     &fixtures.collection.id,
-                    &collection_view.id,
-                    &fixtures.source.id,
+                    &second_view.id,
+                    &all_member_ids,
+                )
+                .await?;
+                exact_view_members(
+                    &ctx,
+                    &fixtures.collection.id,
+                    &default_view.id,
+                    &all_member_ids,
+                )
+                .await?;
+                ctx.add_collection_name_filter_fixture(
+                    &fixtures.collection.id,
+                    &second_view.id,
+                    &selected_member_name,
+                )
+                .await?;
+                second_view_continuation_pages(
+                    &ctx,
+                    &fixtures.collection.id,
+                    &second_view.id,
+                    &selected_member_ids,
+                )
+                .await?;
+                exact_view_members(
+                    &ctx,
+                    &fixtures.collection.id,
+                    &default_view.id,
+                    &all_member_ids,
                 )
                 .await?;
 

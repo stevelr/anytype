@@ -43,13 +43,22 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add `count_archived_bounded`, which returns an exact archived-object count
+  only when exhaustion is proven within the caller's logical-page budget.
+  Preserve exhaustive `count_archived` behavior, validate archive pagination
+  evidence, and avoid constructing partial `Type` values from ID-only Heart
+  details.
+- Add direct coverage for authentication transitions, paged lookup helpers,
+  search/filter wire shapes, legacy gRPC file downloads, URL uploads, direct
+  chat reads and edits, selective chat unsubscription, and second-view
+  continuation. The protected live manifest now owns 19 required cases.
 - Add a reusable `scripted-http-fixture` feature for downstream contract tests.
   Its loopback server applies fixed ceilings to the finite response sequence
   and captured request methods, paths, and bodies, while errors and debug output
   retain only payload-free categories and sizes. The chat history/edit sequence
   fixture exercises the shared boundary.
 - Add a closed ignored-test inventory and protected disposable live gate. The
-  manifest separates 17 required cleanup-owned tests, three scheduled
+  manifest separates 19 required cleanup-owned tests, three scheduled
   characterization probes, and two excluded ambient or manual probes. Reproduce
   the offline inventory with:
 

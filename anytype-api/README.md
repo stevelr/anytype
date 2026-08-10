@@ -358,11 +358,25 @@ use anytype::prelude::*;
 let count = client.count_archived(space_id).await?;
 println!("archived before delete: {count}");
 
+// Use a page budget when exhaustive work is not acceptable. The budget
+// includes the empty continuation probe needed to prove an exact full page.
+let bounded_count = client.count_archived_bounded(space_id, 3).await?;
+println!("exact archived count within three logical pages: {bounded_count}");
+
 let deleted = client.delete_all_archived(space_id).await?;
 println!("deleted archived objects: {deleted}");
 # Ok(())
 # }
 ```
+
+`count_archived` retains its exhaustive behavior. `count_archived_bounded`
+returns a count only after proving exhaustion within `max_pages`; each logical
+page can make two gRPC requests while probing the supported archive-relation
+key, and an exact multiple of 500 rows needs one additional empty probe page.
+Offset scans assume archive membership and ordering remain stable for the
+duration of the count. The archived search adapter validates ID-only type
+metadata but cannot construct the complete key required by `Type`, so listed
+archived objects leave `r#type` unset instead of constructing a partial type.
 
 ## Files
 
@@ -1047,7 +1061,7 @@ cargo build
 
 The maintained [HTTP/gRPC coverage inventory](docs/api-test-coverage.md)
 separates direct unit and live coverage from cross-crate integration evidence
-and records the bounded remaining gap candidates.
+and records the remaining blocked or deferred gaps.
 
 Set environment flags for unit and integration tests. You'll also need a
 running Anytype server (CLI or desktop).

@@ -16,7 +16,169 @@ use anytype::{
     prelude::AnytypeError,
     test_util::{TestError, TestResult, unique_suffix, with_test_context},
 };
-use tokio::time::timeout;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    task::JoinHandle,
+    time::timeout,
+};
+
+const FILE_TRANSFER_BUDGET: Duration = Duration::from_secs(30);
+const LOOPBACK_HEADER_LIMIT: usize = 16 * 1024;
+
+struct LoopbackFileSource {
+    url: String,
+    server: Option<JoinHandle<TestResult<LoopbackFileRequest>>>,
+}
+
+struct LoopbackFileRequest {
+    method: String,
+    target: String,
+}
+
+impl LoopbackFileSource {
+    async fn start(path: &str, body: Vec<u8>) -> TestResult<Self> {
+        let listener =
+            TcpListener::bind("127.0.0.1:0")
+                .await
+                .map_err(|error| TestError::Config {
+                    message: format!("failed to bind loopback URL source: {error}"),
+                })?;
+        let address = listener.local_addr().map_err(|error| TestError::Config {
+            message: format!("failed to read loopback URL source address: {error}"),
+        })?;
+        let target = format!("/{path}");
+        let expected_target = target.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = timeout(FILE_TRANSFER_BUDGET, listener.accept())
+                .await
+                .map_err(|_| TestError::Config {
+                    message: "loopback URL source did not receive a request before its deadline"
+                        .to_string(),
+                })?
+                .map_err(|error| TestError::Config {
+                    message: format!("loopback URL source could not accept a request: {error}"),
+                })?;
+
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            let header_end = loop {
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+                if request.len() >= LOOPBACK_HEADER_LIMIT {
+                    return Err(TestError::Config {
+                        message: format!(
+                            "loopback URL source request headers exceeded {LOOPBACK_HEADER_LIMIT} bytes"
+                        ),
+                    });
+                }
+                let read = timeout(FILE_TRANSFER_BUDGET, stream.read(&mut chunk))
+                    .await
+                    .map_err(|_| TestError::Config {
+                        message: "loopback URL source request read exceeded its deadline"
+                            .to_string(),
+                    })?
+                    .map_err(|error| TestError::Config {
+                        message: format!("loopback URL source request read failed: {error}"),
+                    })?;
+                if read == 0 {
+                    return Err(TestError::Config {
+                        message: "loopback URL source peer closed before request headers"
+                            .to_string(),
+                    });
+                }
+                request.extend_from_slice(&chunk[..read]);
+            };
+            let header =
+                std::str::from_utf8(&request[..header_end]).map_err(|error| TestError::Config {
+                    message: format!("loopback URL source request headers were not UTF-8: {error}"),
+                })?;
+            let request_line = header.lines().next().ok_or_else(|| TestError::Config {
+                message: "loopback URL source request had no request line".to_string(),
+            })?;
+            let mut parts = request_line.split_ascii_whitespace();
+            let method = parts.next().ok_or_else(|| TestError::Config {
+                message: "loopback URL source request had no method".to_string(),
+            })?;
+            let target = parts.next().ok_or_else(|| TestError::Config {
+                message: "loopback URL source request had no target".to_string(),
+            })?;
+            let version = parts.next().ok_or_else(|| TestError::Config {
+                message: "loopback URL source request had no HTTP version".to_string(),
+            })?;
+            if parts.next().is_some() || !version.starts_with("HTTP/") {
+                return Err(TestError::Config {
+                    message: "loopback URL source request line was malformed".to_string(),
+                });
+            }
+            if method != "GET" || target != expected_target {
+                return Err(TestError::Config {
+                    message: format!(
+                        "loopback URL source expected GET {expected_target}, received {method} {target}"
+                    ),
+                });
+            }
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            timeout(FILE_TRANSFER_BUDGET, async {
+                stream.write_all(response.as_bytes()).await?;
+                stream.write_all(&body).await?;
+                stream.shutdown().await
+            })
+            .await
+            .map_err(|_| TestError::Config {
+                message: "loopback URL source response write exceeded its deadline".to_string(),
+            })?
+            .map_err(|error| TestError::Config {
+                message: format!("loopback URL source response write failed: {error}"),
+            })?;
+
+            Ok(LoopbackFileRequest {
+                method: method.to_string(),
+                target: target.to_string(),
+            })
+        });
+        Ok(Self {
+            url: format!("http://{address}{target}"),
+            server: Some(server),
+        })
+    }
+
+    async fn finish(mut self) -> TestResult<LoopbackFileRequest> {
+        let Some(mut server) = self.server.take() else {
+            return Err(TestError::Config {
+                message: "loopback URL source was already stopped".to_string(),
+            });
+        };
+        let result = timeout(FILE_TRANSFER_BUDGET, &mut server).await;
+        if result.is_err() {
+            server.abort();
+            let _ = server.await;
+            return Err(TestError::Config {
+                message: "loopback URL source did not stop before its deadline".to_string(),
+            });
+        }
+        result
+            .map_err(|_| TestError::Config {
+                message: "loopback URL source did not stop before its deadline".to_string(),
+            })?
+            .map_err(|error| TestError::Config {
+                message: format!("loopback URL source task failed: {error}"),
+            })?
+    }
+}
+
+impl Drop for LoopbackFileSource {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            server.abort();
+        }
+    }
+}
 
 /// Write one local upload fixture, mapping I/O failures onto the harness error.
 fn write_fixture(path: &std::path::Path, bytes: &[u8]) -> TestResult<()> {
@@ -416,6 +578,147 @@ async fn test_file_download_conditional_and_range() -> TestResult<()> {
         );
 
         ctx.client.files().delete(&ctx.space_id, &file.id).await?;
+        Ok(())
+    })
+    .await
+}
+
+/// The legacy Heart download writes the selected object to the requested file
+/// path without changing its bytes or response identity.
+#[tokio::test]
+async fn test_grpc_file_download_to_owned_path() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let suffix = unique_suffix();
+        let file_name = format!("legacy-download-{suffix}.bin");
+        let payload = format!("legacy gRPC download fixture: {suffix}").into_bytes();
+        let file = timeout(
+            FILE_TRANSFER_BUDGET,
+            ctx.client
+                .files()
+                .upload(&ctx.space_id)
+                .bytes(&file_name, payload.clone())
+                .mime("application/octet-stream")
+                .upload(),
+        )
+        .await
+        .map_err(|_| TestError::Config {
+            message: "legacy download fixture upload exceeded its deadline".to_string(),
+        })??;
+        ctx.register_file(&file.id);
+
+        let directory = ctx.temp_dir("legacy_grpc_download")?;
+        let destination = directory.join(&file_name);
+        let unsafe_destination = ctx
+            .client
+            .files()
+            .download(&file.id)
+            .to_file(&directory)
+            .download()
+            .await
+            .expect_err("a directory cannot be used as a legacy download file path");
+        assert!(
+            matches!(unsafe_destination, AnytypeError::Validation { .. }),
+            "unexpected unsafe download destination error: {unsafe_destination:?}"
+        );
+
+        let returned_path = timeout(
+            FILE_TRANSFER_BUDGET,
+            ctx.client
+                .files()
+                .download(&file.id)
+                .to_file(&destination)
+                .download(),
+        )
+        .await
+        .map_err(|_| TestError::Config {
+            message: "legacy gRPC download exceeded its deadline".to_string(),
+        })??;
+        assert_eq!(returned_path, destination);
+
+        let downloaded =
+            tokio::fs::read(&destination)
+                .await
+                .map_err(|error| TestError::Config {
+                    message: format!(
+                        "failed to read legacy gRPC download {}: {error}",
+                        destination.display()
+                    ),
+                })?;
+        assert_eq!(downloaded, payload);
+
+        std::fs::remove_file(&destination).map_err(|error| TestError::Config {
+            message: format!(
+                "failed to remove legacy gRPC download {}: {error}",
+                destination.display()
+            ),
+        })?;
+        assert!(
+            !destination.exists(),
+            "legacy gRPC download path remained after local cleanup"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A URL source remains on gRPC and fetches only the bytes served by its owned
+/// loopback endpoint.
+#[tokio::test]
+async fn test_grpc_file_upload_from_owned_loopback_url() -> TestResult<()> {
+    with_test_context(|ctx| async move {
+        let suffix = unique_suffix();
+        let source_path = format!("grpc-url-source-{suffix}.bin");
+        let payload = format!("gRPC URL upload fixture: {suffix}").into_bytes();
+        let source = LoopbackFileSource::start(&source_path, payload.clone()).await?;
+        let source_url = source.url.clone();
+
+        let uploaded = timeout(
+            FILE_TRANSFER_BUDGET,
+            ctx.client
+                .files()
+                .upload(&ctx.space_id)
+                .from_url(source_url)
+                .upload(),
+        )
+        .await
+        .map_err(|_| TestError::Config {
+            message: "gRPC URL upload exceeded its deadline".to_string(),
+        })??;
+        ctx.register_file(&uploaded.id);
+
+        let request = source.finish().await?;
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.target, format!("/{source_path}"));
+        assert_eq!(uploaded.space_id, ctx.space_id);
+        assert_eq!(uploaded.size, Some(payload.len() as i64));
+        assert!(
+            uploaded.details.is_object(),
+            "URL upload must return the gRPC detail structure"
+        );
+
+        let metadata = timeout(
+            FILE_TRANSFER_BUDGET,
+            ctx.client.files().get(&ctx.space_id, &uploaded.id).get(),
+        )
+        .await
+        .map_err(|_| TestError::Config {
+            message: "gRPC URL upload metadata lookup exceeded its deadline".to_string(),
+        })??;
+        assert_eq!(metadata.id, uploaded.id);
+        assert_eq!(metadata.space_id, ctx.space_id);
+        assert_eq!(metadata.size, Some(payload.len() as i64));
+
+        let downloaded = timeout(
+            FILE_TRANSFER_BUDGET,
+            ctx.client
+                .files()
+                .download_bytes(&ctx.space_id, &uploaded.id),
+        )
+        .await
+        .map_err(|_| TestError::Config {
+            message: "gRPC URL upload readback exceeded its deadline".to_string(),
+        })??;
+        assert_eq!(downloaded.as_ref(), payload.as_slice());
         Ok(())
     })
     .await

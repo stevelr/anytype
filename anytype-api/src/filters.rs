@@ -851,6 +851,64 @@ mod tests {
         assert!(number_in.validate().is_some());
         assert!(checkbox_in.validate().is_some());
     }
+
+    #[test]
+    fn nested_filter_expressions_preserve_condition_property_and_value_encodings() {
+        let expression = FilterExpression::and(
+            vec![
+                Filter::text_contains("name", "draft"),
+                Filter::number_greater_or_equal("priority", 3),
+                Filter::select_in("status", ["open", "blocked"]),
+                Filter::checkbox_false("done"),
+            ],
+            vec![FilterExpression::or(
+                vec![
+                    Filter::multi_select_all_in("labels", ["urgent", "review"]),
+                    Filter::Objects {
+                        condition: Condition::In,
+                        property_key: "assignee".to_owned(),
+                        objects: vec!["object-1".to_owned(), "object-2".to_owned()],
+                    },
+                    Filter::Value {
+                        condition: Condition::Equal,
+                        property_key: "legacy".to_owned(),
+                        value: None,
+                    },
+                ],
+                Vec::new(),
+            )],
+        );
+
+        assert_eq!(
+            serde_json::to_value(expression).expect("serialize nested filter expression"),
+            serde_json::json!({
+                "conditions": [
+                    {"condition": "contains", "property_key": "name", "text": "draft"},
+                    {"condition": "gte", "property_key": "priority", "number": 3},
+                    {"condition": "in", "property_key": "status", "select": "open,blocked"},
+                    {"condition": "eq", "property_key": "done", "checkbox": false}
+                ],
+                "filters": [{
+                    "conditions": [
+                        {"condition": "all_in", "property_key": "labels", "multi_select": ["urgent", "review"]},
+                        {"condition": "in", "property_key": "assignee", "objects": ["object-1", "object-2"]},
+                        {"condition": "eq", "property_key": "legacy", "value": null}
+                    ],
+                    "operator": "or"
+                }],
+                "operator": "and"
+            })
+        );
+    }
+
+    #[test]
+    fn empty_filter_expression_omits_conditions_and_nested_filters() {
+        assert_eq!(
+            serde_json::to_value(FilterExpression::default())
+                .expect("serialize empty filter expression"),
+            serde_json::json!({"operator": "and"})
+        );
+    }
 }
 
 /// Expression filters for list and search functions
