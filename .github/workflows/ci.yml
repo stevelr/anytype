@@ -30,6 +30,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  ANYTYPE_TEST_SPACE_PREFIX: xtest
 
 jobs:
   # Gate is distributed through Nix, so this deterministic lane qualifies the

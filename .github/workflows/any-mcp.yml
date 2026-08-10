@@ -19,6 +19,11 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  ANYTYPE_TEST_SPACE_PREFIX: xtest
+
 jobs:
   preflight:
     runs-on: ubuntu-24.04
