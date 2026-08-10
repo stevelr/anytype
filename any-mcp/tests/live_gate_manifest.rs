@@ -396,7 +396,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     assert_eq!(
-        digest, "a5e67dcd1074ec048a70477b2c6e61b78065c78086e8c2c97b8d05841a55e5b9",
+        digest, "c847ebd48f3866051520f1abcd220160e83b9f9b6b7c0bf56775c474b61fb68c",
         "workflow policy is an exact reviewed representation; audit before updating this digest"
     );
     let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
