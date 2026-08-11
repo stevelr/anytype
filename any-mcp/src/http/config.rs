@@ -772,11 +772,19 @@ mod tests {
         TransportSelection::from_lookup(|name| Ok(values.get(name).cloned()), &present)
     }
 
+    // `/etc/...` is not an absolute path on Windows, and the token file must
+    // pass the absolute-path check without touching the filesystem.
+    const TEST_TOKEN_FILE: &str = if cfg!(windows) {
+        r"C:\any-mcp\token"
+    } else {
+        "/etc/any-mcp/token"
+    };
+
     fn http_base<'a>() -> Vec<(&'a str, &'a str)> {
         vec![
             ("ANY_MCP_TRANSPORT", "streamable-http"),
             ("ANY_MCP_HTTP_AUTH", "static-token"),
-            ("ANY_MCP_HTTP_TOKEN_FILE", "/etc/any-mcp/token"),
+            ("ANY_MCP_HTTP_TOKEN_FILE", TEST_TOKEN_FILE),
         ]
     }
 

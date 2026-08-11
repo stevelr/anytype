@@ -115,10 +115,12 @@ jobs:
       # reachable Anytype server, which this offline matrix does not provision.
       - name: Test workspace
         if: ${{ !cancelled() }}
+        timeout-minutes: 90
         run: nix develop --command cargo test --locked --workspace --all-features --exclude anytype --no-fail-fast
 
       - name: Test anytype library
         if: ${{ !cancelled() }}
+        timeout-minutes: 30
         run: nix develop --command cargo test --locked -p anytype --all-features --lib --no-fail-fast
 
       - name: Format check
@@ -174,11 +176,13 @@ jobs:
       # reachable Anytype server, which this offline matrix does not provision.
       - name: Test workspace
         if: ${{ !cancelled() }}
+        timeout-minutes: 90
         shell: bash
         run: runuser -u builder -- cargo test --locked --workspace --all-features --exclude anytype --no-fail-fast
 
       - name: Test anytype library
         if: ${{ !cancelled() }}
+        timeout-minutes: 30
         shell: bash
         run: runuser -u builder -- cargo test --locked -p anytype --all-features --lib --no-fail-fast
 
@@ -239,10 +243,12 @@ jobs:
       # reachable Anytype server, which this offline matrix does not provision.
       - name: Test workspace
         if: ${{ !cancelled() }}
+        timeout-minutes: 90
         run: cargo test --locked --workspace --all-features --exclude anytype --no-fail-fast
 
       - name: Test anytype library
         if: ${{ !cancelled() }}
+        timeout-minutes: 30
         run: cargo test --locked -p anytype --all-features --lib --no-fail-fast
 
       - name: Format check

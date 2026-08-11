@@ -1,0 +1,5 @@
+# Snapshot and fixture files are embedded with include_str! and compared for
+# exact byte equality, so checkouts must be line-ending deterministic on every
+# platform. Windows runners default to core.autocrlf=true, which would CRLF
+# every text file without this rule.
+* text=auto eol=lf

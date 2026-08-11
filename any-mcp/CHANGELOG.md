@@ -223,6 +223,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Unblock the first Windows test run: the post-dispatch indeterminate tests
+  in `object_update` and `object_edit` give their mode-0 deadline real slack
+  on both sides (a 20ms budget could expire before the connection was even
+  established on a slow runner, leaving the fixture waiting forever) and
+  bound the fixture await so a missing request fails instead of hanging the
+  suite; the HTTP test fixtures use a platform-absolute token path because
+  `/etc/...` is not absolute on Windows; and a repository `.gitattributes`
+  forces LF checkout so `include_str!` snapshot comparisons stay
+  byte-deterministic under Windows' default autocrlf.
 - Keep the Windows clippy gate clean: `ExportDestination` boxes its local
   atomic-export variant (the Windows form of `AtomicExport` crosses the
   large-enum-variant threshold), the non-Unix validator-fixture unlock

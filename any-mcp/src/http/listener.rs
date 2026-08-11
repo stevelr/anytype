@@ -614,13 +614,21 @@ pub(crate) mod tests {
         (service, recorded)
     }
 
+    // `/etc/...` is not an absolute path on Windows, and the token file must
+    // pass the absolute-path check without touching the filesystem.
+    const TEST_TOKEN_FILE: &str = if cfg!(windows) {
+        r"C:\any-mcp\token"
+    } else {
+        "/etc/any-mcp/token"
+    };
+
     pub(crate) fn test_config(extra: &[(&str, &str)]) -> HttpConfig {
         let mut values = vec![
             ("ANY_MCP_TRANSPORT".to_owned(), "streamable-http".to_owned()),
             ("ANY_MCP_HTTP_AUTH".to_owned(), "static-token".to_owned()),
             (
                 "ANY_MCP_HTTP_TOKEN_FILE".to_owned(),
-                "/etc/any-mcp/token".to_owned(),
+                TEST_TOKEN_FILE.to_owned(),
             ),
         ];
         values.extend(

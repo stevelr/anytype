@@ -1396,17 +1396,22 @@ mod tests {
             let (base_url, server, patch_seen) = fixture_with_signal(
                 vec![
                     FixtureReply::json(current),
-                    FixtureReply::json(updated).delayed(Duration::from_millis(200)),
+                    FixtureReply::json(updated).delayed(Duration::from_secs(1)),
                 ],
                 Some(2),
             )
             .await;
+            // The mode-0 deadline must expire after the PATCH is dispatched
+            // but before the delayed reply. It needs real slack on both
+            // sides: a too-tight budget can expire before the connection is
+            // even established on a slow runner, and then the fixture waits
+            // forever for a request that never comes.
             let runtime = runtime(
                 base_url,
                 if mode == 0 {
-                    Duration::from_millis(20)
+                    Duration::from_millis(250)
                 } else {
-                    Duration::from_secs(1)
+                    Duration::from_secs(5)
                 },
             );
             let cancellation = CancellationToken::new();
@@ -1434,7 +1439,12 @@ mod tests {
                 result_message(&result),
                 ToolError::mutation_indeterminate().message()
             );
-            let requests = server.await.expect("controlled fixture");
+            // Bounded so a missing request fails the test instead of hanging
+            // the whole suite at the fixture's accept loop.
+            let requests = tokio::time::timeout(Duration::from_secs(60), server)
+                .await
+                .expect("controlled fixture deadline")
+                .expect("controlled fixture");
             assert_eq!(requests.len(), 2);
             assert_eq!(
                 requests
