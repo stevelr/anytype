@@ -18,7 +18,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   so fixture discovery and its tests can only run unprivileged. The matrix's
   test step now also uses the offline split from `just test`, excluding the
   anytype-api integration targets that require a live server it does not
-  provision.
+  provision. Gate steps keep going after a failed gate and tests run with
+  `--no-fail-fast`, so one run reports every failing gate per platform.
 - Map the new anytype-api HTTP deadline errors onto existing MCP error
   classes. Mutation-scoped deadline expirations and explicitly indeterminate
   mutation outcomes return `mutation_indeterminate`; other deadline

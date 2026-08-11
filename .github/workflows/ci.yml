@@ -101,20 +101,28 @@ jobs:
       - name: Verify native prerequisites
         run: nix develop --command bash .github/scripts/verify-ci-prerequisites.sh
 
+      # Gate steps keep going after a failed gate (`!cancelled()`), and tests
+      # run with --no-fail-fast, so one run reports every failing gate. The
+      # job itself still fails when any gate fails.
       - name: Build
         run: nix develop --command cargo build --locked --workspace --all-features
 
       - name: Clippy
+        if: ${{ !cancelled() }}
         run: nix develop --command cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       # Mirrors `just test`: every anytype-api integration target requires a
       # reachable Anytype server, which this offline matrix does not provision.
-      - name: Test
-        run: |
-          nix develop --command cargo test --locked --workspace --all-features --exclude anytype
-          nix develop --command cargo test --locked -p anytype --all-features --lib
+      - name: Test workspace
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo test --locked --workspace --all-features --exclude anytype --no-fail-fast
+
+      - name: Test anytype library
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo test --locked -p anytype --all-features --lib --no-fail-fast
 
       - name: Format check
+        if: ${{ !cancelled() }}
         run: nix develop --command cargo fmt --all --check
 
   arch-native:
@@ -149,18 +157,35 @@ jobs:
           runuser -u builder -- rustup show
           runuser -u builder -- bash .github/scripts/verify-ci-prerequisites.sh --without-gate
 
+      # Gate steps keep going after a failed gate (`!cancelled()`), and tests
+      # run with --no-fail-fast, so one run reports every failing gate. The
+      # job itself still fails when any gate fails. Every cargo invocation
+      # runs as the unprivileged builder user, whose home owns the toolchain.
+      - name: Build
+        shell: bash
+        run: runuser -u builder -- cargo build --locked --workspace --all-features
+
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: runuser -u builder -- cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
       # Mirrors `just test`: every anytype-api integration target requires a
       # reachable Anytype server, which this offline matrix does not provision.
-      - name: Build, lint, test, and format-check
+      - name: Test workspace
+        if: ${{ !cancelled() }}
         shell: bash
-        run: |
-          runuser -u builder -- bash -euo pipefail -c '
-            cargo build --locked --workspace --all-features
-            cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-            cargo test --locked --workspace --all-features --exclude anytype
-            cargo test --locked -p anytype --all-features --lib
-            cargo fmt --all --check
-          '
+        run: runuser -u builder -- cargo test --locked --workspace --all-features --exclude anytype --no-fail-fast
+
+      - name: Test anytype library
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: runuser -u builder -- cargo test --locked -p anytype --all-features --lib --no-fail-fast
+
+      - name: Format check
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: runuser -u builder -- cargo fmt --all --check
 
   windows-native:
     name: native gates (${{ matrix.platform }})
@@ -198,21 +223,28 @@ jobs:
           jq --version
           gcc --version | Select-Object -First 1
 
+      # Gate steps keep going after a failed gate (`!cancelled()`), and tests
+      # run with --no-fail-fast, so one run reports every failing gate. The
+      # job itself still fails when any gate fails. Steps stay single-command:
+      # the default pwsh shell only propagates the final command's exit code
+      # from a multi-line run block.
       - name: Build
         run: cargo build --locked --workspace --all-features
 
       - name: Clippy
+        if: ${{ !cancelled() }}
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       # Mirrors `just test`: every anytype-api integration target requires a
       # reachable Anytype server, which this offline matrix does not provision.
-      # Separate steps: the default pwsh shell only propagates the final
-      # command's exit code from a multi-line run block.
       - name: Test workspace
-        run: cargo test --locked --workspace --all-features --exclude anytype
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --workspace --all-features --exclude anytype --no-fail-fast
 
       - name: Test anytype library
-        run: cargo test --locked -p anytype --all-features --lib
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p anytype --all-features --lib --no-fail-fast
 
       - name: Format check
+        if: ${{ !cancelled() }}
         run: cargo fmt --all --check
