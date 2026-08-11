@@ -19,11 +19,16 @@ fn unauthenticated_command() -> Command {
 }
 
 fn invalid_config_file(contents: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "any-mcp-invalid-config-{}-{}.toml",
-        std::process::id(),
-        getrandom::u64().unwrap_or(0)
-    ));
+    // The selected-config reader opens every ancestor with O_NOFOLLOW, so the
+    // fixture path must not run through a symlinked temp dir (macOS `/var`).
+    let path = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temporary directory")
+        .join(format!(
+            "any-mcp-invalid-config-{}-{}.toml",
+            std::process::id(),
+            getrandom::u64().unwrap_or(0)
+        ));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

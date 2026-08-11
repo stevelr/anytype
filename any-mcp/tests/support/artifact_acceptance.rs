@@ -1497,6 +1497,41 @@ fn windows_short_alias(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(short_name.to_owned()))
 }
 
+/// Stable by-handle identity of one open Windows file.
+///
+/// `std::os::windows::fs::MetadataExt::{volume_serial_number, file_index,
+/// number_of_links}` are still unstable (`windows_by_handle`), so the harness
+/// reads the same identity through `GetFileInformationByHandle` directly.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowsHandleIdentity {
+    volume: u64,
+    file: u64,
+    links: u32,
+}
+
+#[cfg(windows)]
+fn windows_handle_identity(file: &File) -> Option<WindowsHandleIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle},
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the file handle is live for the duration of the call and the
+    // output structure has the exact type required by the Win32 API.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut information) } == 0
+    {
+        return None;
+    }
+    Some(WindowsHandleIdentity {
+        volume: u64::from(information.dwVolumeSerialNumber),
+        file: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        links: information.nNumberOfLinks,
+    })
+}
+
 fn file_import_arguments(
     space: &str,
     source: Value,
@@ -2050,8 +2085,6 @@ fn prove_hard_link_capability(root: &Path) -> Result<bool, String> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-
         let origin = root.join(format!(".hlink-origin-{}", unique_suffix()));
         let alias = root.join(format!(".hlink-alias-{}", unique_suffix()));
         fs::write(&origin, b"any-mcp-hard-link-capability")
@@ -2059,23 +2092,30 @@ fn prove_hard_link_capability(root: &Path) -> Result<bool, String> {
         let result = (|| {
             fs::hard_link(&origin, &alias)
                 .map_err(|_| "create hard-link capability probe".to_owned())?;
-            let original = fs::metadata(&origin)
-                .map_err(|_| "inspect hard-link capability origin".to_owned())?;
-            let linked = fs::metadata(&alias)
-                .map_err(|_| "inspect hard-link capability alias".to_owned())?;
-            if original.volume_serial_number().is_none()
-                || original.file_index().is_none()
-                || original.volume_serial_number() != linked.volume_serial_number()
-                || original.file_index() != linked.file_index()
-                || original.number_of_links() != Some(2)
-                || linked.number_of_links() != Some(2)
+            // Identities are read through short-lived handles: an open handle
+            // on the alias would leave its unlink pending and make the
+            // restored link count unobservable.
+            let original = File::open(&origin)
+                .map_err(|_| "inspect hard-link capability origin".to_owned())
+                .map(|file| windows_handle_identity(&file))?;
+            let linked = File::open(&alias)
+                .map_err(|_| "inspect hard-link capability alias".to_owned())
+                .map(|file| windows_handle_identity(&file))?;
+            let (Some(original), Some(linked)) = (original, linked) else {
+                return Ok(false);
+            };
+            if original.volume != linked.volume
+                || original.file != linked.file
+                || original.links != 2
+                || linked.links != 2
             {
                 return Ok(false);
             }
             fs::remove_file(&alias).map_err(|_| "unlink hard-link capability alias".to_owned())?;
-            let restored = fs::metadata(&origin)
-                .map_err(|_| "inspect restored hard-link capability".to_owned())?;
-            Ok(restored.number_of_links() == Some(1))
+            let restored = File::open(&origin)
+                .map_err(|_| "inspect restored hard-link capability".to_owned())
+                .map(|file| windows_handle_identity(&file))?;
+            Ok(restored.is_some_and(|identity| identity.links == 1))
         })();
         let _ = fs::remove_file(&alias);
         let _ = fs::remove_file(&origin);
@@ -5618,13 +5658,15 @@ impl RootInventory {
         if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err("capture artifact root inventory".to_owned());
         }
+        let identity = windows_handle_identity(&root_file)
+            .ok_or_else(|| "capture artifact root inventory".to_owned())?;
         let root = cap_std::fs::Dir::from_std_file(root_file);
         let mut entries = BTreeMap::new();
         root_inventory_visit(&root, &mut entries)?;
         Ok(Self {
             root,
-            device: metadata.volume_serial_number().unwrap_or_default().into(),
-            inode: metadata.file_index().unwrap_or_default(),
+            device: identity.volume,
+            inode: identity.file,
             entries,
         })
     }
@@ -10875,13 +10917,9 @@ pub fn server_log_baseline(path: &Path) -> Result<ArtifactServerLogBaseline, Str
     let metadata = file
         .metadata()
         .map_err(|_| "inspect captured server log capability".to_owned())?;
-    let device = metadata
-        .volume_serial_number()
-        .map(u64::from)
+    let identity = windows_handle_identity(&file)
         .ok_or_else(|| "inspect captured server log capability".to_owned())?;
-    let inode = metadata
-        .file_index()
-        .ok_or_else(|| "inspect captured server log capability".to_owned())?;
+    let (device, inode) = (identity.volume, identity.file);
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
         || !acceptance_owner_private_file(&file)
     {
@@ -10947,13 +10985,9 @@ fn assert_server_log_namespace_current(baseline: &ArtifactServerLogBaseline) -> 
     let metadata = current
         .metadata()
         .map_err(|_| "captured server log namespace changed".to_owned())?;
-    let device = metadata
-        .volume_serial_number()
-        .map(u64::from)
+    let identity = windows_handle_identity(&current)
         .ok_or_else(|| "captured server log namespace changed".to_owned())?;
-    let inode = metadata
-        .file_index()
-        .ok_or_else(|| "captured server log namespace changed".to_owned())?;
+    let (device, inode) = (identity.volume, identity.file);
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
         || !acceptance_owner_private_file(&current)
         || device != baseline.device
@@ -10997,13 +11031,9 @@ fn assert_server_log_descriptor_current(
     let metadata = file
         .metadata()
         .map_err(|_| "inspect captured server log capability".to_owned())?;
-    let device = metadata
-        .volume_serial_number()
-        .map(u64::from)
+    let identity = windows_handle_identity(file)
         .ok_or_else(|| "inspect captured server log capability".to_owned())?;
-    let inode = metadata
-        .file_index()
-        .ok_or_else(|| "inspect captured server log capability".to_owned())?;
+    let (device, inode) = (identity.volume, identity.file);
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
         || !acceptance_owner_private_file(file)
         || device != baseline.device

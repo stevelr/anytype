@@ -12,6 +12,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   the Rust version from `rust-toolchain.toml` instead of workflow literals.
   The Nix build also exposes Linux x86_64/arm64 OCI image archives containing
   the supported `anyr` entrypoint, including its `mcp` commands.
+- Run the manual CI matrix's Arch Linux container gates as an unprivileged
+  builder user: as root, the validator executable boundary correctly treats
+  every root-owned `0755` system binary such as `file(1)` as owner-writable,
+  so fixture discovery and its tests can only run unprivileged. The matrix's
+  test step now also uses the offline split from `just test`, excluding the
+  anytype-api integration targets that require a live server it does not
+  provision.
 - Map the new anytype-api HTTP deadline errors onto existing MCP error
   classes. Mutation-scoped deadline expirations and explicitly indeterminate
   mutation outcomes return `mutation_indeterminate`; other deadline
@@ -209,6 +216,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Make the acceptance harness and process-level fixtures portable to the
+  qualification matrix: Windows file identity (volume, file index, link
+  count) is read through the stable `GetFileInformationByHandle` call
+  instead of the unstable `windows_by_handle` std feature; each HTTP
+  process-test token file now gets a unique owner-private path created at
+  `0600` (concurrent tests shared one deterministic path, so one test could
+  unlink the file or expose its pre-restriction mode while another was
+  loading it); and the process-runtime config fixture canonicalizes the
+  temporary directory first so macOS's symlinked `/var` temp root passes the
+  no-follow selected-config walk.
 - Repair the live acceptance harness against the durable staging layout and
   live-server contracts: staging snapshots walk the closed durable layout
   and classify in-progress versus published records from their durable

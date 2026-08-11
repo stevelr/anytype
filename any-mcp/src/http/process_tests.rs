@@ -37,18 +37,28 @@ struct TempTokenFile {
 
 impl TempTokenFile {
     fn create() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "any-mcp-http-process-token-{}-{:x}",
-            std::process::id(),
-            std::ptr::from_ref(&TEST_TOKEN) as usize
-        ));
-        std::fs::write(&path, TEST_TOKEN).expect("write process test token");
+        // Each instance gets its own random path and is created private from
+        // the start: concurrent tests previously shared one deterministic
+        // path, so one test's drop could unlink the file (or expose the
+        // pre-chmod permissions) while another test was still loading it.
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .join(format!(
+                "any-mcp-http-process-token-{}-{:016x}",
+                std::process::id(),
+                getrandom::u64().expect("random token file suffix")
+            ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .expect("restrict process test token");
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        let mut file = options.open(&path).expect("create process test token");
+        std::io::Write::write_all(&mut file, TEST_TOKEN.as_bytes())
+            .expect("write process test token");
         Self { path }
     }
 }

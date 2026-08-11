@@ -107,8 +107,12 @@ jobs:
       - name: Clippy
         run: nix develop --command cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+      # Mirrors `just test`: every anytype-api integration target requires a
+      # reachable Anytype server, which this offline matrix does not provision.
       - name: Test
-        run: nix develop --command cargo test --locked --workspace --all-features
+        run: |
+          nix develop --command cargo test --locked --workspace --all-features --exclude anytype
+          nix develop --command cargo test --locked -p anytype --all-features --lib
 
       - name: Format check
         run: nix develop --command cargo fmt --all --check
@@ -132,20 +136,31 @@ jobs:
         with:
           persist-credentials: false
 
+      # Container steps run as root by default, but the gates must run as an
+      # ordinary user: the validator executable boundary (and its tests)
+      # deliberately rejects owner-writable binaries, which as root covers
+      # every root-owned 0755 system executable such as file(1).
       - name: Install native prerequisites
         shell: bash
         run: |
           pacman -S --noconfirm --needed gcc jq just protobuf python rustup
-          rustup show
-          bash .github/scripts/verify-ci-prerequisites.sh --without-gate
+          useradd --create-home builder
+          chown -R builder: .
+          runuser -u builder -- rustup show
+          runuser -u builder -- bash .github/scripts/verify-ci-prerequisites.sh --without-gate
 
+      # Mirrors `just test`: every anytype-api integration target requires a
+      # reachable Anytype server, which this offline matrix does not provision.
       - name: Build, lint, test, and format-check
         shell: bash
         run: |
-          cargo build --locked --workspace --all-features
-          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-          cargo test --locked --workspace --all-features
-          cargo fmt --all --check
+          runuser -u builder -- bash -euo pipefail -c '
+            cargo build --locked --workspace --all-features
+            cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+            cargo test --locked --workspace --all-features --exclude anytype
+            cargo test --locked -p anytype --all-features --lib
+            cargo fmt --all --check
+          '
 
   windows-native:
     name: native gates (${{ matrix.platform }})
@@ -189,8 +204,15 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-      - name: Test
-        run: cargo test --locked --workspace --all-features
+      # Mirrors `just test`: every anytype-api integration target requires a
+      # reachable Anytype server, which this offline matrix does not provision.
+      # Separate steps: the default pwsh shell only propagates the final
+      # command's exit code from a multi-line run block.
+      - name: Test workspace
+        run: cargo test --locked --workspace --all-features --exclude anytype
+
+      - name: Test anytype library
+        run: cargo test --locked -p anytype --all-features --lib
 
       - name: Format check
         run: cargo fmt --all --check
