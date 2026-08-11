@@ -23,6 +23,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Render the new anytype-api HTTP deadline and indeterminate-mutation errors
   through their typed, secret-safe display output.
+- The required anyr live gates (Python CLI suite and type-property
+  preservation) now run on a GitHub-hosted runner against a disposable
+  namespace-isolated headless server provisioned with `anyr init-cli
+  --save-env`, replacing the retired self-hosted `anytype-headless` runner.
 
 ### Fixed
 

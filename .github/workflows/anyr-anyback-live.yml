@@ -1,4 +1,12 @@
-# Protected installed-binary smoke gate for anyr backup and restore.
+# Installed-binary smoke gate for anyr backup and restore.
+#
+# The gate runs against a disposable headless Anytype server provisioned on
+# the GitHub-hosted runner itself: the pinned anytype-cli from the Nix
+# devshell serves inside the sync-blocking network namespace created by
+# scripts/anytype-nonet, and the run mints its own ephemeral account and API
+# key. Nothing outlives the runner: credentials, server state, and logs are
+# all disposable, and the namespace blocks all outbound sync traffic so test
+# activity never reaches the Anytype network.
 
 name: anyr-anyback-live
 
@@ -28,39 +36,100 @@ jobs:
   installed-backup-smoke:
     name: installed anyr backup create/restore
     needs: preflight
-    environment: anytype-headless
-    runs-on:
-      - self-hosted
-      - linux
-      - anytype-headless
-    timeout-minutes: 25
-    concurrency:
-      group: anytype-headless-live
-      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        run: rustup show
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
-      - name: Install Python 3.14
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.14"
+      # Later steps need the pinned toolchain, python, and anytype-cli outside
+      # a `nix develop` wrapper (background server, sudo namespace helpers),
+      # so the devshell PATH and protobuf variables are promoted to the job.
+      - name: Expose pinned devshell tools to the job
+        run: |
+          nix develop --command bash -euo pipefail -c '
+            {
+              printf "PATH=%s\n" "$PATH"
+              printf "PROTOC=%s\n" "$PROTOC"
+              printf "PROTOC_INCLUDE=%s\n" "$PROTOC_INCLUDE"
+            } >> "$GITHUB_ENV"
+          '
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: anyr-anyback-live
 
-      - name: Install anyr and run the required serial live gate
+      - name: Provision an isolated headless server
         shell: bash
-        env:
-          ANYR_ANYBACK_HEADLESS_ENV_FILE: ${{ vars.ANYR_ANYBACK_HEADLESS_ENV_FILE }}
-          ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nftables
+          umask 077
+          server_log="$RUNNER_TEMP/anytype-headless-server.log"
+          : > "$server_log"
+          anytype_bin="$(command -v anytype)"
+          setsid env ANYTYPE_CLI_BIN="$anytype_bin" \
+            bash scripts/anytype-nonet > "$server_log" 2>&1 < /dev/null &
+          up=""
+          for _ in $(seq 90); do
+            if timeout 2 bash -c 'exec 3<>/dev/tcp/10.222.0.2/31012' 2>/dev/null; then
+              up=1
+              break
+            fi
+            sleep 2
+          done
+          if [[ -z "$up" ]]; then
+            printf '%s\n' "headless server did not open 10.222.0.2:31012" >&2
+            tail -c 4096 -- "$server_log" >&2
+            exit 1
+          fi
+          # Give first-boot initialization a settling margin after the port opens.
+          sleep 20
+          printf 'ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE=%s\n' "$server_log" >> "$GITHUB_ENV"
+
+      - name: Install anyr
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_root="$RUNNER_TEMP/installed"
+          cargo install --locked --path anyr --root "$install_root"
+          anyr_bin="$install_root/bin/anyr"
+          [[ -x "$anyr_bin" ]] || { printf '%s\n' "installed anyr binary is missing" >&2; exit 1; }
+          printf 'ANYR_BIN=%s\n' "$anyr_bin" >> "$GITHUB_ENV"
+
+      # Mints a throwaway account and API key on the fresh server through
+      # `anyr init-cli --save-env`, which also verifies HTTP and gRPC
+      # authentication. It runs inside the namespace (as the runner user)
+      # because the server and the anytype CLI meet over namespace-local
+      # loopback; the saved endpoints are then rewritten to the veth address
+      # the host-side gates connect to.
+      - name: Create ephemeral credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          env_file="$RUNNER_TEMP/anyr-anyback-headless.env"
+          keystore="$RUNNER_TEMP/anyr-anyback-ci-keystore.db"
+          anytype_bin="$(command -v anytype)"
+          sudo ip netns exec anycli_block runuser "$(whoami)" -c \
+            "env ANYTYPE_CLI_BIN='$anytype_bin' \
+              ANYTYPE_KEYSTORE='file:path=$keystore' \
+              ANYTYPE_KEYSTORE_SERVICE=anyr \
+              '$ANYR_BIN' init-cli --save-env '$env_file'"
+          [[ -s "$env_file" ]] || { printf '%s\n' "init-cli produced no environment file" >&2; exit 1; }
+          sed -i 's|http://127\.0\.0\.1:|http://10.222.0.2:|g' "$env_file"
+          printf 'export ANYTYPE_TEST_URL="$ANYTYPE_URL"\n' >> "$env_file"
+          printf 'ANYR_ANYBACK_HEADLESS_ENV_FILE=%s\n' "$env_file" >> "$GITHUB_ENV"
+
+      - name: Run the required serial live gate
+        shell: bash
         run: |
           set -euo pipefail
           fail_preflight() { printf '%s\n' "$1" >&2; exit 1; }
@@ -91,9 +160,7 @@ jobs:
           trap 'rm -rf -- "$gate_dir"' EXIT
           export ANYBACK_HEADLESS_REDACTED_LOG_FILE="$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE"
 
-          install_root="$gate_dir/installed"
-          cargo install --locked --path anyr --root "$install_root"
-          export ANYR_BIN="$install_root/bin/anyr"
+          export ANYR_BIN
           [[ "${ANYR_BIN#/}" != "$ANYR_BIN" ]] || fail_preflight "installed anyr path must be absolute"
           [[ -x "$ANYR_BIN" ]] || fail_preflight "installed anyr binary is missing"
 
@@ -154,19 +221,22 @@ jobs:
           [[ -f "$marker" ]] || fail_preflight "required gate callback was not invoked"
           cmp --silent "$expected_marker" "$marker" || fail_preflight "required gate callback marker mismatch"
 
-      - name: Capture bounded redacted server evidence on failure
+      - name: Capture bounded server evidence on failure
         if: failure()
         shell: bash
-        env:
-          ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
+          umask 077
+          server_log="${ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE:-}"
+          if [[ -z "$server_log" || ! -r "$server_log" ]]; then
+            printf '%s\n' "no server log was provisioned before the failure" >&2
+            exit 0
+          fi
           artifact="$RUNNER_TEMP/anyr-anyback-live-server-tail.log"
-          tail -c 65536 -- "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE" > "$artifact"
-          chmod 0600 "$artifact"
+          tail -c 65536 -- "$server_log" > "$artifact"
           printf 'ANYBACK_HEADLESS_REDACTED_LOG_ARTIFACT=%s\n' "$artifact" >> "$GITHUB_ENV"
 
-      - name: Retain bounded redacted server evidence on failure
+      - name: Retain bounded server evidence on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The installed-binary backup/restore live gate now runs entirely on a
+  GitHub-hosted runner: the pinned anytype-cli serves inside the
+  sync-blocking `scripts/anytype-nonet` namespace and each run mints its own
+  ephemeral account and API key through `anyr init-cli --save-env`, replacing
+  the retired self-hosted `anytype-headless` runner.
+
 ### Added
 
 - Add protected cleanup-owned restore fidelity tests for file bytes, metadata,
