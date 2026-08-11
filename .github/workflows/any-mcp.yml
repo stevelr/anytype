@@ -217,14 +217,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -z "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE:-}" ]]; then
+            printf '%s\n' "no server log was provisioned before the failure" >&2
+            exit 0
+          fi
           artifact="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-server-events.txt"
           python3 any-mcp/scripts/reviewed-evidence.py capture \
-            "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE:-}" \
+            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" \
             "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" "$artifact"
           printf 'ANY_MCP_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
 
       - name: Retain bounded reviewed server evidence on failure
-        if: failure()
+        if: ${{ failure() && env.ANY_MCP_LIVE_FAILURE_EVIDENCE != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: any-mcp-headless-reviewed-server-evidence
@@ -360,14 +364,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -z "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE:-}" ]]; then
+            printf '%s\n' "no server log was provisioned before the failure" >&2
+            exit 0
+          fi
           artifact="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-server-events.txt"
           python3 any-mcp/scripts/reviewed-evidence.py capture \
-            "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE:-}" \
+            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" \
             "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" "$artifact"
           printf 'ANY_MCP_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
 
       - name: Retain bounded reviewed server evidence on failure
-        if: failure()
+        if: ${{ failure() && env.ANY_MCP_LIVE_FAILURE_EVIDENCE != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: any-mcp-clean-server-reviewed-evidence

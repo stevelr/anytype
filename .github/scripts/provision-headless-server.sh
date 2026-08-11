@@ -45,16 +45,18 @@ anytype_bin="$(command -v anytype)" || {
 
 setsid env ANYTYPE_CLI_BIN="$anytype_bin" \
   bash scripts/anytype-nonet > "$server_log" 2>&1 < /dev/null &
+# A fresh server has no account, and the HTTP API listener (31012) starts
+# only after login, so first-boot readiness gates on the gRPC port instead.
 up=""
 for _ in $(seq 90); do
-  if timeout 2 bash -c 'exec 3<>/dev/tcp/10.222.0.2/31012' 2>/dev/null; then
+  if timeout 2 bash -c 'exec 3<>/dev/tcp/10.222.0.2/31010' 2>/dev/null; then
     up=1
     break
   fi
   sleep 2
 done
 if [[ -z "$up" ]]; then
-  printf '%s\n' "headless server did not open 10.222.0.2:31012" >&2
+  printf '%s\n' "headless server did not open 10.222.0.2:31010" >&2
   tail -c 4096 -- "$server_log" >&2
   exit 1
 fi
@@ -72,16 +74,45 @@ if [[ ! -x "$anyr_bin" ]]; then
 fi
 
 # init-cli runs inside the namespace (as the runner user) because the server
-# and the anytype CLI meet over namespace-local loopback there.
+# and the anytype CLI meet over namespace-local loopback there. Its account
+# creation is what starts the HTTP API listener, and its single-shot
+# verification can race that startup, so it gets a few bounded attempts
+# (duplicate throwaway accounts on the disposable server are harmless).
 env_file="$RUNNER_TEMP/headless-credentials.env"
 keystore="$RUNNER_TEMP/headless-ci-keystore.db"
-sudo ip netns exec anycli_block runuser "$(whoami)" -c \
+attempt=1
+until sudo ip netns exec anycli_block runuser "$(whoami)" -c \
   "env ANYTYPE_CLI_BIN='$anytype_bin' \
     ANYTYPE_KEYSTORE='file:path=$keystore' \
     ANYTYPE_KEYSTORE_SERVICE=anyr \
-    '$anyr_bin' init-cli --save-env '$env_file'"
+    '$anyr_bin' init-cli --save-env '$env_file'"; do
+  if [[ "$attempt" -ge 3 ]]; then
+    printf '%s\n' "init-cli failed after $attempt attempts" >&2
+    tail -c 4096 -- "$server_log" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  rm -f -- "$env_file"
+  sleep 10
+done
 if [[ ! -s "$env_file" ]]; then
   printf '%s\n' "init-cli produced no environment file" >&2
+  exit 1
+fi
+
+# Account creation started the HTTP API listener; make sure the host-side
+# gates can reach it through the namespace forward before handing over.
+http_up=""
+for _ in $(seq 30); do
+  if timeout 2 bash -c 'exec 3<>/dev/tcp/10.222.0.2/31012' 2>/dev/null; then
+    http_up=1
+    break
+  fi
+  sleep 2
+done
+if [[ -z "$http_up" ]]; then
+  printf '%s\n' "headless server did not open 10.222.0.2:31012 after login" >&2
+  tail -c 4096 -- "$server_log" >&2
   exit 1
 fi
 

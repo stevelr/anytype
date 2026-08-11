@@ -190,7 +190,7 @@ jobs:
           printf 'ANYBACK_HEADLESS_REDACTED_LOG_ARTIFACT=%s\n' "$artifact" >> "$GITHUB_ENV"
 
       - name: Retain bounded server evidence on failure
-        if: failure()
+        if: ${{ failure() && env.ANYBACK_HEADLESS_REDACTED_LOG_ARTIFACT != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: anyr-anyback-live-server-log
