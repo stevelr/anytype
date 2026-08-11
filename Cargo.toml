@@ -9,7 +9,7 @@ default-members = ["anyr"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.0-pre.3"
+version = "0.5.0-pre.4"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
 edition = "2024"
 homepage = "https://github.com/stevelr/anytype"
@@ -17,27 +17,27 @@ license = "Apache-2.0"
 repository = "https://github.com/stevelr/anytype"
 
 [workspace.dependencies]
-any-edit = { version = "0.5.0-pre.3", path = "./any-edit" }
-any-mcp = { version = "0.5.0-pre.3", path = "./any-mcp" }
-anyback_reader = { package = "anyback", version = "0.5.0-pre.3", path = "./anyback", default-features = false }
-anytype = { version = "0.5.0-pre.3", path = "./anytype-api" }
-anytype-rpc = { version = "0.5.0-pre.3", path = "./anytype-rpc" }
+any-edit = { version = "0.5.0-pre.4", path = "./any-edit" }
+any-mcp = { version = "0.5.0-pre.4", path = "./any-mcp" }
+anyback_reader = { package = "anyback", version = "0.5.0-pre.4", path = "./anyback", default-features = false }
+anytype = { version = "0.5.0-pre.4", path = "./anytype-api" }
+anytype-rpc = { version = "0.5.0-pre.4", path = "./anytype-rpc" }
 
 anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 base16ct = "1.0.0"
-base64 = "0.23.0"
+base64 = "0.23.1"
 bytes = "1.12.1"
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
 chrono = { version = "0.4.45", features = ["serde"] }
-clap = { version = "4.6.4", features = ["derive", "env"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
 crossterm = "0.29.0"
 db-keystore = "0.5.0"
 fs2 = "0.4.3"
-futures = "0.3.33"
+futures = "0.3.34"
 getrandom = "0.4.3"
-http = "1.4.2"
+http = "1.5.0"
 http-body = "1.1.0"
 http-body-util = "0.1.4"
 httpdate = "1.0.3"
@@ -55,7 +55,7 @@ ratatui = "0.30.2"
 regex = "1.13.1"
 reqwest = { version = "0.13.4", features = ["json", "multipart", "stream", "rustls", "query"] }
 rmcp = { version = "2.2.0", default-features = false, features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

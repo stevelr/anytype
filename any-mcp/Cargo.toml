@@ -96,10 +96,10 @@ libc.workspace = true
 
 [dev-dependencies]
 anytype = { workspace = true, features = ["test-fixtures"] }
-futures-util = "0.3.33"
-jsonschema = { version = "0.49.1", default-features = false }
+futures-util = "0.3.34"
+jsonschema = { version = "0.49.9", default-features = false }
 reqwest.workspace = true
-serial_test = "3.5.0"
+serial_test = "4.0.1"
 tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
