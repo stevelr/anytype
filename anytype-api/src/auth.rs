@@ -443,20 +443,26 @@ mod tests {
             PathBuf::from(format!("{}-wal", path.display())),
         ]
         .into_iter()
-        .try_for_each(|path| match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-            Err(error) if error.kind() == ErrorKind::IsADirectory => std::fs::remove_dir(&path)
-                .map_err(|error| {
+        .try_for_each(|path| {
+            // The directory case is detected from metadata rather than the
+            // unlink errno: macOS reports EPERM (PermissionDenied), not
+            // EISDIR, when unlinking a directory.
+            if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                return std::fs::remove_dir(&path).map_err(|error| {
                     format!(
                         "remove scripted auth keystore directory {}: {error}",
                         path.display()
                     )
-                }),
-            Err(error) => Err(format!(
-                "remove scripted auth keystore {}: {error}",
-                path.display()
-            )),
+                });
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(format!(
+                    "remove scripted auth keystore {}: {error}",
+                    path.display()
+                )),
+            }
         })
     }
 

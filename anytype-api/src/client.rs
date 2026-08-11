@@ -776,10 +776,12 @@ mod find_grpc_tests {
 
     #[tokio::test]
     async fn lsof_listen_ports_filters_prefix() {
-        // With an unlikely prefix, we should get an empty list
-        let ports = lsof_listen_ports("zzz_nonexistent_program_zzz")
-            .await
-            .unwrap();
-        assert!(ports.is_empty());
+        // With an unlikely prefix, we should get an empty list. A host
+        // without lsof is tolerated exactly as `find_grpc` tolerates it:
+        // discovery is unavailable rather than an error.
+        match lsof_listen_ports("zzz_nonexistent_program_zzz").await {
+            Ok(ports) => assert!(ports.is_empty()),
+            Err(error) => assert!(error.starts_with("failed to run lsof:")),
+        }
     }
 }

@@ -60,31 +60,34 @@ jobs:
     name: protected disposable required tier
     if: ${{ inputs.tier == 'required' || inputs.tier == 'all' }}
     needs: ignored-test-inventory
-    environment: anytype-headless
-    runs-on: [ self-hosted, linux, anytype-headless ]
-    timeout-minutes: 45
-    concurrency:
-      group: anytype-headless-live
-      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        run: rustup show
-      - name: Install Python 3.14
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.14"
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      # Later steps need the pinned toolchain, python, and anytype-cli outside
+      # a `nix develop` wrapper, so the devshell PATH is promoted to the job.
+      - name: Expose pinned devshell tools to the job
+        run: |
+          nix develop --command bash -euo pipefail -c '
+            {
+              printf "PATH=%s\n" "$PATH"
+              printf "PROTOC=%s\n" "$PROTOC"
+              printf "PROTOC_INCLUDE=%s\n" "$PROTOC_INCLUDE"
+            } >> "$GITHUB_ENV"
+          '
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: anytype-api-headless
+      - name: Provision an isolated headless server with ephemeral credentials
+        shell: bash
+        run: bash .github/scripts/provision-headless-server.sh ANY_MCP_HEADLESS
       - name: Run required disposable ignored tests serially
         shell: bash
-        env:
-          ANY_MCP_HEADLESS_ENV_FILE: ${{ vars.ANY_MCP_HEADLESS_ENV_FILE }}
-          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
           test -n "$ANY_MCP_HEADLESS_ENV_FILE" && test -r "$ANY_MCP_HEADLESS_ENV_FILE"
@@ -123,8 +126,6 @@ jobs:
       - name: Capture bounded reviewed server evidence on failure
         if: failure()
         shell: bash
-        env:
-          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set +e
           umask 077
@@ -139,7 +140,7 @@ jobs:
           fi
           {
             printf 'anytype-api live-gate reviewed failure evidence\nrun-marker=%s\nstart-bytes=%s\n' "$marker" "$start_bytes"
-            source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+            source="${ANY_MCP_HEADLESS_REDACTED_LOG_FILE:-}"
             if [[ "$source" != /* || ! -r "$source" ]]; then
               printf 'reviewed-source=unavailable\n'
             else
@@ -175,41 +176,36 @@ jobs:
     name: scheduled disposable characterization tier
     if: ${{ inputs.tier == 'soak' || inputs.tier == 'all' }}
     needs: ignored-test-inventory
-    environment: anytype-headless
-    runs-on: [ self-hosted, linux, anytype-headless ]
-    timeout-minutes: 45
-    concurrency:
-      group: anytype-headless-live
-      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        run: rustup show
-      - name: Install Python 3.14
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.14"
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      # Later steps need the pinned toolchain, python, and anytype-cli outside
+      # a `nix develop` wrapper, so the devshell PATH is promoted to the job.
+      - name: Expose pinned devshell tools to the job
+        run: |
+          nix develop --command bash -euo pipefail -c '
+            {
+              printf "PATH=%s\n" "$PATH"
+              printf "PROTOC=%s\n" "$PROTOC"
+              printf "PROTOC_INCLUDE=%s\n" "$PROTOC_INCLUDE"
+            } >> "$GITHUB_ENV"
+          '
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: anytype-api-headless
-      - name: Provision a clean isolated headless server
+      # The disposable per-runner server is always clean, so the soak tier no
+      # longer needs the self-hosted host's reset script.
+      - name: Provision an isolated headless server with ephemeral credentials
         shell: bash
-        env:
-          ANY_MCP_HEADLESS_RESET_SCRIPT: ${{ vars.ANY_MCP_HEADLESS_RESET_SCRIPT }}
-        run: |
-          set -euo pipefail
-          test -n "$ANY_MCP_HEADLESS_RESET_SCRIPT"
-          test "${ANY_MCP_HEADLESS_RESET_SCRIPT#/}" != "$ANY_MCP_HEADLESS_RESET_SCRIPT"
-          test -x "$ANY_MCP_HEADLESS_RESET_SCRIPT"
-          "$ANY_MCP_HEADLESS_RESET_SCRIPT"
+        run: bash .github/scripts/provision-headless-server.sh ANY_MCP_HEADLESS
       - name: Run soak disposable ignored tests serially
         shell: bash
-        env:
-          ANY_MCP_HEADLESS_ENV_FILE: ${{ vars.ANY_MCP_HEADLESS_ENV_FILE }}
-          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
           test -n "$ANY_MCP_HEADLESS_ENV_FILE" && test -r "$ANY_MCP_HEADLESS_ENV_FILE"
@@ -248,8 +244,6 @@ jobs:
       - name: Capture bounded reviewed server evidence on failure
         if: failure()
         shell: bash
-        env:
-          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set +e
           umask 077
@@ -264,7 +258,7 @@ jobs:
           fi
           {
             printf 'anytype-api live-gate reviewed failure evidence\nrun-marker=%s\nstart-bytes=%s\n' "$marker" "$start_bytes"
-            source="$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+            source="${ANY_MCP_HEADLESS_REDACTED_LOG_FILE:-}"
             if [[ "$source" != /* || ! -r "$source" ]]; then
               printf 'reviewed-source=unavailable\n'
             else

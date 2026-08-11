@@ -14,6 +14,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Exclude the server-backed integration targets from the manual CI matrix's
   offline test step, matching the `just test` offline gate; the live
   workflow remains the home of server-backed coverage.
+- Run the protected live tiers on GitHub-hosted runners against a disposable
+  namespace-isolated headless server with ephemeral credentials
+  (`.github/scripts/provision-headless-server.sh`), replacing the retired
+  self-hosted `anytype-headless` runner; the soak tier's host reset script
+  is obsolete because every run starts from a clean server.
 - Bound every REST wire request with one absolute logical deadline. Defaults
   are 120 seconds for ordinary requests, 600 seconds for file and multipart
   requests, and separate 120-second SSE open and error-body phases. Explicit
@@ -234,6 +239,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Make two unit tests portable to the CI qualification matrix: the gRPC
+  port-discovery test now tolerates a host without `lsof` the same way
+  `find_grpc` does (discovery unavailable, not an error), and the scripted
+  auth keystore cleanup detects the replaced-by-directory case from metadata
+  because macOS reports `EPERM` instead of `EISDIR` when unlinking a
+  directory.
 - Fix the `cargo doc` warning caused by `default_platform_keyring` linking to
   the private `resolve_default_store` helper.
 - Fix the disposable test-harness sweep failing every run when an unrelated

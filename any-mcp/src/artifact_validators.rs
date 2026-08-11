@@ -899,7 +899,7 @@ mod tests {
         loop {
             // SAFETY: signal zero performs an existence check without changing
             // the process, and `descendant` came from the owned fixture group.
-            if unsafe { libc::kill(descendant, 0) } != 0 {
+            if unsafe { libc::kill(descendant, 0) } != 0 || descendant_is_zombie(descendant) {
                 break;
             }
             assert!(
@@ -908,5 +908,22 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    /// Whether the reparented descendant is dead but not yet reaped.
+    ///
+    /// `kill(pid, 0)` succeeds on a zombie, and under a minimal container
+    /// init that never reaps orphans the SIGKILLed descendant stays a zombie
+    /// indefinitely, so liveness must also consult the process state. An
+    /// unreadable stat file means the process is fully gone.
+    #[cfg(target_os = "linux")]
+    fn descendant_is_zombie(pid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(") ")
+                    .map(|(_, state)| state.starts_with('Z'))
+            })
+            .unwrap_or(true)
     }
 }

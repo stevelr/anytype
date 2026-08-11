@@ -65,35 +65,8 @@ jobs:
         with:
           shared-key: anyr-anyback-live
 
-      - name: Provision an isolated headless server
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nftables
-          umask 077
-          server_log="$RUNNER_TEMP/anytype-headless-server.log"
-          : > "$server_log"
-          anytype_bin="$(command -v anytype)"
-          setsid env ANYTYPE_CLI_BIN="$anytype_bin" \
-            bash scripts/anytype-nonet > "$server_log" 2>&1 < /dev/null &
-          up=""
-          for _ in $(seq 90); do
-            if timeout 2 bash -c 'exec 3<>/dev/tcp/10.222.0.2/31012' 2>/dev/null; then
-              up=1
-              break
-            fi
-            sleep 2
-          done
-          if [[ -z "$up" ]]; then
-            printf '%s\n' "headless server did not open 10.222.0.2:31012" >&2
-            tail -c 4096 -- "$server_log" >&2
-            exit 1
-          fi
-          # Give first-boot initialization a settling margin after the port opens.
-          sleep 20
-          printf 'ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE=%s\n' "$server_log" >> "$GITHUB_ENV"
-
+      # The gate exercises the installed binary, so the install happens first
+      # and provisioning reuses it (via ANYR_BIN) for `anyr init-cli`.
       - name: Install anyr
         shell: bash
         run: |
@@ -104,29 +77,9 @@ jobs:
           [[ -x "$anyr_bin" ]] || { printf '%s\n' "installed anyr binary is missing" >&2; exit 1; }
           printf 'ANYR_BIN=%s\n' "$anyr_bin" >> "$GITHUB_ENV"
 
-      # Mints a throwaway account and API key on the fresh server through
-      # `anyr init-cli --save-env`, which also verifies HTTP and gRPC
-      # authentication. It runs inside the namespace (as the runner user)
-      # because the server and the anytype CLI meet over namespace-local
-      # loopback; the saved endpoints are then rewritten to the veth address
-      # the host-side gates connect to.
-      - name: Create ephemeral credentials
+      - name: Provision an isolated headless server with ephemeral credentials
         shell: bash
-        run: |
-          set -euo pipefail
-          umask 077
-          env_file="$RUNNER_TEMP/anyr-anyback-headless.env"
-          keystore="$RUNNER_TEMP/anyr-anyback-ci-keystore.db"
-          anytype_bin="$(command -v anytype)"
-          sudo ip netns exec anycli_block runuser "$(whoami)" -c \
-            "env ANYTYPE_CLI_BIN='$anytype_bin' \
-              ANYTYPE_KEYSTORE='file:path=$keystore' \
-              ANYTYPE_KEYSTORE_SERVICE=anyr \
-              '$ANYR_BIN' init-cli --save-env '$env_file'"
-          [[ -s "$env_file" ]] || { printf '%s\n' "init-cli produced no environment file" >&2; exit 1; }
-          sed -i 's|http://127\.0\.0\.1:|http://10.222.0.2:|g' "$env_file"
-          printf 'export ANYTYPE_TEST_URL="$ANYTYPE_URL"\n' >> "$env_file"
-          printf 'ANYR_ANYBACK_HEADLESS_ENV_FILE=%s\n' "$env_file" >> "$GITHUB_ENV"
+        run: bash .github/scripts/provision-headless-server.sh ANYR_ANYBACK_HEADLESS
 
       - name: Run the required serial live gate
         shell: bash

@@ -18,7 +18,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   so fixture discovery and its tests can only run unprivileged. The matrix's
   test step now also uses the offline split from `just test`, excluding the
   anytype-api integration targets that require a live server it does not
-  provision. Gate steps keep going after a failed gate and tests run with
+  provision.
+- Run the live and clean-server tiers on GitHub-hosted runners against a
+  disposable namespace-isolated headless server with ephemeral credentials
+  (`.github/scripts/provision-headless-server.sh`), replacing the retired
+  self-hosted `anytype-headless` runner. The runner enables a systemd user
+  manager session for the transient-scope gate wrapper, and the clean-server
+  tier's host reset script is obsolete because every run starts clean. Gate steps keep going after a failed gate and tests run with
   `--no-fail-fast`, so one run reports every failing gate per platform.
 - Map the new anytype-api HTTP deadline errors onto existing MCP error
   classes. Mutation-scoped deadline expirations and explicitly indeterminate
@@ -217,6 +223,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Treat an unreaped zombie as dead in the process-group guard test: under a
+  minimal container init that never reaps orphans, `kill(pid, 0)` keeps
+  succeeding on the SIGKILLed descendant, so liveness now also consults the
+  `/proc` process state.
 - Make the acceptance harness and process-level fixtures portable to the
   qualification matrix: Windows file identity (volume, file index, link
   count) is read through the stable `GetFileInformationByHandle` call

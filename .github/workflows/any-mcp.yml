@@ -106,33 +106,53 @@ jobs:
     name: stdio to headless Anytype
     if: ${{ inputs.tier == 'live' || inputs.tier == 'all' }}
     needs: portable-contracts
-    environment: anytype-headless
-    runs-on:
-      - self-hosted
-      - linux
-      - anytype-headless
-    timeout-minutes: 30
-    concurrency:
-      group: anytype-headless-live
-      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        run: rustup show
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
-      - name: Install Python 3.14
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.14"
+      # Later steps need the pinned toolchain, python, and anytype-cli outside
+      # a `nix develop` wrapper, so the devshell PATH is promoted to the job.
+      - name: Expose pinned devshell tools to the job
+        run: |
+          nix develop --command bash -euo pipefail -c '
+            {
+              printf "PATH=%s\n" "$PATH"
+              printf "PROTOC=%s\n" "$PROTOC"
+              printf "PROTOC_INCLUDE=%s\n" "$PROTOC_INCLUDE"
+            } >> "$GITHUB_ENV"
+          '
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: any-mcp-headless
+
+      # GitHub-hosted runners start without a systemd user manager session,
+      # which the transient-scope wrapper (run-live-cgroup.sh) requires.
+      - name: Enable the systemd user manager
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dbus-user-session
+          sudo loginctl enable-linger "$(whoami)"
+          runtime_dir="/run/user/$(id -u)"
+          for _ in $(seq 30); do
+            [[ -S "$runtime_dir/bus" ]] && break
+            sleep 1
+          done
+          [[ -S "$runtime_dir/bus" ]] || { printf '%s\n' "user session bus did not appear" >&2; exit 1; }
+          {
+            printf 'XDG_RUNTIME_DIR=%s\n' "$runtime_dir"
+            printf 'DBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus\n' "$runtime_dir"
+          } >> "$GITHUB_ENV"
 
       - name: Verify transient user-scope support
         shell: bash
@@ -152,11 +172,12 @@ jobs:
           chmod 0700 "$private_dir"
           printf 'ANY_MCP_LIVE_PRIVATE_DIR=%s\n' "$private_dir" >> "$GITHUB_ENV"
 
+      - name: Provision an isolated headless server with ephemeral credentials
+        shell: bash
+        run: bash .github/scripts/provision-headless-server.sh ANY_MCP_HEADLESS
+
       - name: Run serial production-router and stdio-to-headless gates
         shell: bash
-        env:
-          ANY_MCP_HEADLESS_ENV_FILE: ${{ vars.ANY_MCP_HEADLESS_ENV_FILE }}
-          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
           test -n "$ANY_MCP_HEADLESS_ENV_FILE" && test -r "$ANY_MCP_HEADLESS_ENV_FILE"
@@ -194,13 +215,11 @@ jobs:
       - name: Capture bounded reviewed server evidence on failure
         if: failure()
         shell: bash
-        env:
-          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
           artifact="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-server-events.txt"
           python3 any-mcp/scripts/reviewed-evidence.py capture \
-            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" \
+            "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE:-}" \
             "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" "$artifact"
           printf 'ANY_MCP_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
 
@@ -228,33 +247,53 @@ jobs:
     name: clean-server live gate
     if: ${{ inputs.tier == 'clean-server' || inputs.tier == 'all' }}
     needs: portable-contracts
-    environment: anytype-headless
-    runs-on:
-      - self-hosted
-      - linux
-      - anytype-headless
-    timeout-minutes: 45
-    concurrency:
-      group: anytype-headless-live
-      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain (from rust-toolchain.toml)
-        run: rustup show
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
-      - name: Install Python 3.14
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.14"
+      # Later steps need the pinned toolchain, python, and anytype-cli outside
+      # a `nix develop` wrapper, so the devshell PATH is promoted to the job.
+      - name: Expose pinned devshell tools to the job
+        run: |
+          nix develop --command bash -euo pipefail -c '
+            {
+              printf "PATH=%s\n" "$PATH"
+              printf "PROTOC=%s\n" "$PROTOC"
+              printf "PROTOC_INCLUDE=%s\n" "$PROTOC_INCLUDE"
+            } >> "$GITHUB_ENV"
+          '
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: any-mcp-headless
+
+      # GitHub-hosted runners start without a systemd user manager session,
+      # which the transient-scope wrapper (run-live-cgroup.sh) requires.
+      - name: Enable the systemd user manager
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dbus-user-session
+          sudo loginctl enable-linger "$(whoami)"
+          runtime_dir="/run/user/$(id -u)"
+          for _ in $(seq 30); do
+            [[ -S "$runtime_dir/bus" ]] && break
+            sleep 1
+          done
+          [[ -S "$runtime_dir/bus" ]] || { printf '%s\n' "user session bus did not appear" >&2; exit 1; }
+          {
+            printf 'XDG_RUNTIME_DIR=%s\n' "$runtime_dir"
+            printf 'DBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus\n' "$runtime_dir"
+          } >> "$GITHUB_ENV"
 
       - name: Verify transient user-scope support
         shell: bash
@@ -274,23 +313,14 @@ jobs:
           chmod 0700 "$private_dir"
           printf 'ANY_MCP_LIVE_PRIVATE_DIR=%s\n' "$private_dir" >> "$GITHUB_ENV"
 
-      - name: Provision a clean isolated headless server
+      # The disposable per-runner server is always clean, so this tier no
+      # longer needs the self-hosted host's reset script.
+      - name: Provision an isolated headless server with ephemeral credentials
         shell: bash
-        env:
-          ANY_MCP_HEADLESS_RESET_SCRIPT: ${{ vars.ANY_MCP_HEADLESS_RESET_SCRIPT }}
-        run: |
-          set -euo pipefail
-          test -n "$ANY_MCP_HEADLESS_RESET_SCRIPT"
-          test "${ANY_MCP_HEADLESS_RESET_SCRIPT#/}" != "$ANY_MCP_HEADLESS_RESET_SCRIPT"
-          test -x "$ANY_MCP_HEADLESS_RESET_SCRIPT"
-          bash any-mcp/scripts/run-live-cgroup.sh command reset -- \
-            "$ANY_MCP_HEADLESS_RESET_SCRIPT"
+        run: bash .github/scripts/provision-headless-server.sh ANY_MCP_HEADLESS
 
       - name: Run all serial production-router and stdio-to-headless targets
         shell: bash
-        env:
-          ANY_MCP_HEADLESS_ENV_FILE: ${{ vars.ANY_MCP_HEADLESS_ENV_FILE }}
-          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
           test -n "$ANY_MCP_HEADLESS_ENV_FILE" && test -r "$ANY_MCP_HEADLESS_ENV_FILE"
@@ -328,13 +358,11 @@ jobs:
       - name: Capture bounded reviewed server evidence on failure
         if: failure()
         shell: bash
-        env:
-          ANY_MCP_HEADLESS_REDACTED_LOG_FILE: ${{ vars.ANY_MCP_HEADLESS_REDACTED_LOG_FILE }}
         run: |
           set -euo pipefail
           artifact="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-server-events.txt"
           python3 any-mcp/scripts/reviewed-evidence.py capture \
-            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" \
+            "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE:-}" \
             "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" "$artifact"
           printf 'ANY_MCP_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
 

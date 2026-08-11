@@ -151,7 +151,7 @@ jobs:
       - name: Install native prerequisites
         shell: bash
         run: |
-          pacman -S --noconfirm --needed gcc jq just protobuf python rustup
+          pacman -S --noconfirm --needed gcc jq just lsof protobuf python rustup
           useradd --create-home builder
           chown -R builder: .
           runuser -u builder -- rustup show
