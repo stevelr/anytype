@@ -388,8 +388,12 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
     assert!(soak.contains("if: ${{ inputs.tier == 'soak' || inputs.tier == 'all' }}"));
     for block in [required, soak] {
         assert!(block.contains("needs: ignored-test-inventory"));
-        assert!(block.contains("runs-on: [ self-hosted, linux, anytype-headless ]"));
-        assert!(block.contains("actions/checkout@11d5960a326750d5838078e36cf38b85af677262"));
+        // The disposable per-runner server replaced the retired self-hosted
+        // anytype-headless runner.
+        assert!(block.contains("runs-on: ubuntu-24.04"));
+        assert!(!block.contains("self-hosted"));
+        assert!(block.contains("provision-headless-server.sh ANY_MCP_HEADLESS"));
+        assert!(block.contains("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"));
         assert!(block.contains("python3 anytype-api/scripts/run-live-gate.py"));
         assert!(block.contains("test -f \"/proc/self/fd/$reviewed_fd\""));
         assert!(block.contains("stat -Lc '%d|%i|%s' \"/proc/self/fd/$reviewed_fd\""));

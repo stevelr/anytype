@@ -200,7 +200,7 @@ jobs:
         with:
           shared-key: anytype-api-headless
       # The disposable per-runner server is always clean, so the soak tier no
-      # longer needs the self-hosted host's reset script.
+      # longer needs a host-side reset script.
       - name: Provision an isolated headless server with ephemeral credentials
         shell: bash
         run: bash .github/scripts/provision-headless-server.sh ANY_MCP_HEADLESS

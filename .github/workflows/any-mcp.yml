@@ -314,7 +314,7 @@ jobs:
           printf 'ANY_MCP_LIVE_PRIVATE_DIR=%s\n' "$private_dir" >> "$GITHUB_ENV"
 
       # The disposable per-runner server is always clean, so this tier no
-      # longer needs the self-hosted host's reset script.
+      # longer needs a host-side reset script.
       - name: Provision an isolated headless server with ephemeral credentials
         shell: bash
         run: bash .github/scripts/provision-headless-server.sh ANY_MCP_HEADLESS

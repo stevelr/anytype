@@ -389,6 +389,12 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
     // Every platform row of the matrix runs this gate, and a Windows checkout
     // may translate the committed line endings. The reviewed representation is
     // therefore pinned in its canonical newline form.
+    //
+    // Updating after an intentional workflow change: review the workflow
+    // diff, run this test, and replace the pinned digest with the reported
+    // `left` value (equivalently `sha256sum .github/workflows/any-mcp.yml`
+    // on an LF checkout). The structural assertions below are the audit
+    // checklist; extend them when the change adds or removes an invariant.
     let workflow = include_str!("../../.github/workflows/any-mcp.yml").replace("\r\n", "\n");
     let workflow = workflow.as_str();
     let digest = Sha256::digest(workflow.as_bytes())
@@ -396,7 +402,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     assert_eq!(
-        digest, "c847ebd48f3866051520f1abcd220160e83b9f9b6b7c0bf56775c474b61fb68c",
+        digest, "4bb4e3d1da52e346408b9633b57ea13330ec11208b4d2d92e0bf6bdb8b347f89",
         "workflow policy is an exact reviewed representation; audit before updating this digest"
     );
     let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
@@ -441,10 +447,9 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
     ] {
         assert!(compact_whitespace(block).contains(predicate));
         assert!(block.contains("needs: portable-contracts"));
-        assert!(block.contains("      - self-hosted"));
-        assert!(block.contains("      - linux"));
-        assert!(block.contains("      - anytype-headless"));
-        assert!(block.contains("group: anytype-headless-live"));
+        assert!(block.contains("runs-on: ubuntu-24.04"));
+        assert!(block.contains("provision-headless-server.sh ANY_MCP_HEADLESS"));
+        assert!(block.contains("loginctl enable-linger"));
         assert!(!block.contains("tee"));
         assert!(block.contains("reviewed-evidence.py start"));
         assert!(block.contains("reviewed-evidence.py capture"));
@@ -465,14 +470,19 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
             );
         }
     }
-    assert_eq!(occurrences(workflow, "group: anytype-headless-live"), 2);
+    // The disposable per-runner server replaced the retired self-hosted
+    // anytype-headless runner outright: no runner labels, protection
+    // environment, cross-run concurrency group, or host reset script remain.
+    assert!(!workflow.contains("self-hosted"));
+    assert!(!workflow.contains("anytype-headless"));
+    assert!(!workflow.contains("command reset --"));
     assert_eq!(
-        occurrences(workflow, "run-live-cgroup.sh command auth --"),
+        occurrences(workflow, "provision-headless-server.sh ANY_MCP_HEADLESS"),
         2
     );
     assert_eq!(
-        occurrences(workflow, "run-live-cgroup.sh command reset --"),
-        1
+        occurrences(workflow, "run-live-cgroup.sh command auth --"),
+        2
     );
     assert_eq!(occurrences(workflow, "--test live_gate_manifest"), 1);
 
@@ -500,6 +510,20 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
             workflow,
             "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
         ),
+        1
+    );
+    assert_eq!(
+        occurrences(
+            workflow,
+            "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
+        ),
+        3
+    );
+    assert_eq!(
+        occurrences(
+            workflow,
+            "DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25"
+        ),
         3
     );
     assert_eq!(
@@ -507,9 +531,9 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
             workflow,
             "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
         ),
-        3
+        1
     );
-    assert_eq!(occurrences(workflow, "run: rustup show"), 3);
+    assert_eq!(occurrences(workflow, "run: rustup show"), 1);
     assert_eq!(
         occurrences(
             workflow,
