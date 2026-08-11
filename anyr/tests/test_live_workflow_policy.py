@@ -19,9 +19,7 @@ class LiveWorkflowPolicyTests(unittest.TestCase):
         # anytype-headless runner: the gate provisions its own isolated
         # server and credentials instead of leasing a shared host.
         self.assertNotIn("self-hosted", workflow)
-        self.assertIn(
-            "provision-headless-server.sh ANYR_ANYBACK_HEADLESS", workflow
-        )
+        self.assertIn("provision-headless-server.sh ANYR_ANYBACK_HEADLESS", workflow)
         self.assertIn("trap 'rm -rf -- \"$gate_dir\"' EXIT", workflow)
         self.assertIn("ANYR_PY_REQUIRE_LIVE=1", workflow)
         self.assertIn("python3 -B -m anyr.tests.run_required_python_cli", workflow)
