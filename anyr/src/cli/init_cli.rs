@@ -502,7 +502,8 @@ impl CliProcess {
         }
     }
 
-    #[cfg(test)]
+    // Only the unix scripted-CLI tests exercise a non-default timeout.
+    #[cfg(all(test, unix))]
     fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -688,6 +689,7 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    #[cfg(unix)]
     use anytype::{client::ClientConfig, prelude::AnytypeClient};
     use clap::Parser;
 
@@ -1341,6 +1343,7 @@ esac
         }
     }
 
+    #[cfg(unix)]
     fn assert_saved_environment(path: &Path) {
         let environment = fs::read_to_string(path).expect("read environment file");
         assert_eq!(

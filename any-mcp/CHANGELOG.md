@@ -223,6 +223,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Keep the Windows clippy gate clean: `ExportDestination` boxes its local
+  atomic-export variant (the Windows form of `AtomicExport` crosses the
+  large-enum-variant threshold), the non-Unix validator-fixture unlock
+  documents its clear-read-only usage, and the reviewed-log helpers that
+  only the Unix fail-closed path consumes are compiled only there.
 - Treat an unreaped zombie as dead in the process-group guard test: under a
   minimal container init that never reaps orphans, `kill(pid, 0)` keeps
   succeeding on the SIGKILLed descendant, so liveness now also consults the

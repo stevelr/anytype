@@ -1463,6 +1463,9 @@ fn inspect_reviewed_body_server_log(secrets: &[&[u8]]) -> TestResult<()> {
     )
 }
 
+// Non-Unix builds fail closed before the log window is read, leaving the
+// redaction arguments unused there.
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn inspect_reviewed_body_server_log_at(
     path: Option<OsString>,
     context_path: Option<OsString>,
@@ -1669,6 +1672,8 @@ fn inspect_reviewed_body_server_log_at(
     }
 }
 
+// Non-Unix builds fail closed before consulting anything but the run marker.
+#[cfg_attr(not(unix), allow(dead_code))]
 struct ReviewedEvidenceContext<'a> {
     run_marker: &'a str,
     start_device: u64,
@@ -1812,10 +1817,13 @@ fn parse_reviewed_context_number(value: &str) -> TestResult<u64> {
         .map_err(|_| sentinel_assertion("reviewed headless server-log context number was invalid"))
 }
 
+// Reviewed-log line validation runs only on the Unix fail-closed path.
+#[cfg(unix)]
 struct ReviewedServerEvent {
     values: std::collections::BTreeMap<String, String>,
 }
 
+#[cfg(unix)]
 impl<'de> serde::Deserialize<'de> for ReviewedServerEvent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1850,6 +1858,7 @@ impl<'de> serde::Deserialize<'de> for ReviewedServerEvent {
     }
 }
 
+#[cfg(unix)]
 fn reviewed_server_event_line(line: &str) -> bool {
     const KEYS: &[&str] = &[
         "timestamp",
@@ -11078,8 +11087,10 @@ mod keystore_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const RUN_MARKER: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    #[cfg(unix)]
     const REVIEWED_EVENT: &str = "{\"timestamp\":\"2026-07-23T00:00:00Z\",\"severity\":\"info\",\"component\":\"anytype\",\"category\":\"body_acceptance\"}";
 
+    #[cfg(unix)]
     fn write_reviewed_log(name: &str, contents: &[u8]) -> PathBuf {
         let path = temporary_path(name);
         std::fs::write(&path, contents).expect("write reviewed log fixture");

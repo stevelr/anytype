@@ -30,6 +30,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Compile the scripted-CLI test helpers that only the Unix `init-cli` tests
+  exercise on Unix alone, keeping the Windows clippy gate clean.
 - Require the protected live gate to run the ignored type-property preservation
   test exactly and reject skipped Python CLI coverage. The CLI suite now fails
   missing live prerequisites in required mode and creates its own real-operation

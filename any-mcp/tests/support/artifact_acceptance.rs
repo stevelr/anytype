@@ -6796,6 +6796,10 @@ fn permit_validator_fixture_write(path: &Path) -> Result<(), String> {
     let mut permissions = fs::metadata(path)
         .map_err(|_| "inspect private artifact validator fixture".to_owned())?
         .permissions();
+    // The lint's world-writable concern is Unix-only; this branch is compiled
+    // only for platforms where clearing read-only is the whole permission
+    // model available through std.
+    #[allow(clippy::permissions_set_readonly_false)]
     permissions.set_readonly(false);
     fs::set_permissions(path, permissions)
         .map_err(|_| "permit private artifact validator fixture mutation".to_owned())

@@ -2391,7 +2391,9 @@ enum ExportCompletion {
 }
 
 enum ExportDestination {
-    Local(AtomicExport),
+    // Boxed: AtomicExport is far larger than StagingPayload (its Windows
+    // variant crosses clippy's large-enum-variant threshold).
+    Local(Box<AtomicExport>),
     Remote(StagingPayload),
 }
 
@@ -2466,7 +2468,7 @@ async fn file_export(
                 }
             };
             (
-                ExportDestination::Local(destination),
+                ExportDestination::Local(Box::new(destination)),
                 ExportCompletion::Local { root_id },
                 input.expected_strong_etag.as_ref().cloned(),
             )
