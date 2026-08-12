@@ -4,6 +4,11 @@
 
 ### Changed
 
+- Retry a restored object's body verification inside the existing
+  deadline: on a freshly provisioned server the object can appear in the
+  listing before its block tree finishes materializing, and the gate
+  previously failed on the first read. A persistent mismatch still fails
+  with its own message.
 - The installed-binary backup/restore live gate now runs entirely on a
   GitHub-hosted runner: the pinned anytype-cli serves inside the
   sync-blocking `scripts/anytype-nonet` namespace and each run mints its own

@@ -416,6 +416,12 @@ fn verify_restored_content(
     expected_name: &str,
     expected_body: &str,
 ) -> Result<()> {
+    // The restored object can appear in the listing before its block tree
+    // finishes materializing on a freshly provisioned server, so a body
+    // mismatch is retried inside the same deadline instead of failing on
+    // the first read; a persistent mismatch still fails with its own
+    // message.
+    let mut last_disagreement = None;
     for _ in 0..40 {
         let listed = runner.run_json(&["object", "list", destination, "--all"], COMMAND_TIMEOUT)?;
         let items = listed
@@ -432,22 +438,24 @@ fn verify_restored_content(
                 &["object", "get", destination, restored_id],
                 COMMAND_TIMEOUT,
             )?;
-            ensure!(
-                restored.get("name").and_then(Value::as_str) == Some(expected_name),
-                "restored object name mismatch"
-            );
-            ensure!(
-                restored
-                    .get("markdown")
-                    .and_then(Value::as_str)
-                    .is_some_and(|body| body.contains(expected_body)),
-                "restored object body mismatch"
-            );
-            return Ok(());
+            if restored.get("name").and_then(Value::as_str) != Some(expected_name) {
+                last_disagreement = Some("restored object name mismatch");
+            } else if !restored
+                .get("markdown")
+                .and_then(Value::as_str)
+                .is_some_and(|body| body.contains(expected_body))
+            {
+                last_disagreement = Some("restored object body mismatch");
+            } else {
+                return Ok(());
+            }
         }
         thread::sleep(Duration::from_millis(750));
     }
-    bail!("restored semantic content was not found before the deadline")
+    match last_disagreement {
+        Some(disagreement) => bail!("{disagreement} after the verification deadline"),
+        None => bail!("restored semantic content was not found before the deadline"),
+    }
 }
 
 fn require_disposable_admission() -> Result<()> {
