@@ -20,8 +20,10 @@ use std::{
 
 use serde_json::{Value, json};
 
+// A hang bound, not a performance assertion: a debug-build child answering
+// its first frame on a loaded CI runner has exceeded five seconds.
 #[allow(dead_code)]
-const DEFAULT_DEADLINE: Duration = Duration::from_secs(5);
+const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// How long a non-graceful shutdown waits for an exiting child to become

@@ -137,6 +137,7 @@ jobs:
                   *) category="required-test-failed" ;;
                 esac
               fi
+              tail -c 65536 -- "$output" > "$RUNNER_TEMP/anyr-anyback-gate-output.log"
               rm -f -- "$output" "$category_file"
               printf 'required anyr live gate failed: %s\n' "$category" >&2
               return 1
@@ -151,6 +152,7 @@ jobs:
             local status=$?
             set -e
             if [[ "$status" -ne 0 ]] || ! python3 -B anyr/tests/live_gate_policy.py rust "$output"; then
+              tail -c 65536 -- "$output" > "$RUNNER_TEMP/anyr-anyback-gate-output.log"
               rm -f -- "$output"
               printf '%s\n' "required anyr type-property gate failed" >&2
               return 1
@@ -173,6 +175,18 @@ jobs:
             --ignored --exact --test-threads=1 --nocapture
           [[ -f "$marker" ]] || fail_preflight "required gate callback was not invoked"
           cmp --silent "$expected_marker" "$marker" || fail_preflight "required gate callback marker mismatch"
+
+      # The gates run against per-run throwaway credentials on a disposable
+      # server, so a bounded copy of the failed gate's output is retainable
+      # evidence rather than a secret-exposure risk.
+      - name: Retain bounded gate output on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: anyr-anyback-live-gate-output
+          path: ${{ runner.temp }}/anyr-anyback-gate-output.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Capture bounded server evidence on failure
         if: failure()

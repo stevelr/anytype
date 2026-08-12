@@ -223,6 +223,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Raise the stdio conformance harness frame deadline from five to thirty
+  seconds: it is a hang bound, not a performance assertion, and a
+  debug-build child answering its first frame on a loaded CI runner has
+  exceeded five seconds. The live-gate workflow also retains a bounded copy
+  of a failed gate's output as a run artifact, which per-run throwaway
+  credentials make safe.
 - Unblock the first Windows test run: the post-dispatch indeterminate tests
   in `object_update` and `object_edit` give their mode-0 deadline real slack
   on both sides (a 20ms budget could expire before the connection was even

@@ -33,7 +33,7 @@ case "$var_prefix" in
 esac
 
 sudo apt-get update -qq
-sudo apt-get install -y -qq nftables
+sudo apt-get install -y -qq nftables socat
 
 umask 077
 server_log="$RUNNER_TEMP/anytype-headless-server.log"
@@ -62,6 +62,14 @@ if [[ -z "$up" ]]; then
 fi
 # Give first-boot initialization a settling margin after the port opens.
 sleep 20
+
+# The gate policies admit loopback endpoints only, so host loopback is
+# bridged into the namespace instead of pointing the gates at the veth
+# address. The forwarders die with the runner.
+for port in 31010 31012; do
+  setsid socat "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" \
+    "TCP:10.222.0.2:$port" > /dev/null 2>&1 < /dev/null &
+done
 
 anyr_bin="${ANYR_BIN:-}"
 if [[ -z "$anyr_bin" ]]; then
@@ -101,24 +109,24 @@ if [[ ! -s "$env_file" ]]; then
 fi
 
 # Account creation started the HTTP API listener; make sure the host-side
-# gates can reach it through the namespace forward before handing over.
+# gates can reach it over loopback before handing over. The probe must see
+# an HTTP response, not just a connect: the loopback forwarder accepts
+# unconditionally even while the namespace-side listener is still absent.
 http_up=""
 for _ in $(seq 30); do
-  if timeout 2 bash -c 'exec 3<>/dev/tcp/10.222.0.2/31012' 2>/dev/null; then
+  if curl -so /dev/null --max-time 5 "http://127.0.0.1:31012/"; then
     http_up=1
     break
   fi
   sleep 2
 done
 if [[ -z "$http_up" ]]; then
-  printf '%s\n' "headless server did not open 10.222.0.2:31012 after login" >&2
+  printf '%s\n' "headless server did not answer on 127.0.0.1:31012 after login" >&2
   tail -c 4096 -- "$server_log" >&2
   exit 1
 fi
 
-# The gates connect from outside the namespace, where the server is reachable
-# at the veth address instead of loopback.
-sed -i 's|http://127\.0\.0\.1:|http://10.222.0.2:|g' "$env_file"
+# The saved loopback endpoints hold on the host too, through the forwarders.
 # shellcheck disable=SC2016 # the reference expands when the file is sourced
 printf 'export ANYTYPE_TEST_URL="$ANYTYPE_URL"\n' >> "$env_file"
 

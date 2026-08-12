@@ -2996,7 +2996,12 @@ mod tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
+    // The deadline tests run in real time until the fixture has accepted the
+    // request, then freeze the clock to advance past the deadline exactly.
+    // Under `start_paused`, auto-advance can virtually expire the deadline
+    // while the real TCP connect is still in flight, after which the fixture
+    // never accepts and the test parks forever.
+    #[tokio::test]
     async fn standard_deadline_bounds_stalled_headers_and_records_one_timeout() {
         let (client, accepted, server) = deadline_fixture(
             one_second_standard_policy(),
@@ -3007,6 +3012,7 @@ mod tests {
         let request_client = client.clone();
         let request = tokio::spawn(async move { request_client.send::<()>(get_request()).await });
         accepted.await.expect("request accepted");
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(1)).await;
         let error = request.await.expect("request task").expect_err("deadline");
         let diagnostic = error.diagnostic().to_string();
@@ -3038,7 +3044,7 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn standard_deadline_includes_success_and_error_bodies() {
         for prefix in [
             b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n{".as_slice(),
@@ -3052,6 +3058,7 @@ mod tests {
             .await;
             let request = tokio::spawn(async move { client.send::<()>(get_request()).await });
             prefix_written.await.expect("response prefix written");
+            tokio::time::pause();
             tokio::time::advance(Duration::from_secs(1)).await;
             assert!(matches!(
                 request.await.expect("request task"),
@@ -3061,10 +3068,11 @@ mod tests {
                 })
             ));
             server.abort();
+            tokio::time::resume();
         }
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn mutation_deadline_is_indeterminate_and_dispatches_once() {
         let (client, accepted, server) = deadline_fixture(
             one_second_standard_policy(),
@@ -3084,6 +3092,7 @@ mod tests {
                 .await
         });
         accepted.await.expect("mutation accepted");
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(1)).await;
         let error = request.await.expect("request task").expect_err("deadline");
         let diagnostic = error.diagnostic().to_string();
@@ -3106,7 +3115,7 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn shorter_caller_transport_timeout_wins_and_is_measured_once() {
         let policy = HttpTimeoutPolicy {
             standard_operation: Some(Duration::from_secs(10)),
@@ -3123,6 +3132,7 @@ mod tests {
         let request_client = client.clone();
         let request = tokio::spawn(async move { request_client.send::<()>(get_request()).await });
         accepted.await.expect("request accepted");
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(1)).await;
         let error = request
             .await
@@ -3143,7 +3153,7 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn mutation_caller_transport_timeout_reports_indeterminate_outcome() {
         let policy = HttpTimeoutPolicy {
             standard_operation: Some(Duration::from_secs(10)),
@@ -3169,6 +3179,7 @@ mod tests {
                 .await
         });
         accepted.await.expect("mutation accepted");
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(1)).await;
         let error = request
             .await
@@ -3381,7 +3392,7 @@ mod tests {
         server.await.expect("retry server");
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn delayed_file_response_uses_long_profile() {
         let policy = HttpTimeoutPolicy {
             standard_operation: Some(Duration::from_secs(120)),
@@ -3397,6 +3408,7 @@ mod tests {
                 .await
         });
         accepted.await.expect("file request accepted");
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(600)).await;
         assert!(matches!(
             file.await.expect("file request task"),
@@ -3581,7 +3593,7 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn multipart_uses_long_profile_instead_of_standard_profile() {
         let policy = HttpTimeoutPolicy {
             standard_operation: Some(Duration::from_secs(1)),
@@ -3604,6 +3616,7 @@ mod tests {
                 .await
         });
         accepted.await.expect("multipart accepted");
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(10)).await;
         assert!(matches!(
             multipart.await.expect("multipart task"),

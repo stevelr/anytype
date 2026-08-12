@@ -239,6 +239,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Run the HTTP deadline tests in real time until the fixture accepts the
+  request and only then freeze the clock: under `start_paused`, auto-advance
+  could virtually expire the deadline while the real TCP connect was still
+  in flight, leaving the fixture parked forever on a slow runner.
 - Make two unit tests portable to the CI qualification matrix: the gRPC
   port-discovery test now tolerates a host without `lsof` the same way
   `find_grpc` does (discovery unavailable, not an error), and the scripted
