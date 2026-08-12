@@ -403,6 +403,12 @@ mod tests {
         let export = base.join("export");
         fs::create_dir_all(&import).expect("import directory");
         fs::create_dir_all(&export).expect("export directory");
+        crate::artifact_roots::prepare_test_private_directory(&base)
+            .expect("private base directory");
+        crate::artifact_roots::prepare_test_private_directory(&import)
+            .expect("private import directory");
+        crate::artifact_roots::prepare_test_private_directory(&export)
+            .expect("private export directory");
         (base, import, export)
     }
 
@@ -418,9 +424,12 @@ mod tests {
 
     #[test]
     fn client_root_uris_admit_only_local_absolute_directories() {
-        assert!(parse_client_root_uri("file:///tmp/inbox").is_ok());
-        assert!(parse_client_root_uri("file://localhost/tmp/inbox").is_ok());
-        assert!(parse_client_root_uri("file:///tmp/with%20space").is_ok());
+        let inbox = directory_uri(&std::env::temp_dir().join("inbox"));
+        let local_inbox = inbox.replacen("file:///", "file://localhost/", 1);
+        let with_space = directory_uri(&std::env::temp_dir().join("with space"));
+        assert!(parse_client_root_uri(&inbox).is_ok());
+        assert!(parse_client_root_uri(&local_inbox).is_ok());
+        assert!(parse_client_root_uri(&with_space).is_ok());
 
         for rejected in [
             "",

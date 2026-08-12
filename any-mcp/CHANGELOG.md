@@ -223,6 +223,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Make the portable suites deterministic on macOS and Windows: loopback HTTP
+  fixtures explicitly restore blocking mode on accepted sockets, Windows test
+  roots and selected configuration files receive owner-only ACLs, and
+  platform-native paths replace Unix-only fixture literals. Artifact gate
+  directory handles now use the Windows directory-open flag while retaining
+  reparse-point refusal.
+- Give the expired-reader staging test a five-second scheduling allowance. The
+  assertion still proves that request handling never waits for a stalled
+  reader, without treating a heavily loaded Arch runner as a product timeout.
+  Cleanup-cancellation tests now pause at an asynchronous notification point,
+  making task abortion deterministic instead of racing a blocking barrier.
 - Type the Linux rlimit resource portably: glibc's `__rlimit_resource_t`
   does not exist on musl (the static release target), which uses a plain
   `c_int`.

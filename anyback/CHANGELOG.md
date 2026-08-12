@@ -44,6 +44,10 @@
 
 ### Fixed
 
+- Compare installed-binary live-gate bodies using the API's canonical Markdown
+  representation, so server-added escaping and trailing paragraph whitespace
+  do not masquerade as backup loss. Directory-archive listings and protobuf
+  import filtering now use platform-independent path handling on Windows.
 - Live backup and restore harnesses now isolate file-backed keystores in private
   command-scoped clones, including SQLite sidecars, and remove the clones after
   each child process exits.

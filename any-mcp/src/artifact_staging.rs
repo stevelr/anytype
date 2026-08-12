@@ -509,8 +509,8 @@ static PUBLICATION_TEST_SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> =
 #[derive(Clone)]
 struct CleanupTestPause {
     record_name: String,
-    entered: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 #[cfg(test)]
@@ -553,7 +553,7 @@ fn pause_publication_for_test(record_name: &str) {
 }
 
 #[cfg(test)]
-fn pause_cleanup_for_test(record_name: &str) {
+async fn pause_cleanup_for_test(record_name: &str) {
     let pause = CLEANUP_TEST_PAUSE
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
@@ -561,8 +561,8 @@ fn pause_cleanup_for_test(record_name: &str) {
         .and_then(|pause| pause.as_ref().cloned())
         .filter(|pause| pause.record_name == record_name);
     if let Some(pause) = pause {
-        pause.entered.wait();
-        pause.release.wait();
+        pause.entered.notify_one();
+        pause.release.notified().await;
     }
 }
 
@@ -3122,7 +3122,7 @@ impl ArtifactStaging {
     async fn cleanup_coordinator(&self, id: [u8; RECORD_BYTES], record: Arc<StageRecord>) -> bool {
         let _claim = CleanupClaimGuard(Arc::clone(&record.cleanup_blocked));
         #[cfg(test)]
-        pause_cleanup_for_test(&record.record_name);
+        pause_cleanup_for_test(&record.record_name).await;
         let removed = self.cleanup_pending_record(&record).await;
         if removed {
             self.remove_owned_record(id, &record).await;
@@ -3763,12 +3763,8 @@ mod tests {
             .expect("canonical temporary directory")
             .join(format!("any-mcp-stage-{suffix:016x}"));
         std::fs::create_dir(&root).expect("create staging root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-                .expect("make staging root owner-private");
-        }
+        crate::artifact_roots::prepare_test_private_directory(&root)
+            .expect("make staging root owner-private");
         let config = staging_test_config_with_limits(&root, limits_toml);
         let roots = RootRegistry::activate(&config).expect("activate empty local roots");
         let shutdown = CancellationToken::new();
@@ -3835,9 +3831,9 @@ mod tests {
 
     fn install_cleanup_pause(
         record_name: &str,
-    ) -> (Arc<std::sync::Barrier>, Arc<std::sync::Barrier>) {
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
         let pause = CleanupTestPause {
             record_name: record_name.to_owned(),
             entered: Arc::clone(&entered),
@@ -4554,7 +4550,7 @@ mod tests {
         assert_eq!(document.cleanup_evidence, None);
 
         tokio::time::timeout(
-            Duration::from_millis(200),
+            Duration::from_secs(5),
             test.staging.allocate_export(
                 space_id(),
                 1,
@@ -5498,12 +5494,8 @@ mod tests {
             .expect("canonical temporary directory")
             .join(format!("any-mcp-stage-{suffix:016x}"));
         std::fs::create_dir(&root).expect("create staging root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-                .expect("make staging root owner-private");
-        }
+        crate::artifact_roots::prepare_test_private_directory(&root)
+            .expect("make staging root owner-private");
         let config = staging_test_config(&root);
         let roots = RootRegistry::activate(&config).expect("activate empty local roots");
         let shutdown = CancellationToken::new();
@@ -6015,9 +6007,7 @@ mod tests {
         let staging = test.staging.clone();
         let handle = allocation.handle.clone();
         let release_task = tokio::spawn(async move { staging.release(&handle).await });
-        tokio::task::spawn_blocking(move || entered.wait())
-            .await
-            .expect("cleanup coordinator entered");
+        entered.notified().await;
         release_task.abort();
         assert!(
             release_task
@@ -6025,9 +6015,7 @@ mod tests {
                 .expect_err("release task cancelled")
                 .is_cancelled()
         );
-        tokio::task::spawn_blocking(move || release.wait())
-            .await
-            .expect("release cleanup coordinator");
+        release.notify_one();
         clear_cleanup_pause();
 
         let staged_path = payload_path(&test.root, &allocation.record);
@@ -6062,9 +6050,7 @@ mod tests {
         let staging = test.staging.clone();
         let handle = allocation.handle.clone();
         let release_task = tokio::spawn(async move { staging.release(&handle).await });
-        tokio::task::spawn_blocking(move || entered.wait())
-            .await
-            .expect("cleanup coordinator entered");
+        entered.notified().await;
         release_task.abort();
         assert!(
             release_task
@@ -6072,9 +6058,7 @@ mod tests {
                 .expect_err("release task cancelled")
                 .is_cancelled()
         );
-        tokio::task::spawn_blocking(move || release.wait())
-            .await
-            .expect("release cleanup coordinator");
+        release.notify_one();
         clear_cleanup_pause();
 
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -6117,13 +6101,9 @@ mod tests {
         let task = test
             .staging
             .spawn_cleanup_coordinator(id, Arc::clone(&record));
-        tokio::task::spawn_blocking(move || entered.wait())
-            .await
-            .expect("coordinator entered");
+        entered.notified().await;
         task.abort();
-        tokio::task::spawn_blocking(move || release.wait())
-            .await
-            .expect("release coordinator pause");
+        release.notify_one();
         clear_cleanup_pause();
         assert!(task.await.expect_err("coordinator aborted").is_cancelled());
         tokio::time::timeout(Duration::from_secs(1), async {

@@ -4,7 +4,8 @@ A workflow-oriented Model Context Protocol server for Anytype.
 
 `any-mcp` is designed for reliable agent workflows such as discovering, reading, and safely editing documents.
 
-**Status: Pre-release, under active development. Only tested on Linux and MacOS.**
+**Status: Pre-release, under active development. Portable CI covers Linux,
+macOS, and Windows; cross-platform qualification is ongoing.**
 
 Agents can use the versioned [`any-mcp` skill](../skills/any-mcp/SKILL.md) for
 safe tool selection and tested PKM recipes, including Markdown capture, file

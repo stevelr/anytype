@@ -1842,6 +1842,10 @@ mod tests {
 
     const MINIMAL: &str = "schema_version = 1\n[spaces]\nread_only = false\n";
 
+    fn test_absolute_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
     #[test]
     fn no_selector_uses_cwd_file_before_defaults() {
         let selector =
@@ -1861,10 +1865,11 @@ mod tests {
 
     #[test]
     fn command_line_wins_without_validating_environment() {
+        let selected = test_absolute_path("any-mcp-config.toml");
         let selector = ConfigSelector::from_args_and_env(
             [
                 OsString::from("--config"),
-                OsString::from("/tmp/config.toml"),
+                selected.clone().into_os_string(),
             ],
             Some(OsString::from("relative-and-ignored")),
         )
@@ -1873,7 +1878,7 @@ mod tests {
         assert!(selector.is_selected());
 
         let short = ConfigSelector::from_args_and_env(
-            [OsString::from("-c"), OsString::from("/tmp/config.toml")],
+            [OsString::from("-c"), selected.into_os_string()],
             Some(OsString::from("relative-and-ignored")),
         )
         .expect("short command-line selector wins");
@@ -2032,27 +2037,30 @@ mod tests {
 
     #[test]
     fn root_identifiers_are_unique_after_canonicalization_and_across_capabilities() {
+        let import = test_absolute_path("any-mcp-import");
+        let export = test_absolute_path("any-mcp-export");
         let duplicate = format!(
-            "{MINIMAL}\n[[roots.import]]\nid = \"café\"\npath = \"/tmp/import\"\n\
-             [[roots.export]]\nid = \"café\"\npath = \"/tmp/export\"\n"
+            "{MINIMAL}\n[[roots.import]]\nid = \"café\"\npath = {import:?}\n\
+             [[roots.export]]\nid = \"café\"\npath = {export:?}\n"
         );
         assert!(ArtifactConfig::from_toml(&duplicate).is_err());
 
         let case_collision = format!(
-            "{MINIMAL}\n[[roots.import]]\nid = \"inbox\"\npath = \"/tmp/import\"\n\
-             [[roots.export]]\nid = \"INBOX\"\npath = \"/tmp/export\"\n"
+            "{MINIMAL}\n[[roots.import]]\nid = \"inbox\"\npath = {import:?}\n\
+             [[roots.export]]\nid = \"INBOX\"\npath = {export:?}\n"
         );
         let error = ArtifactConfig::from_toml(&case_collision)
             .expect_err("ASCII case-colliding root identifiers");
         assert_eq!(error.to_string(), "invalid any-mcp artifact root");
 
         let distinct = format!(
-            "{MINIMAL}\n[[roots.import]]\nid = \"InboxA\"\npath = \"/tmp/import\"\n\
-             [[roots.export]]\nid = \"inboxB\"\npath = \"/tmp/export\"\n"
+            "{MINIMAL}\n[[roots.import]]\nid = \"InboxA\"\npath = {import:?}\n\
+             [[roots.export]]\nid = \"inboxB\"\npath = {export:?}\n"
         );
         ArtifactConfig::from_toml(&distinct).expect("non-colliding mixed-case roots");
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_path_representations_are_exact_and_native_round_trip() {
         let bytes = URL_SAFE_NO_PAD.encode(b"/tmp/native-\xff");
@@ -2194,8 +2202,9 @@ mod tests {
 
     #[test]
     fn staging_requires_loopback_and_https_base_when_enabled() {
+        let staging = test_absolute_path("any-mcp-staging");
         let valid = format!(
-            "{MINIMAL}\n[staging]\nenabled = true\nroot = \"/tmp/staging\"\n\
+            "{MINIMAL}\n[staging]\nenabled = true\nroot = {staging:?}\n\
              bind = \"127.0.0.1:8765\"\n\
              public_base_url = \"https://example.invalid/artifacts/v1/\"\n"
         );
@@ -2206,9 +2215,10 @@ mod tests {
 
     #[test]
     fn validator_policy_uses_closed_driver_and_mime_grammars() {
+        let executable = test_absolute_path("any-mcp-file-validator");
         let valid = format!(
             "{MINIMAL}\n[[validators]]\nid = \"mime\"\ndriver = \"file-mime\"\n\
-             path = \"/usr/bin/file\"\nsha256 = \"{}\"\nrequired = false\n\
+             path = {executable:?}\nsha256 = \"{}\"\nrequired = false\n\
              mime = [\"*/*\", \"image/*\", \"application/json\"]\ntimeout_secs = 5\n\
              memory_bytes = 67108864\ninput_bytes = 1048576\nstdout_bytes = 4096\n\
              stderr_bytes = 4096\nfields = 8\nfield_bytes = 1024\n\
@@ -2229,12 +2239,12 @@ mod tests {
 
     #[test]
     fn debug_and_errors_do_not_expose_physical_paths() {
-        let secret = "/tmp/operator-secret-root";
+        let secret = test_absolute_path("operator-secret-root");
         let config = ArtifactConfig::from_toml(&format!(
-            "{MINIMAL}\n[[roots.import]]\nid = \"inbox\"\npath = \"{secret}\"\n"
+            "{MINIMAL}\n[[roots.import]]\nid = \"inbox\"\npath = {secret:?}\n"
         ))
         .expect("config");
-        assert!(!format!("{config:?}").contains(secret));
+        assert!(!format!("{config:?}").contains(&secret.to_string_lossy().to_string()));
 
         let error = ArtifactConfig::from_toml(&format!(
             "{MINIMAL}\n[[roots.import]]\nid = \"inbox\"\npath = \"relative-secret\"\n"

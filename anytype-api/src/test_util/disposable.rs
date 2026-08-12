@@ -761,7 +761,7 @@ fn private_state_root() -> TestResult<PathBuf> {
 }
 
 #[cfg(unix)]
-fn verify_private_metadata(metadata: &fs::Metadata, directory: bool) -> TestResult<()> {
+fn verify_private_metadata(_: &File, metadata: &fs::Metadata, directory: bool) -> TestResult<()> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
     if metadata.uid() != unsafe { libc::geteuid() } {
@@ -786,12 +786,296 @@ fn verify_private_metadata(metadata: &fs::Metadata, directory: bool) -> TestResu
 }
 
 #[cfg(windows)]
-fn verify_private_metadata(_metadata: &fs::Metadata, _directory: bool) -> TestResult<()> {
-    // Fail closed until this helper can prove current-user ownership, a
-    // private DACL, and reparse-point refusal with Windows-native APIs.
-    Err(config_error(
-        "private Windows recovery-directory verification unavailable",
-    ))
+fn verify_private_metadata(
+    file: &File,
+    metadata: &fs::Metadata,
+    directory: bool,
+) -> TestResult<()> {
+    use std::os::windows::fs::MetadataExt as _;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let kind_matches = if directory {
+        metadata.is_dir()
+    } else {
+        metadata.is_file()
+    };
+    if !kind_matches || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(config_error("private recovery object kind mismatch"));
+    }
+    if !windows_private::owner_and_dacl_are_private(file)
+        .map_err(|_| config_error("inspect private Windows recovery security"))?
+    {
+        return Err(config_error("private recovery permissions are too broad"));
+    }
+    Ok(())
+}
+
+/// Replaces one newly created Windows file or directory DACL with an
+/// owner-only inheritable policy used by the disposable test harness.
+///
+/// The supplied handle must have `WRITE_DAC` access.
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn protect_private_windows_file(file: &File, directory: bool) -> std::io::Result<()> {
+    windows_private::protect_owner_dacl(file, directory)
+}
+
+#[cfg(windows)]
+mod windows_private {
+    use std::{
+        ffi::c_void,
+        io,
+        mem::{offset_of, size_of},
+        os::windows::io::AsRawHandle as _,
+        ptr,
+    };
+
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE, LocalFree},
+        Security::{
+            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION,
+            AclSizeInformation, AddAccessAllowedAceEx,
+            Authorization::{GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo},
+            CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
+            GetLengthSid, GetTokenInformation, InitializeAcl, IsWellKnownSid, OBJECT_INHERIT_ACE,
+            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY,
+            TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        },
+        Storage::FileSystem::FILE_ALL_ACCESS,
+        System::{
+            SystemServices::ACCESS_ALLOWED_ACE_TYPE,
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
+    };
+
+    const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+    const ACCESS_DENIED_OBJECT_ACE_TYPE: u8 = 6;
+    const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = 10;
+    const ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE: u8 = 12;
+
+    struct OwnedHandle(HANDLE);
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            // SAFETY: OpenProcessToken returned this owned handle.
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    struct LocalSecurityDescriptor(*mut c_void);
+
+    impl Drop for LocalSecurityDescriptor {
+        fn drop(&mut self) {
+            // SAFETY: GetSecurityInfo allocates this descriptor with LocalAlloc.
+            unsafe {
+                let _ = LocalFree(self.0);
+            }
+        }
+    }
+
+    struct TokenUserBuffer {
+        words: Vec<usize>,
+    }
+
+    impl TokenUserBuffer {
+        fn sid(&self) -> PSID {
+            // SAFETY: GetTokenInformation initialized the aligned live buffer.
+            unsafe { (*self.words.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+        }
+    }
+
+    pub(super) fn protect_owner_dacl(
+        file: &std::fs::File,
+        inherit_to_children: bool,
+    ) -> io::Result<()> {
+        let token = current_process_token()?;
+        let user_buffer = token_user_buffer(token.0)?;
+        let user = user_buffer.sid();
+        // SAFETY: the SID is retained by user_buffer.
+        let sid_bytes = unsafe { GetLengthSid(user) };
+        if sid_bytes == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let acl_bytes = size_of::<ACL>()
+            .checked_add(size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>())
+            .and_then(|bytes| bytes.checked_add(usize::try_from(sid_bytes).ok()?))
+            .ok_or_else(|| io::Error::other("Windows private ACL size overflow"))?;
+        let word_bytes = size_of::<usize>();
+        let words = acl_bytes
+            .checked_add(word_bytes - 1)
+            .map(|bytes| bytes / word_bytes)
+            .ok_or_else(|| io::Error::other("Windows private ACL size overflow"))?;
+        let mut storage = vec![0_usize; words];
+        let acl = storage.as_mut_ptr().cast::<ACL>();
+        let acl_length = u32::try_from(acl_bytes)
+            .map_err(|_| io::Error::other("Windows private ACL is too large"))?;
+        // SAFETY: storage is aligned and contains acl_length writable bytes.
+        if unsafe { InitializeAcl(acl, acl_length, ACL_REVISION) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let flags = if inherit_to_children {
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+        } else {
+            0
+        };
+        // SAFETY: the initialized ACL has capacity for this live SID.
+        if unsafe { AddAccessAllowedAceEx(acl, ACL_REVISION, flags, FILE_ALL_ACCESS, user) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the file handle and ACL remain live for this call.
+        let status = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                acl,
+                ptr::null_mut(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(
+                i32::try_from(status).unwrap_or(i32::MAX),
+            ))
+        }
+    }
+
+    pub(super) fn owner_and_dacl_are_private(file: &std::fs::File) -> io::Result<bool> {
+        let token = current_process_token()?;
+        let user_buffer = token_user_buffer(token.0)?;
+        let user = user_buffer.sid();
+        let mut owner = ptr::null_mut();
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: the file handle is live and all output pointers are valid.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != 0 || descriptor.is_null() {
+            return Err(io::Error::other("Windows security query failed"));
+        }
+        let _descriptor = LocalSecurityDescriptor(descriptor);
+        if owner.is_null() || dacl.is_null() {
+            return Ok(false);
+        }
+        // SAFETY: both SIDs are retained by live buffers.
+        if unsafe { EqualSid(owner, user) } == 0 {
+            return Ok(false);
+        }
+        dacl_is_private(dacl, user)
+    }
+
+    fn current_process_token() -> io::Result<OwnedHandle> {
+        let mut token = ptr::null_mut();
+        // SAFETY: the pseudo-process handle is always valid.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0
+            || token.is_null()
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(OwnedHandle(token))
+    }
+
+    fn token_user_buffer(token: HANDLE) -> io::Result<TokenUserBuffer> {
+        let mut required = 0_u32;
+        // SAFETY: the first call obtains the required buffer size.
+        unsafe {
+            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut required);
+        }
+        if required < u32::try_from(size_of::<TOKEN_USER>()).unwrap_or(u32::MAX) {
+            return Err(io::Error::other("Windows token user query failed"));
+        }
+        let words = usize::try_from(required)
+            .ok()
+            .and_then(|bytes| bytes.checked_add(size_of::<usize>() - 1))
+            .map(|bytes| bytes / size_of::<usize>())
+            .ok_or_else(|| io::Error::other("Windows token buffer overflow"))?;
+        let mut buffer = vec![0_usize; words];
+        // SAFETY: the aligned buffer contains required writable bytes.
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                required,
+                &mut required,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(TokenUserBuffer { words: buffer })
+    }
+
+    fn dacl_is_private(dacl: *mut ACL, user: PSID) -> io::Result<bool> {
+        let mut information = ACL_SIZE_INFORMATION::default();
+        // SAFETY: dacl is retained by the live security descriptor.
+        if unsafe {
+            GetAclInformation(
+                dacl,
+                ptr::addr_of_mut!(information).cast(),
+                u32::try_from(size_of::<ACL_SIZE_INFORMATION>()).unwrap_or(u32::MAX),
+                AclSizeInformation,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        for index in 0..information.AceCount {
+            let mut ace: *mut c_void = ptr::null_mut();
+            // SAFETY: index is below the count reported for this ACL.
+            if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: every ACE begins with an ACE_HEADER.
+            let header = unsafe { ptr::read_unaligned(ace.cast::<ACE_HEADER>()) };
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8 {
+                if matches!(
+                    header.AceType,
+                    ACCESS_DENIED_ACE_TYPE
+                        | ACCESS_DENIED_OBJECT_ACE_TYPE
+                        | ACCESS_DENIED_CALLBACK_ACE_TYPE
+                        | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE
+                ) {
+                    continue;
+                }
+                return Ok(false);
+            }
+            if usize::from(header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>() {
+                return Ok(false);
+            }
+            // SAFETY: the validated ACE contains SidStart and its complete SID.
+            let sid = unsafe {
+                ace.cast::<u8>()
+                    .add(offset_of!(ACCESS_ALLOWED_ACE, SidStart))
+                    .cast::<c_void>()
+            };
+            // SAFETY: all SIDs remain live for this comparison.
+            let trusted = unsafe {
+                EqualSid(sid, user) != 0
+                    || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                    || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+            };
+            if !trusted {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 }
 
 fn open_private_directory(path: &Path) -> TestResult<File> {
@@ -802,10 +1086,19 @@ fn open_private_directory(path: &Path) -> TestResult<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(
+            windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS
+                | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+        );
+    }
     let file = options
         .open(path)
         .map_err(|_| config_error("open private recovery directory"))?;
     verify_private_metadata(
+        &file,
         &file
             .metadata()
             .map_err(|_| config_error("inspect private recovery directory"))?,
@@ -867,6 +1160,7 @@ fn open_private_at(
     // SAFETY: openat returned a new owned descriptor.
     let file = unsafe { File::from_raw_fd(descriptor) };
     verify_private_metadata(
+        &file,
         &file
             .metadata()
             .map_err(|_| config_error("inspect private recovery entry"))?,
@@ -908,6 +1202,22 @@ fn create_private_directory(path: &Path) -> TestResult<()> {
     builder
         .create(path)
         .map_err(|_| config_error("create private recovery directory"))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::{Foundation::GENERIC_READ, Storage::FileSystem::WRITE_DAC};
+
+        let mut options = OpenOptions::new();
+        options.access_mode(GENERIC_READ | WRITE_DAC).custom_flags(
+            windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS
+                | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+        );
+        let directory = options
+            .open(path)
+            .map_err(|_| config_error("open new private recovery directory"))?;
+        protect_private_windows_file(&directory, true)
+            .map_err(|_| config_error("protect private recovery directory"))?;
+    }
     drop(open_private_directory(path)?);
     Ok(())
 }
@@ -922,10 +1232,26 @@ fn create_private_file(path: &Path) -> TestResult<File> {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::{
+            Foundation::{GENERIC_READ, GENERIC_WRITE},
+            Storage::FileSystem::WRITE_DAC,
+        };
+
+        options
+            .access_mode(GENERIC_READ | GENERIC_WRITE | WRITE_DAC)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options
         .open(path)
         .map_err(|_| config_error("create private recovery file"))?;
+    #[cfg(windows)]
+    protect_private_windows_file(&file, false)
+        .map_err(|_| config_error("protect private recovery file"))?;
     verify_private_metadata(
+        &file,
         &file
             .metadata()
             .map_err(|_| config_error("inspect private recovery file"))?,
@@ -942,10 +1268,16 @@ fn open_private_file(path: &Path) -> TestResult<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options
         .open(path)
         .map_err(|_| config_error("open private recovery file"))?;
     verify_private_metadata(
+        &file,
         &file
             .metadata()
             .map_err(|_| config_error("inspect private recovery file"))?,
@@ -2832,12 +3164,7 @@ mod tests {
             "anytype-disposable-{label}-{}",
             random_handle("test").unwrap()
         ));
-        fs::create_dir(&root).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        }
+        create_private_directory(&root).unwrap();
         root
     }
 

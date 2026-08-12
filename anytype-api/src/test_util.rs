@@ -45,6 +45,8 @@ use tonic::Request;
 mod disposable;
 #[cfg(any(test, feature = "scripted-http-fixture"))]
 pub mod scripted_http;
+#[cfg(windows)]
+pub use disposable::protect_private_windows_file;
 pub use disposable::{
     DisposableChildEnvironment, DisposableRun, DisposableSkip, DisposableTestError,
     disposable_callback_error, with_disposable_space_context,

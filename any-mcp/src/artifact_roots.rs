@@ -2613,14 +2613,16 @@ pub(crate) mod windows_security {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, GENERIC_ALL, GENERIC_WRITE, HANDLE, LocalFree},
         Security::{
-            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
-            Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
-            DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetTokenInformation,
-            IsWellKnownSid, OWNER_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
-            WinBuiltinAdministratorsSid, WinLocalSystemSid,
+            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION,
+            AclSizeInformation, AddAccessAllowedAceEx,
+            Authorization::{GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo},
+            CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
+            GetLengthSid, GetTokenInformation, InitializeAcl, IsWellKnownSid, OBJECT_INHERIT_ACE,
+            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY,
+            TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
         },
         Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, DELETE, FILE_APPEND_DATA, FILE_BASIC_INFO,
+            BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_BASIC_INFO,
             FILE_DELETE_CHILD, FILE_LIST_DIRECTORY, FILE_TRAVERSE, FILE_WRITE_DATA, FileBasicInfo,
             GetFileInformationByHandle, GetFileInformationByHandleEx, READ_CONTROL, WRITE_DAC,
             WRITE_OWNER,
@@ -2799,6 +2801,68 @@ pub(crate) mod windows_security {
         dacl_has_no_untrusted_access(dacl, token_user, PRIVATE_ACCESS)
     }
 
+    pub(crate) fn protect_owner_dacl(
+        file: &std::fs::File,
+        inherit_to_children: bool,
+    ) -> io::Result<()> {
+        let token = current_process_token()?;
+        let token_user_buffer = token_user_buffer(token.0)?;
+        let token_user = token_user_buffer.sid();
+        // SAFETY: the SID is retained by the live token buffer.
+        let sid_bytes = unsafe { GetLengthSid(token_user) };
+        if sid_bytes == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let acl_bytes = size_of::<ACL>()
+            .checked_add(size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>())
+            .and_then(|bytes| bytes.checked_add(usize::try_from(sid_bytes).ok()?))
+            .ok_or_else(|| io::Error::other("Windows private ACL size overflow"))?;
+        let word_bytes = size_of::<usize>();
+        let words = acl_bytes
+            .checked_add(word_bytes - 1)
+            .map(|bytes| bytes / word_bytes)
+            .ok_or_else(|| io::Error::other("Windows private ACL size overflow"))?;
+        let mut storage = vec![0_usize; words];
+        let acl = storage.as_mut_ptr().cast::<ACL>();
+        let acl_length = u32::try_from(acl_bytes)
+            .map_err(|_| io::Error::other("Windows private ACL is too large"))?;
+        // SAFETY: `storage` is aligned and contains `acl_length` writable bytes.
+        if unsafe { InitializeAcl(acl, acl_length, ACL_REVISION) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let flags = if inherit_to_children {
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+        } else {
+            0
+        };
+        // SAFETY: the ACL is initialized with sufficient capacity and the SID
+        // remains live until SetSecurityInfo has copied the ACL.
+        if unsafe { AddAccessAllowedAceEx(acl, ACL_REVISION, flags, FILE_ALL_ACCESS, token_user) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the file handle and ACL are live for the duration of the call.
+        let status = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                acl,
+                ptr::null_mut(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(
+                i32::try_from(status).unwrap_or(i32::MAX),
+            ))
+        }
+    }
+
     fn current_process_token() -> io::Result<OwnedHandle> {
         let mut token = ptr::null_mut();
         // SAFETY: the pseudo-process handle is always live and `token` is a
@@ -2910,6 +2974,39 @@ pub(crate) mod windows_security {
 }
 
 #[cfg(test)]
+pub(crate) fn prepare_test_private_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::{
+            Foundation::GENERIC_READ,
+            Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, WRITE_DAC,
+            },
+        };
+
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .access_mode(GENERIC_READ | WRITE_DAC)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        let directory = options.open(path)?;
+        windows_security::protect_owner_dacl(&directory, true)?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        return Err(io::Error::other("private test directories are unsupported"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use std::{fs, io::Write};
 
@@ -2937,6 +3034,9 @@ mod tests {
         let export = base.join("export");
         fs::create_dir_all(&import).expect("import directory");
         fs::create_dir_all(&export).expect("export directory");
+        prepare_test_private_directory(&base).expect("private base directory");
+        prepare_test_private_directory(&import).expect("private import directory");
+        prepare_test_private_directory(&export).expect("private export directory");
         (base, import, export)
     }
 

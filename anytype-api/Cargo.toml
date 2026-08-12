@@ -67,6 +67,7 @@ linux-keyutils-keyring-store = { version = "1.0.0" }
 dbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust", "vendored"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = "1.1.0"
+windows-sys.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

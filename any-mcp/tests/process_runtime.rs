@@ -36,7 +36,16 @@ fn invalid_config_file(contents: &str) -> PathBuf {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::{Foundation::GENERIC_WRITE, Storage::FileSystem::WRITE_DAC};
+
+        options.access_mode(GENERIC_WRITE | WRITE_DAC);
+    }
     let mut file = options.open(&path).expect("create invalid config");
+    #[cfg(windows)]
+    anytype::test_util::protect_private_windows_file(&file, false).expect("protect invalid config");
     file.write_all(contents.as_bytes())
         .expect("write invalid config");
     file.sync_all().expect("sync invalid config");

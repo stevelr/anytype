@@ -237,6 +237,12 @@ fn handle_http_connection(
     hang_claimed: &AtomicBool,
     hang_started: &mpsc::Sender<()>,
 ) {
+    // BSD-derived platforms may retain the listener's nonblocking mode on an
+    // accepted socket. Workers use bounded blocking I/O, so make that contract
+    // explicit before installing the per-operation deadlines.
+    stream
+        .set_nonblocking(false)
+        .expect("configure blocking HTTP fixture connection");
     stream
         .set_read_timeout(Some(DEADLINE))
         .expect("HTTP fixture read timeout");

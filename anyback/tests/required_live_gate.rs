@@ -297,6 +297,10 @@ fn exercise_backup_restore(
     object_name: &str,
     object_body: &str,
 ) -> Result<()> {
+    let body = anytype::objects::plain_markdown_representation(object_body).ok_or_else(|| {
+        anyhow!("backup smoke body is outside the supported plain Markdown subset")
+    })?;
+    let canonical_body = body.canonical();
     let object = runner.run_json(
         &[
             "object",
@@ -306,7 +310,7 @@ fn exercise_backup_restore(
             "--name",
             object_name,
             "--body",
-            object_body,
+            body.wire(),
         ],
         COMMAND_TIMEOUT,
     )?;
@@ -323,7 +327,7 @@ fn exercise_backup_restore(
         runner,
         source.identifier(),
         object_name,
-        object_body,
+        canonical_body,
         "source",
     )?;
 
@@ -383,7 +387,7 @@ fn exercise_backup_restore(
     let extracted = fs::read_to_string(&extracted_path)
         .with_context(|| format!("read extracted object {}", extracted_path.display()))?;
     ensure!(
-        extracted.contains(object_body),
+        extracted.contains(canonical_body),
         "backup archive is missing the object body (extracted {} bytes: {:?})",
         extracted.len(),
         bounded_preview(&extracted),
@@ -403,7 +407,7 @@ fn exercise_backup_restore(
         runner,
         destination.identifier(),
         object_name,
-        object_body,
+        canonical_body,
         "restored",
     )?;
     let _captured_server_diagnostics = runner.server_tail();

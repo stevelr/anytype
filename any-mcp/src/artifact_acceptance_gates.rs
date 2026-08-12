@@ -442,7 +442,8 @@ impl GateDirectory {
         {
             use std::os::windows::fs::OpenOptionsExt as _;
             options.custom_flags(
-                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT
+                    | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS,
             );
         }
         let file = options
@@ -720,12 +721,8 @@ mod tests {
         let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         let path = env::temp_dir().join(format!("any-mcp-gate-{}-{sequence}", std::process::id()));
         fs::create_dir(&path).expect("create test gate directory");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
-                .expect("make test directory private");
-        }
+        crate::artifact_roots::prepare_test_private_directory(&path)
+            .expect("make test directory private");
         path
     }
 

@@ -123,8 +123,9 @@ pub fn init_config(path: &Path) -> Result<(), ProcessCommandError> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::{Foundation::GENERIC_WRITE, Storage::FileSystem::WRITE_DAC};
 
-        options.share_mode(0);
+        options.access_mode(GENERIC_WRITE | WRITE_DAC).share_mode(0);
     }
     let mut file = match options.open(&path) {
         Ok(file) => file,
@@ -133,6 +134,12 @@ pub fn init_config(path: &Path) -> Result<(), ProcessCommandError> {
         }
         Err(_) => return Err(ProcessCommandError::new(CommandProblem::Create)),
     };
+    #[cfg(windows)]
+    if crate::artifact_roots::windows_security::protect_owner_dacl(&file, false).is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(ProcessCommandError::new(CommandProblem::Create));
+    }
     if file
         .write_all(CONFIG_TEMPLATE.as_bytes())
         .and_then(|()| file.sync_all())

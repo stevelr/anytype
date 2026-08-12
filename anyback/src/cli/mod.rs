@@ -3594,9 +3594,13 @@ mod tests {
         std::fs::write(root.join("objects").join("obj.pb"), "pb").unwrap();
 
         let paths = pb_import_paths(root).unwrap();
-        assert!(paths.iter().any(|p| p.ends_with("/objects")));
-        assert!(paths.iter().any(|p| p.ends_with("/top.pb")));
-        assert!(!paths.iter().any(|p| p.ends_with("/manifest.json")));
+        assert!(paths.iter().any(|p| Path::new(p).ends_with("objects")));
+        assert!(paths.iter().any(|p| Path::new(p).ends_with("top.pb")));
+        assert!(
+            !paths
+                .iter()
+                .any(|p| Path::new(p).ends_with("manifest.json"))
+        );
     }
 
     #[test]
@@ -3608,8 +3612,8 @@ mod tests {
         std::fs::write(root.join("objects").join("a.pb"), "pb").unwrap();
 
         let paths = pb_import_paths(root).unwrap();
-        assert!(paths.iter().any(|p| p.ends_with("/objects")));
-        assert!(!paths.iter().any(|p| p.ends_with("/empty")));
+        assert!(paths.iter().any(|p| Path::new(p).ends_with("objects")));
+        assert!(!paths.iter().any(|p| Path::new(p).ends_with("empty")));
     }
 
     #[test]

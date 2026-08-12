@@ -7734,7 +7734,29 @@ fn secure_directories(directories: &[&PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn secure_directories(directories: &[&PathBuf]) -> Result<(), String> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::{
+        Foundation::GENERIC_READ,
+        Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, WRITE_DAC,
+        },
+    };
+
+    for directory in directories {
+        let file = OpenOptions::new()
+            .access_mode(GENERIC_READ | WRITE_DAC)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(directory)
+            .map_err(|_| "open artifact acceptance directory".to_owned())?;
+        anytype::test_util::protect_private_windows_file(&file, true)
+            .map_err(|_| "secure artifact acceptance directory".to_owned())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn secure_directories(_directories: &[&PathBuf]) -> Result<(), String> {
     Ok(())
 }
@@ -7749,7 +7771,27 @@ fn secure_files(files: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn secure_files(files: &[PathBuf]) -> Result<(), String> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_READ, GENERIC_WRITE},
+        Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, WRITE_DAC},
+    };
+
+    for path in files {
+        let file = OpenOptions::new()
+            .access_mode(GENERIC_READ | GENERIC_WRITE | WRITE_DAC)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|_| "open artifact acceptance file".to_owned())?;
+        anytype::test_util::protect_private_windows_file(&file, false)
+            .map_err(|_| "secure artifact acceptance file".to_owned())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn secure_files(_files: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }

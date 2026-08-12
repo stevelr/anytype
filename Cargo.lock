@@ -366,6 +366,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "windows-native-keyring-store",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

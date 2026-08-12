@@ -116,7 +116,9 @@ impl ArchiveReader {
                         })?;
                         let meta = entry.metadata()?;
                         entries.push(ArchiveFileEntry {
-                            path: rel.to_string_lossy().into_owned(),
+                            path: rel
+                                .to_string_lossy()
+                                .replace(std::path::MAIN_SEPARATOR, "/"),
                             bytes: meta.len(),
                         });
                     }

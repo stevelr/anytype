@@ -4435,6 +4435,12 @@ mod tests {
         let export = base.join("export");
         std::fs::create_dir_all(&import).expect("create import fixture");
         std::fs::create_dir_all(&export).expect("create export fixture");
+        crate::artifact_roots::prepare_test_private_directory(&base)
+            .expect("private artifact fixture base");
+        crate::artifact_roots::prepare_test_private_directory(&import)
+            .expect("private import fixture");
+        crate::artifact_roots::prepare_test_private_directory(&export)
+            .expect("private export fixture");
         let source_path = import.join("document.md");
         let retained_path = import.join("retained.md");
         let replacement_path = import.join("replacement.md");

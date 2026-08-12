@@ -89,8 +89,8 @@ This package also exposes a reusable Rust library crate, `anyback_reader`, for a
 The protected `anyr-anyback-live` workflow installs `anyr` with `cargo install`,
 then runs one exact ignored test serially. The gate creates a source object in a
 new prefix-authorized disposable space, runs `anyr backup create`, restores into
-a second disposable space, verifies the restored name and body without relying
-on source IDs, and proves that both spaces were removed.
+a second disposable space, verifies the restored name and canonical Markdown
+body without relying on source IDs, and proves that both spaces were removed.
 
 Operators must provide authenticated HTTP and gRPC settings, an absolute path to
 a reviewed redacted server log, `ANYTYPE_DISPOSABLE_TEST_PROCESS=1`, and a unique
