@@ -820,14 +820,16 @@ mod tests {
                 SPACE_ID,
                 OBJECT_ID,
             ))
-            .delayed(Duration::from_millis(250)),
+            .delayed(Duration::from_secs(1)),
         ])
         .await;
-        let handlers = AnytypeResources::new(runtime(base_url, Duration::from_secs(2)));
+        // The cancel timer must land after the read dispatches (the fixture
+        // waits for exactly one request) and before the delayed reply.
+        let handlers = AnytypeResources::new(runtime(base_url, Duration::from_secs(5)));
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();
         let cancel_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
             trigger.cancel();
         });
         let error = handlers

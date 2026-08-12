@@ -1198,14 +1198,16 @@ mod tests {
         let (base_url, server) = fixture(vec![
             preflight_reply(),
             FixtureReply::json(object_response(SPACE_ID, OBJECT_ID, true, Some(TYPE_ID)))
-                .delayed(Duration::from_millis(100)),
+                .delayed(Duration::from_secs(1)),
         ])
         .await;
-        let runtime = runtime(base_url, Duration::from_secs(1));
+        // The cancel timer must land after the mutation dispatches and
+        // before the delayed reply; both margins need slack on slow runners.
+        let runtime = runtime(base_url, Duration::from_secs(5));
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();
         let cancel_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
             trigger.cancel();
         });
         let result = object_archive(

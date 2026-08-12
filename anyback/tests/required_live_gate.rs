@@ -316,6 +316,17 @@ fn exercise_backup_restore(
         .filter(|id| !id.is_empty())
         .ok_or_else(|| anyhow!("object create output missing a non-empty id"))?;
 
+    // The archive can only be as good as what the server can serve at
+    // backup time: wait until the source object's body is readable so a
+    // capture race cannot masquerade as a restore-fidelity failure.
+    verify_object_content(
+        runner,
+        source.identifier(),
+        object_name,
+        object_body,
+        "source",
+    )?;
+
     let archive_dir = tempfile::tempdir().context("failed to create archive directory")?;
     let ids_path = archive_dir.path().join("objects.txt");
     fs::write(&ids_path, format!("{source_object_id}\n"))?;
@@ -351,6 +362,33 @@ fn exercise_backup_restore(
     let archive_arg = archive
         .to_str()
         .ok_or_else(|| anyhow!("archive path is not UTF-8"))?;
+
+    // Capture fidelity: the archived object must already carry the body,
+    // so a restore failure downstream is provably restore-side.
+    let extracted_path = archive_dir.path().join("extracted.md");
+    let extracted_arg = extracted_path
+        .to_str()
+        .ok_or_else(|| anyhow!("extracted object path is not UTF-8"))?;
+    runner.run(
+        &[
+            "backup",
+            "extract",
+            archive_arg,
+            source_object_id,
+            extracted_arg,
+        ],
+        None,
+        COMMAND_TIMEOUT,
+    )?;
+    let extracted = fs::read_to_string(&extracted_path)
+        .with_context(|| format!("read extracted object {}", extracted_path.display()))?;
+    ensure!(
+        extracted.contains(object_body),
+        "backup archive is missing the object body (extracted {} bytes: {:?})",
+        extracted.len(),
+        bounded_preview(&extracted),
+    );
+
     runner.run_json(
         &[
             "backup",
@@ -361,7 +399,13 @@ fn exercise_backup_restore(
         ],
         RESTORE_TIMEOUT,
     )?;
-    verify_restored_content(runner, destination.identifier(), object_name, object_body)?;
+    verify_object_content(
+        runner,
+        destination.identifier(),
+        object_name,
+        object_body,
+        "restored",
+    )?;
     let _captured_server_diagnostics = runner.server_tail();
     Ok(())
 }
@@ -410,51 +454,58 @@ fn verify_authenticated_pings(runner: &AnyrRunner) -> Result<()> {
     Ok(())
 }
 
-fn verify_restored_content(
+/// Bounded, printable preview of test-authored object content.
+fn bounded_preview(content: &str) -> String {
+    content.chars().take(200).collect()
+}
+
+fn verify_object_content(
     runner: &AnyrRunner,
-    destination: &str,
+    space: &str,
     expected_name: &str,
     expected_body: &str,
+    phase: &str,
 ) -> Result<()> {
     // The restored object can appear in the listing before its block tree
     // finishes materializing on a freshly provisioned server, so a body
     // mismatch is retried inside the same deadline instead of failing on
     // the first read; a persistent mismatch still fails with its own
     // message.
-    let mut last_disagreement = None;
+    let mut last_disagreement: Option<(&str, String)> = None;
     for _ in 0..40 {
-        let listed = runner.run_json(&["object", "list", destination, "--all"], COMMAND_TIMEOUT)?;
+        let listed = runner.run_json(&["object", "list", space, "--all"], COMMAND_TIMEOUT)?;
         let items = listed
             .get("items")
             .and_then(Value::as_array)
             .or_else(|| listed.as_array())
             .ok_or_else(|| anyhow!("object list output missing items"))?;
-        if let Some(restored_id) = items.iter().find_map(|item| {
+        if let Some(observed_id) = items.iter().find_map(|item| {
             (item.get("name").and_then(Value::as_str) == Some(expected_name))
                 .then(|| item.get("id").and_then(Value::as_str))
                 .flatten()
         }) {
-            let restored = runner.run_json(
-                &["object", "get", destination, restored_id],
-                COMMAND_TIMEOUT,
-            )?;
-            if restored.get("name").and_then(Value::as_str) != Some(expected_name) {
-                last_disagreement = Some("restored object name mismatch");
-            } else if !restored
+            let observed =
+                runner.run_json(&["object", "get", space, observed_id], COMMAND_TIMEOUT)?;
+            let markdown = observed
                 .get("markdown")
                 .and_then(Value::as_str)
-                .is_some_and(|body| body.contains(expected_body))
-            {
-                last_disagreement = Some("restored object body mismatch");
+                .unwrap_or_default();
+            if observed.get("name").and_then(Value::as_str) != Some(expected_name) {
+                last_disagreement = Some(("name mismatch", bounded_preview(markdown)));
+            } else if !markdown.contains(expected_body) {
+                last_disagreement = Some(("body mismatch", bounded_preview(markdown)));
             } else {
                 return Ok(());
             }
         }
         thread::sleep(Duration::from_millis(750));
     }
+    // The preview is test-authored fixture content, never operator data.
     match last_disagreement {
-        Some(disagreement) => bail!("{disagreement} after the verification deadline"),
-        None => bail!("restored semantic content was not found before the deadline"),
+        Some((disagreement, preview)) => bail!(
+            "{phase} object {disagreement} after the verification deadline (observed markdown: {preview:?})"
+        ),
+        None => bail!("{phase} semantic content was not found before the deadline"),
     }
 }
 

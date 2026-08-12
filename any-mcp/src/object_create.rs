@@ -2259,14 +2259,18 @@ mod tests {
         assert_eq!(result_code(&result), "upstream");
         assert_eq!(server.await.expect("timeout fixture").len(), 1);
 
+        // The post-dispatch deadline must expire after the create POST is
+        // dispatched but before the delayed reply; both margins need real
+        // slack on a slow runner (a too-tight budget expires during the
+        // preceding type fetch and reports upstream instead of conflict).
         let (base_url, server) = fixture(vec![
             FixtureReply::json(type_value()),
             FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3"))
-                .delayed(Duration::from_millis(100)),
+                .delayed(Duration::from_secs(1)),
         ])
         .await;
         let handlers =
-            ObjectCreateHandlers::new(runtime(base_url, Duration::from_millis(20))).unwrap();
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_millis(250))).unwrap();
         let result = handlers
             .object_create(
                 MutationAccess::Allowed,
@@ -2288,16 +2292,16 @@ mod tests {
         let (base_url, server) = fixture(vec![
             FixtureReply::json(type_value()),
             FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3"))
-                .delayed(Duration::from_millis(100)),
+                .delayed(Duration::from_secs(1)),
             FixtureReply::json(object_value(OBJECT_ID, "# Plan", "Q3")),
         ])
         .await;
         let handlers =
-            ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(1))).unwrap();
+            ObjectCreateHandlers::new(runtime(base_url, Duration::from_secs(5))).unwrap();
         let cancellation = CancellationToken::new();
         let cancel = cancellation.clone();
         let cancellation_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
             cancel.cancel();
         });
         let result = handlers

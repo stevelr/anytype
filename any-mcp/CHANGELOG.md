@@ -232,6 +232,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   exceeded five seconds. The live-gate workflow also retains a bounded copy
   of a failed gate's output as a run artifact, which per-run throwaway
   credentials make safe.
+- Give the remaining post-dispatch timing tests (`object_create`,
+  `object_archive`, `resources`) the same slack as `object_update`: their
+  20ms budgets and cancel timers could fire before dispatch on a slow
+  runner, inverting the expected outcome class or, for the read fixture,
+  parking the test on a request that never arrives.
 - Unblock the first Windows test run: the post-dispatch indeterminate tests
   in `object_update` and `object_edit` give their mode-0 deadline real slack
   on both sides (a 20ms budget could expire before the connection was even
