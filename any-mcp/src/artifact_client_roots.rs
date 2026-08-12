@@ -454,9 +454,11 @@ mod tests {
 
     #[test]
     fn a_canonical_directory_uri_ignores_its_trailing_separator() {
+        let directory = directory_uri(&std::env::temp_dir().join("inbox"));
+        let without_separator = directory.trim_end_matches('/');
         assert_eq!(
-            parse_client_root_uri("file:///tmp/inbox/").expect("directory URI"),
-            parse_client_root_uri("file:///tmp/inbox").expect("plain URI")
+            parse_client_root_uri(&directory).expect("directory URI"),
+            parse_client_root_uri(without_separator).expect("plain URI")
         );
     }
 
@@ -473,15 +475,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(parse_client_root_snapshot(&oversize).is_err());
 
-        let duplicates = vec![
-            Root::new("file:///tmp/inbox"),
-            Root::new("file:///tmp/./inbox"),
-        ];
+        let inbox = directory_uri(&std::env::temp_dir().join("inbox"));
+        let inbox_with_dot = format!("{}/./", inbox.trim_end_matches('/'));
+        let duplicates = vec![Root::new(inbox.clone()), Root::new(inbox_with_dot)];
         assert!(parse_client_root_snapshot(&duplicates).is_err());
 
         let accepted = vec![
-            Root::new("file:///tmp/inbox"),
-            Root::new("file:///tmp/outbox"),
+            Root::new(inbox),
+            Root::new(directory_uri(&std::env::temp_dir().join("outbox"))),
         ];
         assert_eq!(
             parse_client_root_snapshot(&accepted)

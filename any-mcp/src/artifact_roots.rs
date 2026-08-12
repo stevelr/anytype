@@ -2760,8 +2760,7 @@ pub(crate) mod windows_security {
         if owner.is_null() || dacl.is_null() {
             return Ok(false);
         }
-        // SAFETY: both SIDs are owned by live token/descriptor buffers.
-        if unsafe { EqualSid(owner, token_user) } == 0 {
+        if !sid_is_trusted(owner, token_user) {
             return Ok(false);
         }
         dacl_has_no_untrusted_access(dacl, token_user, DANGEROUS_ACCESS)
@@ -2794,8 +2793,7 @@ pub(crate) mod windows_security {
         if owner.is_null() || dacl.is_null() {
             return Ok(false);
         }
-        // SAFETY: both SIDs are owned by live token/descriptor buffers.
-        if unsafe { EqualSid(owner, token_user) } == 0 {
+        if !sid_is_trusted(owner, token_user) {
             return Ok(false);
         }
         dacl_has_no_untrusted_access(dacl, token_user, PRIVATE_ACCESS)
@@ -2958,18 +2956,22 @@ pub(crate) mod windows_security {
                     .add(offset_of!(ACCESS_ALLOWED_ACE, SidStart))
                     .cast::<c_void>()
             };
-            // SAFETY: the SID lies within the validated ACE; trusted identities
-            // and the live token SID are valid for the duration of this call.
-            let trusted = unsafe {
-                EqualSid(sid, token_user) != 0
-                    || IsWellKnownSid(sid, WinLocalSystemSid) != 0
-                    || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
-            };
-            if !trusted && allowed.Mask & forbidden_access != 0 {
+            if !sid_is_trusted(sid, token_user) && allowed.Mask & forbidden_access != 0 {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    fn sid_is_trusted(sid: PSID, token_user: PSID) -> bool {
+        // SAFETY: callers retain both SIDs for this comparison. Windows treats
+        // LocalSystem and Built-in Administrators as privileged principals;
+        // elevated processes can create objects owned by the latter.
+        unsafe {
+            EqualSid(sid, token_user) != 0
+                || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+        }
     }
 }
 

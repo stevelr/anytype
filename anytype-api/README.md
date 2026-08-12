@@ -1094,9 +1094,11 @@ with `ANYTYPE_TEST_SPACE_PREFIX`, then deletes that exact space after the test,
 including callback error and panic paths. Reserve the prefix for automated
 tests. A missing or invalid prefix fails setup before authentication with a
 configuration error; no ambient space-ID environment variable is consulted.
-The disposable-space recovery harness stores its ledgers in an owner-private
-runtime directory: Unix permissions and Windows ACLs are verified from open
-handles, and links or reparse points fail closed.
+The disposable-space recovery harness stores its ledgers in a private runtime
+directory: Unix ownership and permissions are verified from open handles. On
+Windows, the owner and every access-granting ACL entry must name the process
+user, LocalSystem, or Built-in Administrators. Links and reparse points fail
+closed.
 Unauthenticated control tests explicitly use unique empty temporary file
 keystores, so ambient `env` credentials cannot change their expected result.
 

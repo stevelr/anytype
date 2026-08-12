@@ -8,9 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
-- Enable the disposable-space recovery harness on Windows by creating and
-  verifying owner-private ACLs for its state directory and ledger files. File
-  and directory handles open reparse points without following them, then reject
+- Enable the disposable-space recovery harness on Windows by creating private
+  ACLs for its state directory and ledger files, and accepting ownership only
+  by the process user, LocalSystem, or Built-in Administrators. File and
+  directory handles open reparse points without following them, then reject
   those objects before recovery I/O.
 - Retain a bounded copy of a failed live-gate entry's output as a run
   artifact (opt-in via `ANYTYPE_API_GATE_OUTPUT`): the disposable server's

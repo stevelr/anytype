@@ -810,8 +810,8 @@ fn verify_private_metadata(
     Ok(())
 }
 
-/// Replaces one newly created Windows file or directory DACL with an
-/// owner-only inheritable policy used by the disposable test harness.
+/// Replaces one newly created Windows file or directory DACL with a
+/// current-user-only inheritable policy used by the disposable test harness.
 ///
 /// The supplied handle must have `WRITE_DAC` access.
 #[cfg(windows)]
@@ -972,8 +972,7 @@ mod windows_private {
         if owner.is_null() || dacl.is_null() {
             return Ok(false);
         }
-        // SAFETY: both SIDs are retained by live buffers.
-        if unsafe { EqualSid(owner, user) } == 0 {
+        if !sid_is_trusted(owner, user) {
             return Ok(false);
         }
         dacl_is_private(dacl, user)
@@ -1064,17 +1063,22 @@ mod windows_private {
                     .add(offset_of!(ACCESS_ALLOWED_ACE, SidStart))
                     .cast::<c_void>()
             };
-            // SAFETY: all SIDs remain live for this comparison.
-            let trusted = unsafe {
-                EqualSid(sid, user) != 0
-                    || IsWellKnownSid(sid, WinLocalSystemSid) != 0
-                    || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
-            };
-            if !trusted {
+            if !sid_is_trusted(sid, user) {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    fn sid_is_trusted(sid: PSID, user: PSID) -> bool {
+        // SAFETY: callers retain both SIDs for this comparison. Windows treats
+        // LocalSystem and Built-in Administrators as privileged principals;
+        // elevated processes can create objects owned by the latter.
+        unsafe {
+            EqualSid(sid, user) != 0
+                || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+        }
     }
 }
 

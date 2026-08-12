@@ -2173,6 +2173,9 @@ bounded body collection — before any JSON decoding or handler work.
 Authentication is required on every request and is separate from the Anytype
 keystore:
 
+On Windows, private runtime paths require ownership and every access-granting
+ACL entry to name the process user, LocalSystem, or Built-in Administrators.
+
 - `ANY_MCP_HTTP_AUTH=static-token` reads one 43..512-byte base64url token
   from the owner-only regular file named by `ANY_MCP_HTTP_TOKEN_FILE` and
   compares it in constant time. Intended for a single local operator or
