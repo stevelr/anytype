@@ -1,0 +1,108 @@
+# Tier-1 smoke: the fastest meaningful signal, budget 15-20 minutes.
+#
+# One required linux lane runs repository checks, clippy, and the cheap
+# test split (lib+bins only: the heavyweight integration binaries dominate
+# compile time and belong to the merge/nightly tier). The other platforms
+# run clippy only — platform-specific findings are real (the Windows
+# qualification rounds caught lints Linux structurally cannot see), while
+# platform test breadth stays in the deeper tiers.
+#
+# Manual-only while being qualified; intended trigger once proven:
+# push to main + pull_request.
+
+name: smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  ANYTYPE_TEST_SPACE_PREFIX: xtest
+
+jobs:
+  smoke-linux:
+    name: repository checks, clippy, and fast tests (linux-x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/nix-devshell
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: smoke-linux-x86_64
+
+      - name: Repository format and lint
+        run: |
+          bash .github/scripts/verify-ci-prerequisites.sh --check-repository
+          cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      # Library and binary unit tests only: integration binaries (the
+      # stdio/e2e harnesses) are the compile-time long pole and run in the
+      # merge/nightly tier instead.
+      - name: Fast tests
+        run: |
+          cargo test --locked --workspace --exclude anytype --all-features --lib --bins
+          cargo test --locked -p anytype --all-features --lib
+
+  smoke-clippy:
+    name: clippy (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            kind: nix
+          - platform: macos-aarch64
+            runner: macos-15
+            kind: nix
+          - platform: windows-x86_64
+            runner: windows-2025
+            kind: windows
+            python_arch: x64
+          - platform: windows-aarch64
+            runner: windows-11-arm
+            kind: windows
+            python_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - if: matrix.kind == 'nix'
+        uses: ./.github/actions/nix-devshell
+
+      - name: Install native prerequisites
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          choco install protoc mingw --yes --no-progress
+          rustup show
+          $expected = (Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"$').Matches.Groups[1].Value
+          if ((rustc --version).Split(' ')[1] -ne $expected) { throw "Rust toolchain mismatch" }
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: smoke-${{ matrix.platform }}
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings

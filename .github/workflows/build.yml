@@ -20,6 +20,9 @@ on:
           - oci
           - oci-x86_64
           - oci-aarch64
+          - static
+          - static-x86_64
+          - static-aarch64
 
 permissions:
   contents: read
@@ -35,6 +38,7 @@ jobs:
       nix: ${{ steps.matrix.outputs.nix }}
       windows: ${{ steps.matrix.outputs.windows }}
       oci: ${{ steps.matrix.outputs.oci }}
+      static: ${{ steps.matrix.outputs.static }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -62,11 +66,13 @@ jobs:
             {"platform":"windows-x86_64","family":"windows","kind":"windows","runner":"windows-2025","python_arch":"x64"},
             {"platform":"windows-aarch64","family":"windows","kind":"windows","runner":"windows-11-arm","python_arch":"arm64"},
             {"platform":"oci-x86_64","family":"oci","kind":"oci","runner":"ubuntu-24.04","system":"x86_64-linux"},
-            {"platform":"oci-aarch64","family":"oci","kind":"oci","runner":"ubuntu-24.04-arm","system":"aarch64-linux"}
+            {"platform":"oci-aarch64","family":"oci","kind":"oci","runner":"ubuntu-24.04-arm","system":"aarch64-linux"},
+            {"platform":"static-x86_64","family":"static","kind":"static","runner":"ubuntu-24.04","system":"x86_64-linux"},
+            {"platform":"static-aarch64","family":"static","kind":"static","runner":"ubuntu-24.04-arm","system":"aarch64-linux"}
           ]'
           if [[ "$PLATFORM" == all ]]; then
             selected=$(jq -c . <<<"$all")
-          elif [[ "$PLATFORM" == linux || "$PLATFORM" == windows || "$PLATFORM" == oci ]]; then
+          elif [[ "$PLATFORM" == linux || "$PLATFORM" == windows || "$PLATFORM" == oci || "$PLATFORM" == static ]]; then
             selected=$(jq -c --arg family "$PLATFORM" '[.[] | select(.family == $family)]' <<<"$all")
           else
             selected=$(jq -c --arg platform "$PLATFORM" '[.[] | select(.platform == $platform)]' <<<"$all")
@@ -76,6 +82,7 @@ jobs:
             echo "nix=$(jq -c '[.[] | select(.kind == "nix")]' <<<"$selected")"
             echo "windows=$(jq -c '[.[] | select(.kind == "windows")]' <<<"$selected")"
             echo "oci=$(jq -c '[.[] | select(.kind == "oci")]' <<<"$selected")"
+            echo "static=$(jq -c '[.[] | select(.kind == "static")]' <<<"$selected")"
           } >> "$GITHUB_OUTPUT"
 
   nix-native:
@@ -97,6 +104,24 @@ jobs:
 
       - name: Build native toolbox
         run: nix build -L ".#anytype-toolbox-${{ matrix.system }}"
+
+      # Install names must come only from the dyld shared cache (/usr/lib,
+      # /System/...): a /nix/store dylib reference makes the binary run only
+      # on Nix machines. Since macOS 11 the system libraries exist solely in
+      # the shared cache, so this is an install-name inspection, never a
+      # file-existence check.
+      - name: Verify portable macOS install names
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for binary in result/bin/*; do
+            otool -L "$binary"
+            if otool -L "$binary" | grep -q '/nix/store'; then
+              printf '%s\n' "$binary references /nix/store dylibs and is not portable" >&2
+              exit 1
+            fi
+          done
 
       - name: Stage binaries
         shell: bash
@@ -157,6 +182,55 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/${{ matrix.platform }}" | Out-Null
           Copy-Item target/dist/anyr.exe "dist/${{ matrix.platform }}/"
           Get-ChildItem "dist/${{ matrix.platform }}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: anytype-toolbox-${{ matrix.platform }}
+          path: dist/${{ matrix.platform }}
+          if-no-files-found: error
+
+  static:
+    name: portable static binary (${{ matrix.platform }})
+    needs: preflight
+    if: ${{ needs.preflight.outputs.static != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.preflight.outputs.static) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build static musl binary
+        run: nix build -L .#anytype-toolbox-static
+
+      # The portable binary must carry no ELF interpreter at all; the glibc
+      # build's interpreter points into /nix/store and runs nowhere else.
+      - name: Verify static linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          for binary in result/bin/*; do
+            file "$binary"
+            file "$binary" | grep -Eq 'statically linked|static-pie linked' || {
+              printf '%s\n' "$binary is not statically linked" >&2
+              exit 1
+            }
+            "$binary" --help > /dev/null
+          done
+
+      - name: Stage binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.platform }}"
+          cp -L result/bin/* "dist/${{ matrix.platform }}/"
+          ls -l "dist/${{ matrix.platform }}"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

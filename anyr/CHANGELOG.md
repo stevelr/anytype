@@ -8,6 +8,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add portable release binaries and a tier-1 smoke workflow. The build
+  workflow gains `static-{x86_64,aarch64}` rows producing fully static
+  musl `anyr` binaries (the glibc nix build's ELF interpreter points into
+  /nix/store, so it runs only on Nix systems or in the OCI images), and
+  the macOS rows now verify install names reference only the dyld shared
+  cache. The manual `smoke` workflow runs repository checks, all-platform
+  clippy, and the fast lib/bins test split in a 15-20 minute budget.
 - Add manual cross-platform build and release-artifact workflows for Linux
   x86_64/arm64, macOS arm64, and Windows x86_64/arm64. Release qualification
   generates shell and PowerShell installers plus Homebrew formulae, validates

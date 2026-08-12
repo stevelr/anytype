@@ -39,6 +39,20 @@
             sha256 = "sha256-A1abGIbOtcBSdrUMhDGrER3pRM1hQP4fp9gh3Y4PKc8=";
           };
           toolchainNightly = inputs.fenix.packages.${system}.latest.toolchain;
+          # Static-musl target for portable Linux binaries: the glibc build's
+          # ELF interpreter points into /nix/store, so it only runs on Nix
+          # systems or inside the OCI images. The musl build is fully static
+          # and is the release provenance for install scripts and packages.
+          muslTarget =
+            {
+              "x86_64-linux" = "x86_64-unknown-linux-musl";
+              "aarch64-linux" = "aarch64-unknown-linux-musl";
+            }
+            .${system} or null;
+          # The musl std ships in the toolchain itself: rust-toolchain.toml
+          # lists the musl targets, so fromToolchainFile includes them without
+          # the import-from-derivation that per-target channel lookups need
+          # (cross-system `nix flake check` must stay evaluation-only).
           workspace-version = (fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
           mkAnytypeToolbox =
             {
@@ -120,12 +134,46 @@
             doCheck = false;
             nightly = false;
           };
+          anytype-toolbox-static =
+            if muslTarget == null then
+              null
+            else
+              (pkgs.pkgsStatic.makeRustPlatform {
+                cargo = toolchain;
+                rustc = toolchain;
+              }).buildRustPackage
+                {
+                  name = "Anytype Toolbox Static";
+                  version = workspace-version;
+                  cargoLock.lockFile = ./Cargo.lock;
+                  src = ./.;
+                  cargoBuildFlags = [
+                    "--package"
+                    "anyr"
+                    "--bin"
+                    "anyr"
+                  ];
+                  doCheck = false;
+                  nativeBuildInputs = [ pkgs.protobuf ];
+                  PROTOC = "${pkgs.protobuf}/bin/protoc";
+                  PROTOC_INCLUDE = "${pkgs.protobuf}/include";
+                  SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+                  meta = with pkgs.lib; {
+                    description = "Portable static anyr binary (musl)";
+                    homepage = "https://github.com/stevelr/anytype";
+                    license = licenses.asl20;
+                    mainProgram = "anyr";
+                  };
+                };
 
         in
         {
           packages = {
             default = anytype-toolbox;
             "anytype-toolbox-${system}" = anytype-toolbox-binaries;
+          }
+          // lib.optionalAttrs (muslTarget != null) {
+            anytype-toolbox-static = anytype-toolbox-static;
           }
           // lib.optionalAttrs pkgs.stdenv.isLinux {
             anytype-toolbox-oci = pkgs.dockerTools.buildLayeredImage {

@@ -8,6 +8,9 @@ components = ["rustfmt", "clippy"]
 targets = [
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-gnu",
+  # Static-musl targets back the portable Linux release binaries.
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
   # "aarch64-darwin",
   # "aarch64-windows",
   # "x86_64-windows",

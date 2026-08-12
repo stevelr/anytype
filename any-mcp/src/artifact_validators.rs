@@ -623,8 +623,15 @@ fn configure_process_boundary(
     Ok(())
 }
 
+// glibc types setrlimit's resource as `__rlimit_resource_t`; musl (the
+// static release target) uses a plain `c_int`.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+type RlimitResource = libc::c_int;
+
 #[cfg(target_os = "linux")]
-fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> std::io::Result<()> {
+fn set_limit(resource: RlimitResource, value: u64) -> std::io::Result<()> {
     let limit = libc::rlimit {
         rlim_cur: value,
         rlim_max: value,

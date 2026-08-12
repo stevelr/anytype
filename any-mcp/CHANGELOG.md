@@ -223,6 +223,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Type the Linux rlimit resource portably: glibc's `__rlimit_resource_t`
+  does not exist on musl (the static release target), which uses a plain
+  `c_int`.
 - Raise the stdio conformance harness frame deadline from five to thirty
   seconds: it is a hang bound, not a performance assertion, and a
   debug-build child answering its first frame on a loaded CI runner has

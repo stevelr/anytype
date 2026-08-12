@@ -1,0 +1,22 @@
+name: Nix devshell
+description: >-
+  Install pinned Nix and promote the devshell tool PATH (rust toolchain,
+  python, protobuf, gate, anytype-cli) to the job environment so later
+  steps can run the pinned tools without a `nix develop` wrapper.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+    - name: Expose pinned devshell tools to the job
+      shell: bash
+      run: |
+        nix develop --command bash -euo pipefail -c '
+          {
+            printf "PATH=%s\n" "$PATH"
+            printf "PROTOC=%s\n" "$PROTOC"
+            printf "PROTOC_INCLUDE=%s\n" "$PROTOC_INCLUDE"
+          } >> "$GITHUB_ENV"
+        '
