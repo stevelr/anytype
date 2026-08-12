@@ -73,6 +73,21 @@
                   ;
                 name = "Anytype Toolbox";
                 #postInstall = lib.optionalString installManPages manPagesPostInstall + postInstall;
+                # Portable macOS binaries must reference only dyld-shared-cache
+                # install names. Nix links its own libiconv dylib; the system
+                # libiconv exports the same interface, so the reference is
+                # rewritten and the binary re-signed (install_name_tool
+                # invalidates the ad-hoc signature).
+                postFixup = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+                  for binary in "$out"/bin/*; do
+                    for dylib in $(otool -L "$binary" | grep -o '/nix/store/[^ ]*libiconv[^ ]*\.dylib' || true); do
+                      install_name_tool -change "$dylib" /usr/lib/libiconv.2.dylib "$binary"
+                    done
+                    if type -t signDarwinBinariesIn > /dev/null; then
+                      signDarwinBinariesIn "$(dirname "$binary")"
+                    fi
+                  done
+                '';
                 cargoLock.lockFile = ./Cargo.lock;
                 src = ./.;
                 nativeBuildInputs = [ pkgs.protobuf ];
@@ -158,6 +173,12 @@
                   PROTOC = "${pkgs.protobuf}/bin/protoc";
                   PROTOC_INCLUDE = "${pkgs.protobuf}/include";
                   SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+                  # Vendored C (libdbus) compiled with GCC outline atomics
+                  # references __aarch64_ldadd*_sync helpers that the static
+                  # musl link does not provide; inline atomics avoid them.
+                  env = lib.optionalAttrs (muslTarget == "aarch64-unknown-linux-musl") {
+                    NIX_CFLAGS_COMPILE = "-mno-outline-atomics";
+                  };
                   meta = with pkgs.lib; {
                     description = "Portable static anyr binary (musl)";
                     homepage = "https://github.com/stevelr/anytype";

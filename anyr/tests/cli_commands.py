@@ -36,11 +36,13 @@ def _inventory_space_identity(record: object, context: str) -> SpaceIdentity:
         raise AssertionError(f"{context} is not a space record")
     space_id = record.get("id")
     space_name = record.get("name")
+    # Ambient spaces may be unnamed (a fresh account's default space has an
+    # empty name); strict naming applies only to the prefix-owned spaces the
+    # tests create, which are always selected by exact non-empty name.
     if (
         not isinstance(space_id, str)
         or not space_id
         or not isinstance(space_name, str)
-        or not space_name
         or record.get("object") not in SPACE_MODELS
     ):
         raise AssertionError(f"{context} has an invalid space identity")

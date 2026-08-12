@@ -76,6 +76,7 @@ jobs:
           shared-key: any-mcp-${{ matrix.platform }}
 
       - name: Run schema, catalog, token-budget, and unit tests
+        timeout-minutes: 30
         run: cargo test --locked -p any-mcp --lib
 
       - name: Verify the ignored live-test inventory and workflow pins
@@ -88,6 +89,7 @@ jobs:
           bash -n any-mcp/scripts/run-live-cgroup.sh
 
       - name: Run portable production-process and stdio conformance tests
+        timeout-minutes: 30
         run: cargo test --locked -p any-mcp --features acceptance-harness --test process_runtime --test stdio_conformance --test headless_stdio_e2e --test discussions_stdio_acceptance
 
       # Both artifact control planes are compiled from the same acceptance
@@ -96,6 +98,7 @@ jobs:
       # target adds the adversarial case matrix. Live rows stay ignored here
       # because a real Anytype backend is required to run them.
       - name: Run artifact acceptance and adversarial suites with exact catalog snapshots
+        timeout-minutes: 30
         shell: bash
         run: |
           set -euo pipefail

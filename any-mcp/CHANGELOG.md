@@ -226,8 +226,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Type the Linux rlimit resource portably: glibc's `__rlimit_resource_t`
   does not exist on musl (the static release target), which uses a plain
   `c_int`.
-- Raise the stdio conformance harness frame deadline from five to thirty
-  seconds: it is a hang bound, not a performance assertion, and a
+- Raise the stdio conformance fixture deadline (child-reaches-fixture
+  waits) and the harness frame deadline from five to thirty seconds: it is a hang bound, not a performance assertion, and a
   debug-build child answering its first frame on a loaded CI runner has
   exceeded five seconds. The live-gate workflow also retains a bounded copy
   of a failed gate's output as a run artifact, which per-run throwaway

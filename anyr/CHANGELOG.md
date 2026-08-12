@@ -37,6 +37,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Accept unnamed ambient spaces in the Python CLI harness's space
+  inventory: a fresh account's default space has an empty name, and strict
+  naming applies only to the prefix-owned spaces the tests create.
+- Link the aarch64 static musl binary with inline atomics
+  (`-mno-outline-atomics`): vendored libdbus C referenced GCC outline
+  helpers the static link does not provide. The macOS binaries rewrite
+  nix's libiconv install name to the system library and re-sign, so every
+  install name resolves from the dyld shared cache.
 - Compile the scripted-CLI test helpers that only the Unix `init-cli` tests
   exercise on Unix alone, keeping the Windows clippy gate clean.
 - Require the protected live gate to run the ignored type-property preservation

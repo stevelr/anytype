@@ -122,7 +122,19 @@ jobs:
           chmod 0600 "$context"
           printf 'ANYTYPE_API_LIVE_EVIDENCE_CONTEXT=%s\n' "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
+          export ANYTYPE_API_GATE_OUTPUT="$RUNNER_TEMP/anytype-api-gate-output.log"
           python3 anytype-api/scripts/run-live-gate.py required anytype-api/tests/live-gate-manifest.toml
+      # Failed-entry output is retainable evidence: the disposable server's
+      # credentials are per-run throwaways.
+      - name: Retain bounded gate output on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: anytype-api-gate-output-${{ github.job }}
+          path: ${{ runner.temp }}/anytype-api-gate-output.log
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Capture bounded reviewed server evidence on failure
         if: failure()
         shell: bash
@@ -240,7 +252,19 @@ jobs:
           chmod 0600 "$context"
           printf 'ANYTYPE_API_LIVE_EVIDENCE_CONTEXT=%s\n' "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER="$run_marker"
+          export ANYTYPE_API_GATE_OUTPUT="$RUNNER_TEMP/anytype-api-gate-output.log"
           python3 anytype-api/scripts/run-live-gate.py soak anytype-api/tests/live-gate-manifest.toml
+      # Failed-entry output is retainable evidence: the disposable server's
+      # credentials are per-run throwaways.
+      - name: Retain bounded gate output on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: anytype-api-gate-output-${{ github.job }}
+          path: ${{ runner.temp }}/anytype-api-gate-output.log
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Capture bounded reviewed server evidence on failure
         if: failure()
         shell: bash

@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Retain a bounded copy of a failed live-gate entry's output as a run
+  artifact (opt-in via `ANYTYPE_API_GATE_OUTPUT`): the disposable server's
+  per-run throwaway credentials make the output safe to keep, and entry
+  failures were undiagnosable without it.
 - Make the protected live workflow manual-only, with required, soak, or all
   tier selection, Python 3.14, and the Rust version selected from
   `rust-toolchain.toml`.

@@ -173,6 +173,22 @@ def authenticate() -> None:
         fail("live gate authentication preflight failed")
 
 
+def retain_failure_output(output: bytes) -> None:
+    """Keep a bounded copy of a failed entry's output for the run artifact.
+
+    Retention is opt-in via ANYTYPE_API_GATE_OUTPUT and safe on the
+    disposable CI server, whose credentials are per-run throwaways.
+    """
+    path = os.environ.get("ANYTYPE_API_GATE_OUTPUT")
+    if not path:
+        return
+    try:
+        with open(path, "wb") as sink:
+            sink.write(output[-65536:])
+    except OSError:
+        pass
+
+
 def run_entry(index: int, entry: dict[str, str]) -> None:
     command = [os.environ.get("CARGO", "cargo"), "test", "--locked", "-p", "anytype"]
     command.extend(
@@ -192,6 +208,7 @@ def run_entry(index: int, entry: dict[str, str]) -> None:
         or not SUMMARY.fullmatch(summaries[0])
         or b"skipped" in output.lower()
     ):
+        retain_failure_output(output)
         fail(f"live gate entry {index} failed")
 
 
