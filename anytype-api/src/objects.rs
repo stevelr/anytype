@@ -594,7 +594,42 @@ struct UpdateObjectRequestBody {
 
 #[derive(Debug, Serialize)]
 struct FilteredObjectsRequestBody {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    types: Vec<String>,
     filters: FilterExpression,
+}
+
+fn split_single_type_filter(filters: Vec<Filter>) -> (Vec<String>, Vec<Filter>) {
+    let type_filter_count = filters
+        .iter()
+        .filter(|filter| {
+            matches!(
+                filter,
+                Filter::Select {
+                    condition: Condition::In,
+                    property_key,
+                    ..
+                } if property_key == "type"
+            )
+        })
+        .count();
+    if type_filter_count != 1 {
+        return (Vec::new(), filters);
+    }
+
+    let mut types = Vec::new();
+    let mut remaining = Vec::with_capacity(filters.len().saturating_sub(1));
+    for filter in filters {
+        match filter {
+            Filter::Select {
+                condition: Condition::In,
+                property_key,
+                select,
+            } if property_key == "type" => types = select,
+            filter => remaining.push(filter),
+        }
+    }
+    (types, remaining)
 }
 
 // ============================================================================
@@ -1300,8 +1335,10 @@ impl ListObjectsRequest {
         // value as text and rejects typed number and checkbox filters. Scoped
         // search carries the same AND conditions in JSON without losing types.
         QueryWithFilters::from(self.filters.as_slice()).validate()?;
+        let (types, filters) = split_single_type_filter(self.filters);
         let body = FilteredObjectsRequestBody {
-            filters: FilterExpression::from(self.filters),
+            types,
+            filters: FilterExpression::from(filters),
         };
         self.client
             .post_request_paged(
@@ -1508,6 +1545,7 @@ mod tests {
 
         client
             .objects(SPACE_ID)
+            .filter(Filter::type_in(["task"]))
             .filter(Filter::number_greater("priority", 2))
             .filter(Filter::checkbox_equal("done", true))
             .limit(25)
@@ -1527,6 +1565,7 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(requests[0].body())
                 .expect("filtered object body is JSON"),
             serde_json::json!({
+                "types": ["task"],
                 "filters": {
                     "conditions": [
                         {"condition": "gt", "property_key": "priority", "number": 2},

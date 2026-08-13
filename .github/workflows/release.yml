@@ -254,7 +254,7 @@ jobs:
             # structural cops while checking every other formula style rule.
             style_exceptions='FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict,Sorbet/StrictSigil,Sorbet/TrueSigil,Style/Documentation,Style/FrozenStringLiteralComment,Style/SoleNestedConditional,Style/MutableConstant,Layout/HashAlignment,Style/TrailingCommaInHashLiteral,Style/IfUnlessModifier'
             find artifacts -type f -name '*.rb' -exec brew style \
-              --except-cops "$style_exceptions" {} +
+              --formula --except-cops "$style_exceptions" {} +
           fi
 
   validate-powershell-installer:

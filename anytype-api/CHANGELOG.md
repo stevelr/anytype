@@ -13,13 +13,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   unreadable or malformed one.
 - Route object listings containing number or checkbox filters through the
   space-scoped REST search endpoint, preserving their JSON scalar types while
-  the upstream flat-query object-list parser rejects them. Other object-list
-  filters remain on the original GET endpoint.
+  the upstream flat-query object-list parser rejects them. A single positive
+  type filter maps to search's dedicated type selector, which works while a
+  fresh server's custom-property index settles. Other object-list filters
+  remain on the original GET endpoint.
 - Enable the disposable-space recovery harness on Windows by creating private
   ACLs for its state directory and ledger files, and accepting ownership only
   by the process user, LocalSystem, or Built-in Administrators. File and
   directory handles open reparse points without following them, then reject
-  those objects before recovery I/O.
+  those objects before recovery I/O. File contents are flushed before each
+  rename; directory-entry persistence is delegated to the NTFS metadata
+  journal because Windows rejects `FlushFileBuffers` on directory handles.
 - Retain a bounded copy of a failed live-gate entry's output as a run
   artifact (opt-in via `ANYTYPE_API_GATE_OUTPUT`): the disposable server's
   per-run throwaway credentials make the output safe to keep, and entry

@@ -42,6 +42,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Validate cargo-dist's generated Homebrew formula in formula mode, applying
+  Homebrew's formula rules without the library-only Sorbet sigil checks.
 - Accept unnamed ambient spaces in the Python CLI harness's space
   inventory: a fresh account's default space has an empty name, and strict
   naming applies only to the prefix-owned spaces the tests create.

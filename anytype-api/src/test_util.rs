@@ -6118,13 +6118,9 @@ mod tests {
         assert_eq!(
             archived_json,
             serde_json::json!({
+                "types": [COLLECTION_TYPE_ID],
                 "filters": {
                     "conditions": [
-                        {
-                            "condition": "in",
-                            "property_key": "type",
-                            "select": COLLECTION_TYPE_ID,
-                        },
                         {
                             "condition": "eq",
                             "property_key": "archived",

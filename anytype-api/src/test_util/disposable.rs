@@ -1346,9 +1346,21 @@ fn path_entry_exists(path: &Path) -> TestResult<bool> {
 }
 
 fn fsync_directory(path: &Path) -> TestResult<()> {
-    open_private_directory(path)?
-        .sync_all()
-        .map_err(|_| config_error("fsync recovery directory"))
+    let directory = open_private_directory(path)?;
+    #[cfg(unix)]
+    {
+        directory
+            .sync_all()
+            .map_err(|_| config_error("fsync recovery directory"))
+    }
+    #[cfg(windows)]
+    {
+        // Windows rejects FlushFileBuffers for directory handles. The file
+        // contents are flushed before each rename, and opening the directory
+        // above still verifies the private recovery boundary.
+        drop(directory);
+        Ok(())
+    }
 }
 
 fn random_handle(prefix: &str) -> TestResult<String> {

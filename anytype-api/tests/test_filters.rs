@@ -27,7 +27,8 @@
 //! matrix first requires both unfiltered endpoints to converge to the complete
 //! four-object cohort, then executes all thirteen fixed cases independently on
 //! both endpoints. A semantic mismatch must repeat as the same sorted identity
-//! multiset three times before classification; otherwise it is `unstable`.
+//! multiset three times after a bounded settling window before classification;
+//! otherwise it is `unstable`.
 //! After exact space deletion and final cleanup, the test reports static labels,
 //! redacted identity relation/count fields, a closed failure category, and a
 //! validated HTTP status/class when available. Request values, URLs, response
@@ -997,6 +998,7 @@ async fn observe_filter_endpoint_case(
     case: NumericCheckboxCase,
 ) -> TestResult<IdentityObservation> {
     const MAX_OBSERVATION_ATTEMPTS: usize = 20;
+    const MIN_SETTLING_ATTEMPTS: usize = 12;
     const STABLE_OBSERVATIONS: usize = 3;
 
     let fixtures = sorted_ids(objects);
@@ -1030,7 +1032,7 @@ async fn observe_filter_endpoint_case(
             consecutive = 1;
         }
         last_observation = Some(observation);
-        if consecutive >= STABLE_OBSERVATIONS {
+        if attempt >= MIN_SETTLING_ATTEMPTS && consecutive >= STABLE_OBSERVATIONS {
             return Ok(observation);
         }
         if attempt < MAX_OBSERVATION_ATTEMPTS {

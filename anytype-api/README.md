@@ -65,14 +65,12 @@ filters support `eq` and `ne`. Typed values pass through unchanged in search
 expressions and become canonical number text or lowercase boolean text only
 where a list endpoint requires URL query values. The client does not coerce
 strings to numbers or booleans, accept checkbox `1`/`0` aliases, or emulate
-server filtering after pagination. On `anytype-cli` 0.3.6,
-all eleven cleanup-owned object-list cases return HTTP 400; scoped search passes
-six exact-identity cases, while number `ne`/`lt`/`lte` and checkbox `eq false`/
-`ne true` each stably return the expected set plus one cleanup-owned fixture.
-The reproducible probe requires unfiltered endpoint controls, three identical
-observations before classifying a mismatch, redacted relation/count output, and
-verified disposable-space absence. The upstream object-list issue therefore
-remains open.
+server filtering after pagination. When typed list filters include one positive
+type filter, the client maps it to search's dedicated type selector instead of
+sending it as a generic property condition. The reproducible probe requires
+unfiltered endpoint controls, a bounded settling window before classifying a
+repeated mismatch, redacted relation/count output, and verified
+disposable-space absence.
 
 ### Bounded HTTP responses
 
@@ -1337,8 +1335,11 @@ applying that ledger's plan, and rejects stale or repeated confirmations.
 Destructive execution is enabled only where owner and owner-only permissions
 can be proved for the runtime directory and every recovery target. Unix opens
 and removes exact components relative to verified directory handles with
-no-follow semantics. Windows fails closed before authentication until native
-DACL, ownership, and reparse-point verification is implemented.
+no-follow semantics. Windows creates protected ACLs, admits only the process
+user, LocalSystem, or Built-in Administrators as owner and access-granting
+principals, and rejects reparse points before recovery I/O. Recovery files are
+flushed before publication; NTFS supplies directory-entry persistence because
+Windows rejects `FlushFileBuffers` on directory handles.
 
 Tests that need templates can use the hidden
 `TestContext::create_template_fixtures` helper with one to sixteen source

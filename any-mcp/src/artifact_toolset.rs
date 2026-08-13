@@ -1455,6 +1455,21 @@ impl PreparedImport {
         }
     }
 
+    async fn bind_import_operation(
+        &mut self,
+        runtime: &RuntimeContext,
+        operation: [u8; 32],
+    ) -> Result<(), ArtifactToolError> {
+        match self {
+            Self::Staged(source) => staging(runtime)?
+                .bind_import_operation(source, operation)
+                .await
+                .map_err(classify_staging_error),
+            Self::Local { .. } => Ok(()),
+            Self::StagedReplay(_) => Err(ArtifactToolError::NotFound),
+        }
+    }
+
     async fn mark_import_dispatched(
         &mut self,
         runtime: &RuntimeContext,
@@ -2724,6 +2739,40 @@ impl PreparedDocument {
         self.source.verify_before_dispatch()
     }
 
+    async fn bind_staged_operation(
+        &mut self,
+        runtime: &RuntimeContext,
+        operation: [u8; 32],
+    ) -> Result<(), ArtifactToolError> {
+        self.source.bind_import_operation(runtime, operation).await
+    }
+
+    async fn mark_staged_dispatched(
+        &mut self,
+        runtime: &RuntimeContext,
+    ) -> Result<(), ArtifactToolError> {
+        self.source.mark_import_dispatched(runtime).await
+    }
+
+    async fn restore_after_definitive_rejection(
+        &mut self,
+        runtime: &RuntimeContext,
+    ) -> Result<(), ArtifactToolError> {
+        self.source
+            .restore_after_definitive_rejection(runtime)
+            .await
+    }
+
+    async fn retain_staged_candidate(
+        &self,
+        runtime: &RuntimeContext,
+        candidate: &EntityId,
+    ) -> Result<(), ArtifactToolError> {
+        self.source
+            .retain_import_candidate(runtime, candidate)
+            .await
+    }
+
     async fn consume_staged(
         &mut self,
         runtime: &RuntimeContext,
@@ -3136,7 +3185,9 @@ async fn document_import_create(
                 .await;
             return Ok(output);
         }
-        DocumentMutationIdempotency::Dispatch => {}
+        DocumentMutationIdempotency::Dispatch => {
+            source.bind_staged_operation(runtime, key).await?;
+        }
     }
 
     let representation = plain_markdown_representation(&source.dispatched);
@@ -3163,9 +3214,24 @@ async fn document_import_create(
         &source,
     )
     .await?;
+    if let Err(error) = source.mark_staged_dispatched(runtime).await {
+        runtime.artifact_operations().remove(key).await;
+        return Err(error);
+    }
     let created = match request.create().await {
         Ok(created) => created,
         Err(error) if mutation_rejection_is_definitive(&error) => {
+            if source
+                .restore_after_definitive_rejection(runtime)
+                .await
+                .is_err()
+            {
+                runtime
+                    .artifact_operations()
+                    .set_outcome(key, OperationOutcome::Indeterminate)
+                    .await;
+                return Err(ArtifactToolError::Indeterminate);
+            }
             runtime.artifact_operations().remove(key).await;
             return Err(classify_anytype_error(&error));
         }
@@ -3179,6 +3245,17 @@ async fn document_import_create(
     };
     let object_id =
         EntityId::new(created.id.clone()).map_err(|_| ArtifactToolError::Indeterminate)?;
+    if source
+        .retain_staged_candidate(runtime, &object_id)
+        .await
+        .is_err()
+    {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::Indeterminate)
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
     let returned = checked_document(
         &created,
         &space_id,
@@ -3328,7 +3405,9 @@ async fn document_import_update(
                 .await;
             return Ok(output);
         }
-        DocumentMutationIdempotency::Dispatch => {}
+        DocumentMutationIdempotency::Dispatch => {
+            source.bind_staged_operation(runtime, key).await?;
+        }
     }
     if source.dispatched == current_body {
         verify_document_source_before_dispatch(
@@ -3365,9 +3444,10 @@ async fn document_import_update(
     let expected_canonical = representation
         .as_ref()
         .map(|value| value.canonical().to_owned());
-    let wire = representation
-        .as_ref()
-        .map_or(source.dispatched.as_str(), |value| value.wire());
+    let wire = representation.as_ref().map_or_else(
+        || source.dispatched.clone(),
+        |value| value.wire().to_owned(),
+    );
     verify_document_source_before_dispatch(
         runtime,
         runtime.artifact_operations(),
@@ -3376,6 +3456,10 @@ async fn document_import_update(
         &source,
     )
     .await?;
+    if let Err(error) = source.mark_staged_dispatched(runtime).await {
+        runtime.artifact_operations().remove(key).await;
+        return Err(error);
+    }
     let updated = match runtime
         .client()
         .update_object(space_id.as_str(), object_id.as_str())
@@ -3386,6 +3470,17 @@ async fn document_import_update(
     {
         Ok(updated) => updated,
         Err(error) if mutation_rejection_is_definitive(&error) => {
+            if source
+                .restore_after_definitive_rejection(runtime)
+                .await
+                .is_err()
+            {
+                runtime
+                    .artifact_operations()
+                    .set_outcome(key, OperationOutcome::Indeterminate)
+                    .await;
+                return Err(ArtifactToolError::Indeterminate);
+            }
             runtime.artifact_operations().remove(key).await;
             return Err(classify_anytype_error(&error));
         }
@@ -3397,6 +3492,17 @@ async fn document_import_update(
             return Err(ArtifactToolError::Indeterminate);
         }
     };
+    if source
+        .retain_staged_candidate(runtime, &object_id)
+        .await
+        .is_err()
+    {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::Indeterminate)
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
     #[cfg(any(test, feature = "acceptance-harness"))]
     if !runtime
         .artifact_acceptance_gates()

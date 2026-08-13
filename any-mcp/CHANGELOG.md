@@ -8,6 +8,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Bind staged document creates and updates to their idempotency operation
+  before mutation dispatch, restoring the staged source after a definitive
+  rejection and retaining the exact candidate across uncertain outcomes.
+- Allow one minute for each spawned stdio response in portable conformance
+  tests, keeping a finite hang bound while accommodating debug builds on
+  emulated aarch64 runners.
 - Make GitHub Actions manual-only during cross-platform qualification and take
   the Rust version from `rust-toolchain.toml` instead of workflow literals.
   The Nix build also exposes Linux x86_64/arm64 OCI image archives containing

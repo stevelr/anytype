@@ -418,6 +418,11 @@ URL. Staging requires activated local roots: it is a data plane on top of the
 policy, not a replacement for it, and `artifact_status` reports
 `staging_active: false` whenever roots are inactive.
 
+Staged file and document imports bind the source to the idempotency operation
+before mutation dispatch. A definitive rejection restores the ready source;
+an uncertain outcome retains the operation and exact candidate for replay
+verification without granting a second readable source lease.
+
 The staging root is a closed durable layout owned exclusively by one server
 instance: `instance.lock` plus the `records/`, `payloads/`, `tmp/`, and
 `tombstones/` directories. Every staging state transition is flushed to disk
@@ -1735,7 +1740,9 @@ the library plane, which locks the exact artifact catalog and schema
 snapshots, and the spawned `headless_stdio_e2e` plane, which adds the
 adversarial case matrix — serially. The process harness uses only portable
 Rust process, TCP, path, environment, thread, and channel APIs; it does not
-depend on Unix signals, `/tmp`, executable suffixes, or shell scripts.
+depend on Unix signals, `/tmp`, executable suffixes, or shell scripts. Each
+protocol response has a finite one-minute hang bound for debug binaries on
+loaded or emulated runners.
 
 The workflow is manual-only during matrix qualification. Its tier selector
 always runs the portable matrix, then optionally adds the existing headless or
