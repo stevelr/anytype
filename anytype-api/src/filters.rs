@@ -427,6 +427,18 @@ impl Condition {
 }
 
 impl Filter {
+    pub(crate) fn requires_typed_query_body(&self) -> bool {
+        matches!(
+            self,
+            Self::Number { .. }
+                | Self::Checkbox { .. }
+                | Self::Value {
+                    value: Some(Value::Number(_) | Value::Bool(_)),
+                    ..
+                }
+        )
+    }
+
     /// Matches when the property is empty.
     pub fn is_empty(property_key: impl Into<String>) -> Self {
         Self::Empty {
@@ -833,6 +845,29 @@ mod tests {
                 (expected.0.to_owned(), expected.1.to_owned())
             );
         }
+    }
+
+    #[test]
+    fn typed_scalar_filters_require_a_json_request_body() {
+        assert!(Filter::number_equal("score", 5).requires_typed_query_body());
+        assert!(Filter::checkbox_equal("done", false).requires_typed_query_body());
+        assert!(
+            Filter::Value {
+                property_key: "score".to_owned(),
+                condition: Condition::Equal,
+                value: Some(serde_json::json!(5)),
+            }
+            .requires_typed_query_body()
+        );
+        assert!(
+            Filter::Value {
+                property_key: "done".to_owned(),
+                condition: Condition::Equal,
+                value: Some(serde_json::json!(true)),
+            }
+            .requires_typed_query_body()
+        );
+        assert!(!Filter::text_equal("name", "draft").requires_typed_query_body());
     }
 
     #[test]

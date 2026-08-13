@@ -5453,8 +5453,26 @@ mod tests {
                         break;
                     }
                     request.extend_from_slice(&buffer[..read]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
+                    if let Some(header_end) = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|position| position + 4)
+                    {
+                        let headers = std::str::from_utf8(&request[..header_end])
+                            .expect("fixture request headers are UTF-8");
+                        let content_length = headers
+                            .lines()
+                            .filter_map(|line| line.split_once(':'))
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .map_or(0, |(_, value)| {
+                                value
+                                    .trim()
+                                    .parse::<usize>()
+                                    .expect("fixture content length")
+                            });
+                        if request.len() >= header_end + content_length {
+                            break;
+                        }
                     }
                 }
                 let response = format!(
@@ -6081,14 +6099,42 @@ mod tests {
 
         let requests = requests.await.expect("owned-type requests");
         assert_eq!(requests.len(), 2);
-        for request in &requests {
-            let request_line = request.lines().next().expect("request line");
-            assert!(request_line.contains("limit=17"));
-            assert!(request_line.contains(COLLECTION_TYPE_ID));
-        }
-        assert!(!requests[0].lines().next().unwrap().contains("archived"));
-        assert!(requests[1].lines().next().unwrap().contains("archived"));
-        assert!(requests[1].lines().next().unwrap().contains("true"));
+        let active_line = requests[0].lines().next().expect("active request line");
+        assert!(active_line.starts_with("GET "));
+        assert!(active_line.contains("limit=17"));
+        assert!(active_line.contains(COLLECTION_TYPE_ID));
+        assert!(!active_line.contains("archived"));
+
+        let archived_line = requests[1].lines().next().expect("archived request line");
+        assert!(archived_line.starts_with("POST "));
+        assert!(archived_line.contains("/search?limit=17"));
+        assert!(!archived_line.contains(COLLECTION_TYPE_ID));
+        let archived_body = requests[1]
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("archived request body");
+        let archived_json: serde_json::Value =
+            serde_json::from_str(archived_body).expect("archived request JSON");
+        assert_eq!(
+            archived_json,
+            serde_json::json!({
+                "filters": {
+                    "conditions": [
+                        {
+                            "condition": "in",
+                            "property_key": "type",
+                            "select": COLLECTION_TYPE_ID,
+                        },
+                        {
+                            "condition": "eq",
+                            "property_key": "archived",
+                            "checkbox": true,
+                        },
+                    ],
+                    "operator": "and",
+                },
+            })
+        );
     }
 
     #[test]

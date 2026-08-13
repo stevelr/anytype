@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Route object listings containing number or checkbox filters through the
+  space-scoped REST search endpoint, preserving their JSON scalar types while
+  the upstream flat-query object-list parser rejects them. Other object-list
+  filters remain on the original GET endpoint.
 - Enable the disposable-space recovery harness on Windows by creating private
   ACLs for its state directory and ledger files, and accepting ownership only
   by the process user, LocalSystem, or Built-in Administrators. File and

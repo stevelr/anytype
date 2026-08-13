@@ -953,6 +953,13 @@ object, or subscription identifiers.
 The crate targets the Anytype REST API dated 2025-11-08. Coverage is described
 in two parts, because the two transports do not cover the same ground:
 
+`objects(space).filter(...).list()` keeps ordinary filters on the documented
+object-list endpoint. Requests containing number or checkbox filters use the
+space-scoped REST search endpoint internally, because the object-list query
+parser in `anytype-cli` 0.3.6 rejects those typed values after URL decoding.
+The public builder, AND composition, HTTP-only authentication, pagination, and
+archived-object behavior remain unchanged.
+
 - **Direct REST coverage** - operations the crate performs over HTTP against
   the documented REST surface. Nearly every documented operation is covered
   directly, including auth, spaces, types, properties, tags, objects,

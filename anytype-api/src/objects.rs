@@ -592,6 +592,11 @@ struct UpdateObjectRequestBody {
     properties: Vec<Value>,
 }
 
+#[derive(Debug, Serialize)]
+struct FilteredObjectsRequestBody {
+    filters: FilterExpression,
+}
+
 // ============================================================================
 // BUILDER STRUCTS (public)
 // ============================================================================
@@ -1228,7 +1233,9 @@ impl ListObjectsRequest {
 
     /// Adds a filter condition.
     ///
-    /// Multiple filters are combined with AND logic.
+    /// Multiple filters are combined with AND logic. Listings containing a
+    /// number or checkbox filter use the space-scoped search endpoint
+    /// internally so those values remain typed in the JSON request body.
     ///
     /// # Arguments
     /// * `filter` - Filter condition to add
@@ -1270,17 +1277,38 @@ impl ListObjectsRequest {
     /// To exclude, filter returned values with `.filter(|obj| !obj.archived)`
     ///
     /// # Errors
-    /// - [`AnytypeError::Validation`] if `space_id` is invalid
+    /// - [`AnytypeError::Validation`] if `space_id` or a filter is invalid
     pub async fn list(self) -> Result<PagedResult<Object>> {
         self.limits.validate_id(&self.space_id, "space_id")?;
 
         let query = Query::default()
             .set_limit_opt(self.limit)
-            .set_offset_opt(self.offset)
-            .add_filters(&self.filters);
+            .set_offset_opt(self.offset);
+        let requires_typed_body = self.filters.iter().any(Filter::requires_typed_query_body);
+        if !requires_typed_body {
+            return self
+                .client
+                .get_request_paged(
+                    &format!("/v1/spaces/{}/objects", self.space_id),
+                    query.add_filters(&self.filters),
+                )
+                .await;
+        }
 
+        // Preserve the list builder's local Filter validation before changing
+        // transports. The server's object-list endpoint receives every query
+        // value as text and rejects typed number and checkbox filters. Scoped
+        // search carries the same AND conditions in JSON without losing types.
+        QueryWithFilters::from(self.filters.as_slice()).validate()?;
+        let body = FilteredObjectsRequestBody {
+            filters: FilterExpression::from(self.filters),
+        };
         self.client
-            .get_request_paged(&format!("/v1/spaces/{}/objects", self.space_id), query)
+            .post_request_paged(
+                &format!("/v1/spaces/{}/search", self.space_id),
+                &body,
+                query.add_filters(&[]),
+            )
             .await
     }
 }
@@ -1448,7 +1476,93 @@ impl AnytypeClient {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_util::scripted_http::{
+        ScriptedHttpContentType, ScriptedHttpFixture, ScriptedHttpResponse,
+    };
+
     use super::*;
+
+    const EMPTY_PAGE: &str =
+        r#"{"data":[],"pagination":{"has_more":false,"limit":25,"offset":3,"total":0}}"#;
+    const SPACE_ID: &str = "bafyreiafl45wf5eaxiby44pxrkhia3y5jsyix3ov2jzqiftsxjotujqlh4";
+
+    async fn scripted_objects_client() -> (AnytypeClient, ScriptedHttpFixture) {
+        let fixture = ScriptedHttpFixture::start(vec![ScriptedHttpResponse::new(
+            reqwest::StatusCode::OK,
+            ScriptedHttpContentType::Json,
+            EMPTY_PAGE,
+        )])
+        .await
+        .expect("start scripted objects fixture");
+        let mut config = ClientConfig::default().app_name("objects-wire-shape");
+        config.base_url = Some(format!("http://{}", fixture.address()));
+        config.keystore = Some("env".to_owned());
+        let client = AnytypeClient::with_config(config).expect("create scripted objects client");
+        client.set_api_key(HttpCredentials::new("fixture-token"));
+        (client, fixture)
+    }
+
+    #[tokio::test]
+    async fn filtered_object_list_uses_scoped_search_with_typed_and_expression() {
+        let (client, fixture) = scripted_objects_client().await;
+
+        client
+            .objects(SPACE_ID)
+            .filter(Filter::number_greater("priority", 2))
+            .filter(Filter::checkbox_equal("done", true))
+            .limit(25)
+            .offset(3)
+            .list()
+            .await
+            .expect("filtered object list");
+
+        let requests = fixture.finish().await.expect("filtered object request");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method(), "POST");
+        assert_eq!(
+            requests[0].path(),
+            &format!("/v1/spaces/{SPACE_ID}/search?limit=25&offset=3")
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(requests[0].body())
+                .expect("filtered object body is JSON"),
+            serde_json::json!({
+                "filters": {
+                    "conditions": [
+                        {"condition": "gt", "property_key": "priority", "number": 2},
+                        {"condition": "eq", "property_key": "done", "checkbox": true}
+                    ],
+                    "operator": "and"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn non_typed_object_list_filters_keep_the_object_list_endpoint() {
+        let (client, fixture) = scripted_objects_client().await;
+
+        client
+            .objects(SPACE_ID)
+            .filter(Filter::text_contains("name", "draft"))
+            .limit(25)
+            .offset(3)
+            .list()
+            .await
+            .expect("non-typed filtered object list");
+
+        let requests = fixture
+            .finish()
+            .await
+            .expect("non-typed filtered object request");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method(), "GET");
+        assert_eq!(
+            requests[0].path(),
+            &format!("/v1/spaces/{SPACE_ID}/objects?name%5Bcontains%5D=draft&limit=25&offset=3")
+        );
+        assert!(requests[0].body().is_empty());
+    }
 
     #[test]
     fn plain_markdown_representation_is_closed_and_idempotent() {

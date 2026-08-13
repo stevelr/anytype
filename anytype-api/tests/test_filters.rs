@@ -33,13 +33,11 @@
 //! validated HTTP status/class when available. Request values, URLs, response
 //! bodies, credentials, names, and fixture identities are never retained.
 //!
-//! On the `anytype-cli` 0.3.6 acceptance server, the original eleven object-list cells
-//! return HTTP 400. Scoped search passes number `eq`, `gt`, `gte`, negative
-//! decimal `eq`, checkbox `eq true`, and checkbox `ne false`; its other five
-//! cells stably return one extra cleanup-owned fixture. The expected test exit
-//! is therefore nonzero, but output is evidence only when all 26 rows and
-//! `cleanup=verified_absent` are present. Keep the test ignored as a deliberate
-//! compatibility probe until those upstream behaviors change.
+//! Object listings containing number or checkbox filters use scoped search
+//! internally to preserve typed values that the upstream flat-query endpoint
+//! otherwise rejects. Both public paths must return exact identities using
+//! Heart's zero-value semantics for absent number and checkbox properties. The
+//! test fails closed on any API error or identity drift.
 
 mod common;
 
@@ -230,14 +228,14 @@ impl NumericCheckboxCase {
     const fn expected_indexes(self) -> &'static [usize] {
         match self {
             Self::NumberEqualInteger => &[1],
-            Self::NumberNotEqual => &[0, 2],
-            Self::NumberLess => &[0],
-            Self::NumberLessOrEqual => &[0, 1],
+            Self::NumberNotEqual => &[0, 2, 3],
+            Self::NumberLess => &[0, 3],
+            Self::NumberLessOrEqual => &[0, 1, 3],
             Self::NumberGreater => &[2],
             Self::NumberGreaterOrEqual => &[1, 2],
             Self::NumberEqualDecimal => &[0],
             Self::CheckboxEqualTrue | Self::CheckboxNotEqualFalse => &[0],
-            Self::CheckboxEqualFalse | Self::CheckboxNotEqualTrue => &[1, 2],
+            Self::CheckboxEqualFalse | Self::CheckboxNotEqualTrue => &[1, 2, 3],
             Self::NumberRange => &[1],
             Self::NumberCheckboxAnd => &[0],
         }
@@ -848,6 +846,27 @@ fn identity_observation_classifies_every_redacted_relation() {
 }
 
 #[test]
+fn absent_numeric_and_checkbox_properties_follow_heart_zero_values() {
+    assert_eq!(
+        NumericCheckboxCase::NumberNotEqual.expected_indexes(),
+        &[0, 2, 3]
+    );
+    assert_eq!(NumericCheckboxCase::NumberLess.expected_indexes(), &[0, 3]);
+    assert_eq!(
+        NumericCheckboxCase::NumberLessOrEqual.expected_indexes(),
+        &[0, 1, 3]
+    );
+    assert_eq!(
+        NumericCheckboxCase::CheckboxEqualFalse.expected_indexes(),
+        &[1, 2, 3]
+    );
+    assert_eq!(
+        NumericCheckboxCase::CheckboxNotEqualTrue.expected_indexes(),
+        &[1, 2, 3]
+    );
+}
+
+#[test]
 fn identity_observation_report_never_renders_fixture_ids() -> TestResult<()> {
     const SECRET_EXPECTED: &str = "secret-expected-id";
     const SECRET_FIXTURE: &str = "secret-fixture-id";
@@ -991,10 +1010,10 @@ async fn observe_filter_endpoint_case(
         if let Some(expected) = case.expected_checkbox()
             && actual
                 .iter()
-                .any(|object| object.get_property_bool("done") != Some(expected))
+                .any(|object| object.get_property_bool("done").unwrap_or(false) != expected)
         {
             return Err(TestError::Assertion {
-                message: "checkbox filter returned an object without the expected hydrated value"
+                message: "checkbox filter returned an object without the expected effective value"
                     .to_owned(),
             });
         }
