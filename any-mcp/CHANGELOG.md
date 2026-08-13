@@ -229,7 +229,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   their owners must be the process user, LocalSystem, or Built-in
   Administrators. Platform-native paths replace Unix-only fixture literals.
   Artifact gate directory handles now use the Windows directory-open flag while
-  retaining reparse-point refusal.
+  retaining reparse-point refusal. Test fixtures release retained directory
+  handles before removing their temporary trees on Windows.
 - Give the expired-reader staging test a five-second scheduling allowance. The
   assertion still proves that request handling never waits for a stalled
   reader, without treating a heavily loaded Arch runner as a product timeout.

@@ -4494,6 +4494,7 @@ mod tests {
         ));
 
         drop(prepared);
+        drop(roots);
         std::fs::remove_dir_all(base).expect("clean fixture");
     }
 

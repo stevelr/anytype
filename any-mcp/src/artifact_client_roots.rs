@@ -512,6 +512,9 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(source.calls(), 0);
+        drop(effective);
+        drop(gate);
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
@@ -536,6 +539,9 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(source.calls(), 0);
+        drop(effective);
+        drop(gate);
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
@@ -570,6 +576,8 @@ mod tests {
         }
 
         assert_eq!(source.calls(), 1);
+        drop(gate);
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
@@ -592,6 +600,9 @@ mod tests {
                 .open_import("inbox", &relative("source.bin"), 64)
                 .is_err()
         );
+        drop(effective);
+        drop(gate);
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
@@ -613,6 +624,8 @@ mod tests {
         }
 
         assert_eq!(source.calls(), 1);
+        drop(gate);
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
@@ -631,6 +644,8 @@ mod tests {
                 .await
                 .is_err()
         );
+        drop(gate);
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
@@ -647,6 +662,8 @@ mod tests {
                 .await
                 .is_err()
         );
+        drop(gate);
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
@@ -662,6 +679,8 @@ mod tests {
                 .await
                 .is_err()
         );
+        drop(gate);
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 

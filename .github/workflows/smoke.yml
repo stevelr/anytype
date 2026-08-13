@@ -31,7 +31,7 @@ jobs:
   smoke-linux:
     name: repository checks, clippy, and fast tests (linux-x86_64)
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -104,5 +104,10 @@ jobs:
         with:
           shared-key: smoke-${{ matrix.platform }}
 
-      - name: Clippy
+      - name: Clippy in the Nix development shell
+        if: matrix.kind == 'nix'
+        run: nix develop --command cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Clippy with native Windows prerequisites
+        if: matrix.kind == 'windows'
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings

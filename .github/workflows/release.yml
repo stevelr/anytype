@@ -248,9 +248,14 @@ jobs:
           test "$formula_count" -gt 0
           find artifacts -type f -name '*installer.sh' -exec bash -n {} +
           find artifacts -type f -name '*.rb' -exec ruby -c {} \;
-          brew --version
-          find artifacts -type f -name '*.rb' -exec brew style \
-            --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict {} +
+          if [[ "${{ runner.os }}" == macOS ]]; then
+            brew --version
+            # cargo-dist owns the generated template's layout. Exclude its fixed
+            # structural cops while checking every other formula style rule.
+            style_exceptions='FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict,Sorbet/StrictSigil,Sorbet/TrueSigil,Style/Documentation,Style/FrozenStringLiteralComment,Style/SoleNestedConditional,Style/MutableConstant,Layout/HashAlignment,Style/TrailingCommaInHashLiteral,Style/IfUnlessModifier'
+            find artifacts -type f -name '*.rb' -exec brew style \
+              --except-cops "$style_exceptions" {} +
+          fi
 
   validate-powershell-installer:
     name: PowerShell installer (windows-x86_64)

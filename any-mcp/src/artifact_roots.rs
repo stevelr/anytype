@@ -3166,6 +3166,7 @@ mod tests {
         assert_eq!(registry.acceptance_access_attempts(), 1);
         assert_eq!(registry.acceptance_successful_import_opens(), 0);
         assert!(!format!("{registry:?}").contains(base.to_string_lossy().as_ref()));
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
@@ -3242,6 +3243,7 @@ mod tests {
                 .contains("not authorized")
         );
         assert_eq!(fs::read(export.join("new.bin")).expect("read"), b"new");
+        drop(effective);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
@@ -3288,6 +3290,7 @@ mod tests {
             b"other"
         );
         assert_eq!(fs::read_dir(&export).expect("list export").count(), 1);
+        drop(effective);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
@@ -3751,6 +3754,9 @@ mod tests {
                 )
                 .is_err()
         );
+        drop(denied);
+        drop(narrowed);
+        drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }
 
