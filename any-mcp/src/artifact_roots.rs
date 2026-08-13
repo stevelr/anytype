@@ -740,6 +740,7 @@ impl StagingDirectory {
         let root = RootCapability {
             kind: RootCapabilityKind::Export,
             directory,
+            namespace_path: Some(path.clone()),
         };
         let root_lock = acquire_staging_root_lock(&root)?;
         migrate_legacy_staging_root(&root)?;
@@ -1398,6 +1399,7 @@ fn staging_child(
             #[cfg(windows)]
             ancestry: root.directory.ancestry.clone(),
         },
+        namespace_path: None,
     })
 }
 
@@ -1668,6 +1670,13 @@ impl AtomicExport {
     }
 
     fn verify_export_namespace(&self) -> Result<(), RootAccessError> {
+        if let Some(path) = self.root.namespace_path.as_ref() {
+            let current_root =
+                open_root(path).map_err(|_| RootAccessError::new(RootProblem::Changed))?;
+            if current_root.identity != self.root.directory.identity {
+                return Err(RootAccessError::new(RootProblem::Changed));
+            }
+        }
         let (parent, _) = walk_parent(&self.root, &self.path)
             .map_err(|_| RootAccessError::new(RootProblem::Changed))?;
         let identity =
@@ -1938,6 +1947,7 @@ enum RootProblem {
 struct RootCapability {
     kind: RootCapabilityKind,
     directory: OpenedDirectory,
+    namespace_path: Option<AbsoluteNativePath>,
 }
 
 #[derive(Clone)]
@@ -2024,7 +2034,14 @@ fn insert_root(
     let directory =
         open_root(&definition.path).map_err(|_| RootAccessError::new(RootProblem::Activation))?;
     if roots
-        .insert(definition.id.clone(), RootCapability { kind, directory })
+        .insert(
+            definition.id.clone(),
+            RootCapability {
+                kind,
+                directory,
+                namespace_path: Some(definition.path.clone()),
+            },
+        )
         .is_some()
     {
         return Err(RootAccessError::new(RootProblem::Activation));
@@ -3373,7 +3390,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn atomic_export_preserves_retained_whole_root_identity() {
+    fn atomic_export_rejects_replaced_configured_root_namespace() {
         let (base, import, export) = temporary_tree();
         let effective = RootRegistry::activate(&config(&import, &export))
             .expect("activate")
@@ -3390,10 +3407,15 @@ mod tests {
         fs::rename(&export, &retained_export).expect("retain opened export root");
         fs::create_dir(&export).expect("create replacement export root");
 
-        assert_eq!(pending.commit(), Ok(19));
         assert_eq!(
-            fs::read(retained_export.join("result.bin")).expect("read retained publication"),
-            b"retained root bytes"
+            pending.commit().map_err(|error| error.kind()),
+            Err(RootAccessErrorKind::Changed)
+        );
+        assert!(
+            fs::read_dir(&retained_export)
+                .expect("inspect retained root")
+                .next()
+                .is_none()
         );
         assert!(
             fs::read_dir(&export)

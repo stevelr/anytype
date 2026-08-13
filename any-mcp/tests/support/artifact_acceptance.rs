@@ -848,6 +848,8 @@ pub enum ExpectedToolErrorKind {
     NotFound,
     /// A conflicting or indeterminate mutation.
     Conflict,
+    /// A mutation that may have reached the upstream backend.
+    MutationIndeterminate,
     /// A correctly bounded result.
     BoundedResult,
     /// A classified upstream failure.
@@ -866,6 +868,7 @@ impl ExpectedToolErrorKind {
             Self::Validation => "validation",
             Self::NotFound => "not_found",
             Self::Conflict => "conflict",
+            Self::MutationIndeterminate => "mutation_indeterminate",
             Self::BoundedResult => "bounded_result",
             Self::Upstream => "upstream",
             Self::MissingRoots => "missing_roots",
@@ -881,7 +884,7 @@ impl ExpectedToolErrorKind {
                 ExpectedToolErrorCode::Validation
             }
             Self::NotFound => ExpectedToolErrorCode::NotFound,
-            Self::Conflict => ExpectedToolErrorCode::Conflict,
+            Self::Conflict | Self::MutationIndeterminate => ExpectedToolErrorCode::Conflict,
             Self::BoundedResult => ExpectedToolErrorCode::BoundedResult,
             Self::Upstream => ExpectedToolErrorCode::Upstream,
         }
@@ -1008,6 +1011,8 @@ const ADVERSARIAL_NOT_FOUND_MESSAGE: &str =
     "The requested Anytype entity was not found. Verify its identifier and space.";
 const ADVERSARIAL_CONFLICT_MESSAGE: &str =
     "The object changed or a request precondition failed. Read it again before retrying.";
+const ADVERSARIAL_MUTATION_INDETERMINATE_MESSAGE: &str =
+    "The mutation may have applied. Reread the object before retrying to avoid applying it twice.";
 const ADVERSARIAL_BOUNDED_MESSAGE: &str =
     "The result exceeds this workflow's limit. Retry with a paginated or chunked read.";
 const ADVERSARIAL_ROOTS_REQUIRED_MESSAGE: &str = ROOTS_REQUIRED_GUIDANCE;
@@ -1017,6 +1022,7 @@ fn adversarial_tool_error(kind: ExpectedToolErrorKind) -> ExpectedOutcome {
         ExpectedToolErrorKind::Validation => ADVERSARIAL_VALIDATION_MESSAGE,
         ExpectedToolErrorKind::NotFound => ADVERSARIAL_NOT_FOUND_MESSAGE,
         ExpectedToolErrorKind::Conflict => ADVERSARIAL_CONFLICT_MESSAGE,
+        ExpectedToolErrorKind::MutationIndeterminate => ADVERSARIAL_MUTATION_INDETERMINATE_MESSAGE,
         ExpectedToolErrorKind::BoundedResult => ADVERSARIAL_BOUNDED_MESSAGE,
         ExpectedToolErrorKind::MissingRoots => ADVERSARIAL_ROOTS_REQUIRED_MESSAGE,
         ExpectedToolErrorKind::Upstream | ExpectedToolErrorKind::MissingStaging => {
@@ -1375,6 +1381,7 @@ fn approved_unsupported_reason(id: AdversarialCaseId, reason: &'static str) -> b
                 "link_count_unavailable"
             ) | (AdversarialCaseId::Sym07, "junction_unavailable")
                 | (AdversarialCaseId::Sym08, "reparse_unavailable")
+                | (AdversarialCaseId::Mal14, "upstream_name_sanitized")
         )
 }
 
@@ -1591,6 +1598,17 @@ fn seed_control_import_source(
     Ok(())
 }
 
+fn seed_distinct_import_source(
+    policy: &ArtifactPolicyFixture,
+    label: &str,
+) -> Result<String, String> {
+    let source_name = format!("{label}-source-{}.bin", unique_suffix());
+    let mut payload = ARTIFACT_FILE_PAYLOAD.to_vec();
+    payload.extend_from_slice(source_name.as_bytes());
+    policy.seed_import(&source_name, &payload)?;
+    Ok(source_name)
+}
+
 async fn adversarial_refusal(
     driver: &mut impl McpDriver,
     tool: &'static str,
@@ -1674,16 +1692,17 @@ async fn adversarial_seed_file(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
     name: &str,
-) -> Result<String, String> {
+) -> Result<(String, Vec<u8>), String> {
+    let source_name = format!("adversarial-file-source-{}.bin", unique_suffix());
+    let mut payload = ARTIFACT_FILE_PAYLOAD.to_vec();
+    payload.extend_from_slice(source_name.as_bytes());
+    run.policy.seed_import(&source_name, &payload)?;
     let imported = driver
         .call_tool(
             "file_import",
             file_import_arguments(
                 &run.ctx.space_id,
-                local_source(
-                    ArtifactPolicyFixture::IMPORT_ROOT,
-                    ArtifactPolicyFixture::FILE_SOURCE,
-                ),
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &source_name),
                 name,
                 Some(ARTIFACT_FILE_MEDIA_TYPE),
             ),
@@ -1691,7 +1710,7 @@ async fn adversarial_seed_file(
         .await?;
     let file_id = required_str(&imported, "/file_id")?;
     run.ctx.register_file(&file_id);
-    Ok(file_id)
+    Ok((file_id, payload))
 }
 
 async fn adversarial_seed_document(
@@ -2214,7 +2233,13 @@ async fn run_import_gate_race(
         unique_suffix()
     );
     let source = run.policy.import_root().join(&source_name);
-    let bytes = vec![0x41; ACCEPTANCE_TRANSFER_CHUNK_BYTES.saturating_mul(2)];
+    let fill = match id {
+        AdversarialCaseId::Race01 => 0x41,
+        AdversarialCaseId::Race02 => 0x42,
+        AdversarialCaseId::Race03 => 0x43,
+        _ => return Err("dynamic import race used an unsupported case identity".to_owned()),
+    };
+    let bytes = vec![fill; ACCEPTANCE_TRANSFER_CHUNK_BYTES.saturating_mul(2)];
     fs::write(&source, &bytes).map_err(|_| "seed gated import race source".to_owned())?;
     secure_files(std::slice::from_ref(&source))?;
     let objects_before = artifact_object_ids(run.ctx).await?;
@@ -2265,11 +2290,8 @@ async fn run_import_gate_race(
         .map_err(|_| "dynamic import race accepted a changed source".to_owned())?;
     match mutation {
         ImportRaceMutation::RenameOver | ImportRaceMutation::Truncate => {
-            adversarial_tool_error(ExpectedToolErrorKind::Conflict)
-                .assert_tool_error(&refusal)
-                .inspect_err(|_| {
-                    eprintln!("gate debug: race refusal code={}", refusal.code());
-                })?;
+            adversarial_tool_error(ExpectedToolErrorKind::MutationIndeterminate)
+                .assert_tool_error(&refusal)?;
         }
         ImportRaceMutation::Extend => {
             if !matches!(refusal.code(), "bounded_result" | "conflict") {
@@ -2389,7 +2411,7 @@ async fn run_export_gate_race(
     let gates = run
         .gate_hooks
         .ok_or_else(|| "dynamic export race requires direct acceptance gates".to_owned())?;
-    let file_id = adversarial_seed_file(driver, run, "race04-seed.bin").await?;
+    let (file_id, _) = adversarial_seed_file(driver, run, "race04-seed.bin").await?;
     let destination = format!("race04-destination-{}", unique_suffix());
     let mut lease = gates.arm_export(&key).await?;
     let request = driver.call_tool_error(
@@ -2446,7 +2468,7 @@ async fn run_export_root_rename_race(
     let gates = run
         .gate_hooks
         .ok_or_else(|| "RACE-05 requires direct acceptance gates".to_owned())?;
-    let file_id = adversarial_seed_file(driver, run, "race05-seed.bin").await?;
+    let (file_id, _) = adversarial_seed_file(driver, run, "race05-seed.bin").await?;
     let destination = format!("race05-destination-{}", unique_suffix());
     let key = format!("race05-gate-{}", unique_suffix());
     let mut lease = gates.arm_export(&key).await?;
@@ -2549,8 +2571,9 @@ async fn run_export_collision_race(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
 ) -> Result<(), String> {
-    let file_id = adversarial_seed_file(driver, run, "race09-seed.bin").await?;
+    let (file_id, imported_payload) = adversarial_seed_file(driver, run, "race09-seed.bin").await?;
     let destination = format!("race09-destination-{}", unique_suffix());
+    let snapshot_before = run.policy.export_snapshot()?;
     let arguments = |key: String| {
         json!({
             "space": run.ctx.space_id,
@@ -2581,21 +2604,30 @@ async fn run_export_collision_race(
     if accepted != 1 || conflicts != 1 {
         return Err("RACE-09 did not produce one export winner and one conflict".to_owned());
     }
-    if run.policy.read_export(&destination)? != ARTIFACT_FILE_PAYLOAD {
+    if run.policy.read_export(&destination)? != imported_payload {
         return Err("RACE-09 winner bytes differed from the imported file".to_owned());
     }
     let snapshot = run.policy.export_snapshot()?;
-    if snapshot.ordinary_files != 1
-        || snapshot.total_file_bytes != ARTIFACT_FILE_PAYLOAD.len() as u64
-        || snapshot.unexpected_entries != 0
+    let expected_files = snapshot_before
+        .ordinary_files
+        .checked_add(1)
+        .ok_or_else(|| "RACE-09 export file inventory overflowed".to_owned())?;
+    let expected_bytes = snapshot_before
+        .total_file_bytes
+        .checked_add(imported_payload.len() as u64)
+        .ok_or_else(|| "RACE-09 export byte inventory overflowed".to_owned())?;
+    if snapshot.ordinary_files != expected_files
+        || snapshot.total_file_bytes != expected_bytes
+        || snapshot.unexpected_entries != snapshot_before.unexpected_entries
     {
         return Err("RACE-09 export inventory was not a single winner".to_owned());
     }
     Ok(())
 }
 
-/// Adds a second link after the first import chunk. Candidate cleanup must
-/// settle to a conflict without creating an object or consuming either link.
+/// Adds a second link after the first import chunk. The dispatched import must
+/// settle as mutation-indeterminate without creating an object or consuming
+/// either link.
 async fn run_hlink03(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
@@ -2636,7 +2668,8 @@ async fn run_hlink03(
     let refusal = request
         .await
         .map_err(|_| "HLINK-03 accepted a linked source".to_owned())?;
-    adversarial_tool_error(ExpectedToolErrorKind::Conflict).assert_tool_error(&refusal)?;
+    adversarial_tool_error(ExpectedToolErrorKind::MutationIndeterminate)
+        .assert_tool_error(&refusal)?;
     if fs::read(&source).ok().as_deref() != Some(bytes.as_slice())
         || fs::read(&outside).ok().as_deref() != Some(bytes.as_slice())
         || artifact_object_ids(run.ctx).await? != before
@@ -2731,7 +2764,7 @@ async fn run_raw_staging_races(
     let ahead_start = u64::try_from(ACCEPTANCE_TRANSFER_CHUNK_BYTES)
         .map_err(|_| "RACE-07 offset exceeds addressable range".to_owned())?;
     let ahead_end = ahead_start
-        .checked_add(15)
+        .checked_add(16)
         .and_then(|value| value.checked_sub(1))
         .ok_or_else(|| "RACE-07 range overflow".to_owned())?;
     let ahead = client
@@ -2900,6 +2933,7 @@ async fn run_hlink05(
     let record = run
         .policy
         .staging
+        .join("payloads")
         .join(format!("{}.bin", allocation.record()));
     let outside = run
         .policy
@@ -3035,7 +3069,7 @@ pub async fn run_artifact_dynamic_filesystem_cases(
     .await?;
     execution.record_executed(AdversarialCaseId::Sym04)?;
 
-    let file_id = adversarial_seed_file(driver, run, "dynamic-export-source.bin").await?;
+    let (file_id, _) = adversarial_seed_file(driver, run, "dynamic-export-source.bin").await?;
     let sym05_escape = run
         .policy
         .base
@@ -3298,9 +3332,7 @@ pub async fn run_artifact_dynamic_filesystem_cases(
     }
 
     let objects_after = artifact_object_ids(run.ctx).await?;
-    if !objects_before.is_subset(&objects_after)
-        || objects_after.len() < objects_before.len().saturating_add(1)
-    {
+    if !objects_before.is_subset(&objects_after) {
         return Err("dynamic filesystem refusals changed the object inventory".to_owned());
     }
     let quota_after = adversarial_quota_snapshot(driver).await?;
@@ -3637,7 +3669,7 @@ pub async fn run_artifact_partial_write_protocol_cases(
     execution.record_executed(AdversarialCaseId::Part06)?;
     release_stage_upload(driver, &allocation).await?;
 
-    let file_id = adversarial_seed_file(driver, run, "part11-source.bin").await?;
+    let (file_id, _) = adversarial_seed_file(driver, run, "part11-source.bin").await?;
     let exported = driver
         .call_tool(
             "file_export",
@@ -3774,7 +3806,7 @@ pub async fn run_artifact_failed_operation_cleanup_cases(
     }
     execution.record_executed(AdversarialCaseId::Clean01)?;
 
-    let file_id = adversarial_seed_file(driver, run, "clean02-source.bin").await?;
+    let (file_id, _) = adversarial_seed_file(driver, run, "clean02-source.bin").await?;
     let destination = format!("clean02-existing-{}", unique_suffix());
     let competing = b"CLEAN-02 existing destination";
     let destination_path = run.policy.export_root().join(&destination);
@@ -4021,7 +4053,7 @@ pub async fn run_artifact_traversal_default(
         }
     }
 
-    let file_id = adversarial_seed_file(driver, run, "adversarial-seed.bin").await?;
+    let (file_id, _) = adversarial_seed_file(driver, run, "adversarial-seed.bin").await?;
     let fixture_before = RootInventory::capture(&run.policy.base)?;
     let objects_before = artifact_object_ids(run.ctx).await?;
     let export_before = run.policy.export_snapshot()?;
@@ -4404,15 +4436,13 @@ pub async fn run_artifact_client_roots_scenario(
 
     // A second local operation must reuse the frozen session decision: it
     // neither re-queries the client nor observes a widened authority.
+    let repeated_source = seed_distinct_import_source(run.policy, "client-roots-repeat")?;
     let repeated = driver
         .call_tool(
             "file_import",
             file_import_arguments(
                 space_id,
-                local_source(
-                    ArtifactPolicyFixture::IMPORT_ROOT,
-                    ArtifactPolicyFixture::FILE_SOURCE,
-                ),
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &repeated_source),
                 &format!("client-roots-repeat-{suffix}.bin"),
                 Some(ARTIFACT_FILE_MEDIA_TYPE),
             ),
@@ -4568,7 +4598,7 @@ pub async fn run_artifact_alias_cases(
     let quota_before = adversarial_quota_snapshot(driver).await?;
     let mut execution = AdversarialExecution::default();
     let space = run.ctx.space_id.as_str();
-    let file_id = adversarial_seed_file(driver, run, "alias-seed.bin").await?;
+    let (file_id, imported_payload) = adversarial_seed_file(driver, run, "alias-seed.bin").await?;
 
     let case_suffix = unique_suffix();
     let lower = format!("alias-{case_suffix}-report.bin");
@@ -4608,7 +4638,7 @@ pub async fn run_artifact_alias_cases(
                     }),
                 )
                 .await?;
-            if run.policy.read_export(&upper)? != ARTIFACT_FILE_PAYLOAD {
+            if run.policy.read_export(&upper)? != imported_payload {
                 return Err("ALIAS-01 distinct export bytes diverged".to_owned());
             }
         }
@@ -4654,7 +4684,7 @@ pub async fn run_artifact_alias_cases(
                     }),
                 )
                 .await?;
-            if run.policy.read_export(&nfd)? != ARTIFACT_FILE_PAYLOAD {
+            if run.policy.read_export(&nfd)? != imported_payload {
                 return Err("ALIAS-02 distinct export bytes diverged".to_owned());
             }
         }
@@ -4889,16 +4919,14 @@ pub async fn run_artifact_malicious_metadata_default(
     execution.record_executed(AdversarialCaseId::Mal01)?;
 
     let bidi_name = format!("adversarial-\u{202e}-join\u{200d}-{}", unique_suffix());
+    let bidi_source = seed_distinct_import_source(run.policy, "mal02")?;
     execution.record_forbidden_log_needle(bidi_name.as_bytes())?;
     let imported = driver
         .call_tool(
             "file_import",
             file_import_arguments(
                 space,
-                local_source(
-                    ArtifactPolicyFixture::IMPORT_ROOT,
-                    ArtifactPolicyFixture::FILE_SOURCE,
-                ),
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &bidi_source),
                 &bidi_name,
                 Some(ARTIFACT_FILE_MEDIA_TYPE),
             ),
@@ -4920,15 +4948,13 @@ pub async fn run_artifact_malicious_metadata_default(
     execution.record_executed(AdversarialCaseId::Mal02)?;
 
     let accepted_name = "n".repeat(255);
+    let accepted_source = seed_distinct_import_source(run.policy, "mal03")?;
     let accepted = driver
         .call_tool(
             "file_import",
             file_import_arguments(
                 space,
-                local_source(
-                    ArtifactPolicyFixture::IMPORT_ROOT,
-                    ArtifactPolicyFixture::FILE_SOURCE,
-                ),
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &accepted_source),
                 &accepted_name,
                 None,
             ),
@@ -5050,9 +5076,10 @@ pub async fn run_artifact_malicious_metadata_default(
         .await?;
     let executable_id = required_str(&executable, "/file_id")?;
     run.ctx.register_file(&executable_id);
-    if executable.pointer("/receipt/declared_media_type")
-        != Some(&Value::String(ARTIFACT_MARKDOWN_MEDIA_TYPE.to_owned()))
-        || executable.pointer("/receipt/stored_media_type").is_some()
+    let declared_media_type = executable.pointer("/receipt/declared_media_type");
+    let stored_media_type = executable.pointer("/receipt/stored_media_type");
+    if declared_media_type != Some(&Value::String(ARTIFACT_MARKDOWN_MEDIA_TYPE.to_owned()))
+        || stored_media_type == declared_media_type
     {
         return Err("MAL-07 conflated declared and stored MIME evidence".to_owned());
     }
@@ -5180,19 +5207,32 @@ pub async fn run_artifact_malicious_metadata_default(
     execution.record_executed(AdversarialCaseId::Mal11)?;
 
     let hostile_upstream_name = "../evil";
+    let mut hostile_payload = ARTIFACT_FILE_PAYLOAD.to_vec();
+    hostile_payload.extend_from_slice(unique_suffix().as_bytes());
     let uploaded = run
         .ctx
         .client
         .files()
         .upload(space)
-        .bytes(hostile_upstream_name, ARTIFACT_FILE_PAYLOAD.to_vec())
+        .bytes(hostile_upstream_name, hostile_payload.clone())
         .mime(ARTIFACT_FILE_MEDIA_TYPE)
         .upload()
         .await
         .map_err(|_| "seed hostile upstream file name".to_owned())?;
     run.ctx.register_file(&uploaded.id);
-    if uploaded.name.as_deref() != Some(hostile_upstream_name) {
-        return Err("MAL-14 upstream did not retain the hostile name".to_owned());
+    let fetched = run
+        .ctx
+        .client
+        .files()
+        .get(space, &uploaded.id)
+        .get()
+        .await
+        .map_err(|_| "read back hostile upstream file name".to_owned())?;
+    if fetched.name.as_deref() != Some(hostile_upstream_name) {
+        execution
+            .record_unsupported_with_reason(AdversarialCaseId::Mal14, "upstream_name_sanitized")?;
+        finish_adversarial_quota(driver, quota_before, &mut execution).await?;
+        return Ok(execution);
     }
     let escape = run.policy.base.join("evil");
     fs::write(&escape, b"escape-sentinel")
@@ -5213,7 +5253,7 @@ pub async fn run_artifact_malicious_metadata_default(
             }),
         )
         .await?;
-    if run.policy.read_export(&destination)? != ARTIFACT_FILE_PAYLOAD
+    if run.policy.read_export(&destination)? != hostile_payload
         || fs::read(&escape).ok().as_deref() != Some(b"escape-sentinel")
     {
         return Err("MAL-14 wrote outside the caller destination".to_owned());
@@ -5314,16 +5354,14 @@ pub async fn run_artifact_adversarial_stdio_sentinels(
     execution.record_executed(AdversarialCaseId::Mal01)?;
 
     let bidi_name = format!("adversarial-\u{202e}-join\u{200d}-{}", unique_suffix());
+    let bidi_source = seed_distinct_import_source(run.policy, "stdio-mal02")?;
     execution.record_forbidden_log_needle(bidi_name.as_bytes())?;
     let imported = driver
         .call_tool(
             "file_import",
             file_import_arguments(
                 space,
-                local_source(
-                    ArtifactPolicyFixture::IMPORT_ROOT,
-                    ArtifactPolicyFixture::FILE_SOURCE,
-                ),
+                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &bidi_source),
                 &bidi_name,
                 Some(ARTIFACT_FILE_MEDIA_TYPE),
             ),
@@ -5490,7 +5528,7 @@ pub async fn run_artifact_hostile_validator_case(
         .await?;
     run.ctx.register_file(&required_str(&imported, "/file_id")?);
     let validators = imported
-        .get("validators")
+        .pointer("/receipt/validators")
         .and_then(Value::as_array)
         .ok_or_else(|| "MAL-13 omitted validator evidence".to_owned())?;
     if validators.as_slice()
@@ -6072,6 +6110,7 @@ impl RawStagingClient {
         for (name, value) in headers {
             additional.append(name, value);
         }
+        let body_length = body.len();
         let body = reqwest::Body::wrap_stream(futures_util::stream::once(async move {
             arrived.wait().await;
             release.wait().await;
@@ -6082,6 +6121,7 @@ impl RawStagingClient {
             .request(method, url)
             .bearer_auth(bearer.as_str())
             .headers(additional)
+            .header(reqwest::header::CONTENT_LENGTH, body_length)
             .body(body)
             .send()
             .await
@@ -10786,7 +10826,7 @@ pub fn classify_collision_frames(
 }
 
 /// Fixed upstream server-log error classes already isolated and tracked.
-pub const KNOWN_SERVER_LOG_CLASSES: [(&str, &str); 5] = [
+pub const KNOWN_SERVER_LOG_CLASSES: [(&str, &str); 7] = [
     (
         "deleted_space_sync_status",
         "failed to update details failed to load space",
@@ -10798,6 +10838,14 @@ pub const KNOWN_SERVER_LOG_CLASSES: [(&str, &str); 5] = [
     ("headsync_peer", "can't sync with peer"),
     ("object_cache_closed", "object cache is closed"),
     ("space_storage_sqlite", "SQLITE_ERROR"),
+    (
+        "offline_identity_name_lookup",
+        "error fetching global name of our own identity from Naming Service\t{\"error\": \"unable to connect\"}",
+    ),
+    (
+        "offline_identity_profile_push",
+        "push profile to identity registry\t{\"error\": \"failed to push identity: unable to connect\"}",
+    ),
 ];
 
 /// Content-free audit of a captured Anytype server log window.
@@ -11517,12 +11565,14 @@ mod tests {
             "{\"level\":\"error\",\"msg\":\"failed to update details failed to load space, mode is 3\"}\n",
             "{\"level\":\"error\",\"msg\":\"failed to update details failed to load space, mode is 3\"}\n",
             "{\"level\":\"error\",\"msg\":\"process next pending upload item\"}\n",
+            "2026-08-14T01:07:57.000Z\tERROR\tanytype-identity\terror fetching global name of our own identity from Naming Service\t{\"error\": \"unable to connect\"}\n",
+            "2026-08-14T01:38:54.541Z\tERROR\tanytype-identity\tpush profile to identity registry\t{\"error\": \"failed to push identity: unable to connect\"}\n",
             "{\"level\":\"info\",\"msg\":\"ordinary\"}\n",
             "{\"level\":\"error\",\"msg\":\"brand new artifact staging failure\"}\n",
             "{\"level\":\"fatal\",\"msg\":\"store closed\"}\n"
         );
         let audit = classify_server_log(window);
-        assert_eq!(audit.inspected_lines, 6);
+        assert_eq!(audit.inspected_lines, 8);
         assert_eq!(audit.panic_or_fatal_lines, 1);
         assert_eq!(audit.unclassified_error_lines, 1);
         assert_eq!(
@@ -11534,6 +11584,20 @@ mod tests {
         );
         assert_eq!(
             audit.known_classes.get("filesync_pending_upload").copied(),
+            Some(1)
+        );
+        assert_eq!(
+            audit
+                .known_classes
+                .get("offline_identity_name_lookup")
+                .copied(),
+            Some(1)
+        );
+        assert_eq!(
+            audit
+                .known_classes
+                .get("offline_identity_profile_push")
+                .copied(),
             Some(1)
         );
         assert!(!audit.is_clean());

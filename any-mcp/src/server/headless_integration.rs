@@ -371,12 +371,10 @@ impl McpDriver for DirectRouterDriver<'_> {
             let left_call = call(self.server, name, left);
             let right_call = call(self.server, name, right);
             let (left, right) = tokio::join!(left_call, right_call);
-            let left = left.structured_content.ok_or_else(|| {
-                "left concurrent tool result omitted structured content".to_owned()
-            })?;
-            let right = right.structured_content.ok_or_else(|| {
-                "right concurrent tool result omitted structured content".to_owned()
-            })?;
+            let left = serde_json::to_value(left)
+                .map_err(|_| "left concurrent tool result was not serializable".to_owned())?;
+            let right = serde_json::to_value(right)
+                .map_err(|_| "right concurrent tool result was not serializable".to_owned())?;
             Ok((left, right))
         })
     }

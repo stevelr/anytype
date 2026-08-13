@@ -253,8 +253,14 @@ jobs:
             # cargo-dist owns the generated template's layout. Exclude its fixed
             # structural cops while checking every other formula style rule.
             style_exceptions='FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict,Sorbet/StrictSigil,Sorbet/TrueSigil,Style/Documentation,Style/FrozenStringLiteralComment,Style/SoleNestedConditional,Style/MutableConstant,Layout/HashAlignment,Style/TrailingCommaInHashLiteral,Style/IfUnlessModifier'
-            find artifacts -type f -name '*.rb' -exec brew style \
-              --formula --except-cops "$style_exceptions" {} +
+            tap_name='anytype/ci'
+            brew tap-new --no-git "$tap_name"
+            tap_root=$(brew --repository "$tap_name")
+            while IFS= read -r -d '' formula; do
+              cp "$formula" "$tap_root/Formula/$(basename "$formula")"
+            done < <(find artifacts -type f -name '*.rb' -print0)
+            formulae=("$tap_root"/Formula/*.rb)
+            brew style --formula --except-cops "$style_exceptions" "${formulae[@]}"
           fi
 
   validate-powershell-installer:

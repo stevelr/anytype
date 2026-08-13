@@ -39,8 +39,8 @@ use process_support::{
 };
 
 // A hang bound, not a performance assertion: a debug-build child reaching
-// the fixture on a loaded or emulated CI runner has exceeded one minute.
-const DEADLINE: Duration = Duration::from_secs(60);
+// the fixture on a loaded or emulated CI runner has exceeded two minutes.
+const DEADLINE: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 const HTTP_TOKEN: &str = "conformance-http-token-must-never-be-logged";

@@ -292,11 +292,13 @@ redirection, unsafe permissions or ACLs, hard-linked imports, traversal,
 over-limit files, and export collisions. Export bytes remain in an
 owner-private temporary file in the destination directory until commit, which
 atomically publishes a complete create-new destination without replacing an
-existing entry. Failed, cancelled, and dropped exports remove only their
-private temporary file. Local destination syntax is validated before an
-idempotency key is reserved, so a rejected path can be corrected and retried
-without retaining process-lifetime operation state. Other definite failures
-before publication, including unavailable roots, collisions, and staging
+existing entry. Commit reopens the configured root and verifies its retained
+filesystem identity before and after publication, so renaming or replacing the
+root during an export fails closed. Failed, cancelled, and dropped exports
+remove only their private temporary file. Local destination syntax is validated
+before an idempotency key is reserved, so a rejected path can be corrected and
+retried without retaining process-lifetime operation state. Other definite
+failures before publication, including unavailable roots, collisions, and staging
 preflight refusal, also release the reservation; uncertain commit or
 publication outcomes remain terminal to prevent redispatch and retain staging
 ownership for cleanup.
@@ -1741,7 +1743,7 @@ snapshots, and the spawned `headless_stdio_e2e` plane, which adds the
 adversarial case matrix — serially. The process harness uses only portable
 Rust process, TCP, path, environment, thread, and channel APIs; it does not
 depend on Unix signals, `/tmp`, executable suffixes, or shell scripts. Each
-protocol response has a finite one-minute hang bound for debug binaries on
+protocol response has a finite two-minute hang bound for debug binaries on
 loaded or emulated runners.
 
 The workflow is manual-only during matrix qualification. Its tier selector
