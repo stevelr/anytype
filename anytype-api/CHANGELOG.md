@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Expose side-effect-free loading of Anytype CLI account credentials through
+  `GrpcCredentials::from_cli_config`, distinguishing a missing config from an
+  unreadable or malformed one.
 - Route object listings containing number or checkbox filters through the
   space-scoped REST search endpoint, preserving their JSON scalar types while
   the upstream flat-query object-list parser rejects them. Other object-list

@@ -45,7 +45,12 @@ pub async fn handle(ctx: &AppContext, join: Option<&str>, save_env: Option<&Path
         .duration_since(UNIX_EPOCH)
         .context("system clock is before the Unix epoch")?
         .as_secs();
-    let account_name = account_name(std::env::var_os("ANY_USER"), timestamp)?;
+    let cli_credentials = load_reusable_cli_credentials(None)?;
+    let account_name = if cli_credentials.is_none() {
+        Some(account_name(std::env::var_os("ANY_USER"), timestamp)?)
+    } else {
+        None
+    };
     let grpc_endpoint = ctx
         .client
         .get_grpc_endpoint()
@@ -66,7 +71,8 @@ pub async fn handle(ctx: &AppContext, join: Option<&str>, save_env: Option<&Path
         ctx.client.get_key_store(),
         &process,
         timestamp,
-        &account_name,
+        account_name.as_deref(),
+        cli_credentials,
         environment_file.as_ref(),
     )
     .await?;
@@ -192,20 +198,31 @@ async fn initialize_keystore(
     keystore: &(impl CredentialStore + Sync),
     process: &CliProcess,
     timestamp: u64,
-    account_name: &str,
+    account_name: Option<&str>,
+    cli_credentials: Option<GrpcCredentials>,
     environment_file: Option<&EnvironmentFile<'_>>,
 ) -> Result<HttpCredentials> {
-    let account_output = process
-        .run_capture(
-            CommandKind::CreateAccount,
-            &[
-                OsStr::new("auth"),
-                OsStr::new("create"),
-                OsStr::new(account_name),
-            ],
-        )
-        .await?;
-    let account_key = parse_account_key(&account_output)?;
+    let grpc_credentials = if let Some(credentials) = cli_credentials {
+        credentials
+    } else {
+        let account_name = account_name.context("account name missing for account creation")?;
+        let account_output = process
+            .run_capture(
+                CommandKind::CreateAccount,
+                &[
+                    OsStr::new("auth"),
+                    OsStr::new("create"),
+                    OsStr::new(account_name),
+                ],
+            )
+            .await?;
+        let account_key = parse_account_key(&account_output)?;
+        GrpcCredentials::from_account_key(account_key)
+    };
+    let account_key = grpc_credentials
+        .account_key()
+        .context("gRPC account key missing after initialization")?
+        .to_owned();
 
     let api_name = format!("api_{timestamp}");
     let token_output = process
@@ -221,13 +238,34 @@ async fn initialize_keystore(
         .await?;
     let http_token = parse_http_token(&token_output)?;
 
-    let grpc_credentials = GrpcCredentials::from_account_key(account_key.clone());
     let http_credentials = HttpCredentials::new(http_token.clone());
     store_credential_pair(keystore, &grpc_credentials, &http_credentials)?;
     if let Some(environment_file) = environment_file {
         save_environment_file(environment_file, &account_key, &http_token)?;
     }
     Ok(http_credentials)
+}
+
+fn load_reusable_cli_credentials(path: Option<&Path>) -> Result<Option<GrpcCredentials>> {
+    let credentials = GrpcCredentials::from_cli_config(path)
+        .context("failed to inspect the Anytype CLI account configuration")?;
+    credentials
+        .map(validate_reusable_cli_credentials)
+        .transpose()
+}
+
+fn validate_reusable_cli_credentials(credentials: GrpcCredentials) -> Result<GrpcCredentials> {
+    let account_id = credentials
+        .account_id()
+        .filter(|value| valid_credential(value))
+        .context("Anytype CLI config does not contain a valid accountId")?
+        .to_owned();
+    let account_key = credentials
+        .account_key()
+        .filter(|value| valid_credential(value))
+        .context("Anytype CLI config does not contain a valid accountKey")?
+        .to_owned();
+    Ok(GrpcCredentials::from_account_key(account_key).with_account_id(account_id))
 }
 
 fn save_environment_file(
@@ -700,6 +738,7 @@ mod tests {
 
     const ACCOUNT_KEY: &str =
         "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ==";
+    const ACCOUNT_ID: &str = "QUNDQ09VTlQtSUQtRklYVFVSRS0wMDAx";
     const HTTP_TOKEN: &str = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -867,7 +906,8 @@ esac
             client.get_key_store(),
             &process,
             4242,
-            "configured-user",
+            Some("configured-user"),
+            None,
             Some(&environment_file),
         )
         .await
@@ -901,6 +941,113 @@ esac
                 .account_key(),
             Some(ACCOUNT_KEY)
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_cli_reuses_existing_account_without_creating_another() {
+        let temp = TestDir::new();
+        let executable = temp.path().join("fake-anytype");
+        let script = format!(
+            r#"#!/bin/sh
+case "$1:$2:$3" in
+  auth:apikey:create)
+    test "$4" = "api_4242" || exit 21
+    printf 'Key: {HTTP_TOKEN}\n'
+    ;;
+  *)
+    exit 22
+    ;;
+esac
+"#
+        );
+        write_executable(&executable, &script);
+
+        let mut config = ClientConfig::default().app_name("anyr-init-cli-reuse-test");
+        config.keystore = Some("env".to_owned());
+        config.keystore_service = Some("anyr-init-cli-reuse-test".to_owned());
+        let client = AnytypeClient::with_config(config).expect("build test client");
+        let configured = GrpcCredentials::from_account_key(ACCOUNT_KEY)
+            .with_account_id(ACCOUNT_ID)
+            .with_session_token("ignored-existing-session-token");
+        let reusable = validate_reusable_cli_credentials(configured)
+            .expect("validate existing CLI credentials");
+        initialize_keystore(
+            client.get_key_store(),
+            &test_process(&executable),
+            4242,
+            None,
+            Some(reusable),
+            None,
+        )
+        .await
+        .expect("reuse existing CLI account");
+
+        let stored = client
+            .get_key_store()
+            .get_grpc_credentials()
+            .expect("read stored credentials");
+        assert_eq!(stored.account_id(), Some(ACCOUNT_ID));
+        assert_eq!(stored.account_key(), Some(ACCOUNT_KEY));
+        assert_eq!(stored.session_token(), None);
+        assert!(
+            client
+                .get_key_store()
+                .get_http_credentials()
+                .expect("read HTTP credentials")
+                .has_creds()
+        );
+    }
+
+    #[test]
+    fn reusable_cli_config_requires_valid_account_id_and_key() {
+        let valid = GrpcCredentials::from_account_key(ACCOUNT_KEY)
+            .with_account_id(ACCOUNT_ID)
+            .with_session_token("ignored-existing-session-token");
+        let reusable =
+            validate_reusable_cli_credentials(valid).expect("valid reusable credentials");
+        assert_eq!(reusable.account_id(), Some(ACCOUNT_ID));
+        assert_eq!(reusable.account_key(), Some(ACCOUNT_KEY));
+        assert_eq!(reusable.session_token(), None);
+
+        assert!(
+            validate_reusable_cli_credentials(GrpcCredentials::from_account_key(ACCOUNT_KEY))
+                .is_err()
+        );
+        assert!(
+            validate_reusable_cli_credentials(
+                GrpcCredentials::default().with_account_id(ACCOUNT_ID)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reusable_cli_config_loader_distinguishes_missing_and_invalid_files() {
+        let temp = TestDir::new();
+        let config = temp.path().join("config.json");
+        assert!(
+            load_reusable_cli_credentials(Some(&config))
+                .expect("missing config is allowed")
+                .is_none()
+        );
+
+        fs::write(
+            &config,
+            format!(
+                r#"{{"accountId":"{ACCOUNT_ID}","accountKey":"{ACCOUNT_KEY}","sessionToken":"ignored-existing-session-token"}}"#
+            ),
+        )
+        .expect("write valid CLI config");
+        let credentials = load_reusable_cli_credentials(Some(&config))
+            .expect("load valid CLI config")
+            .expect("config exists");
+        assert_eq!(credentials.account_id(), Some(ACCOUNT_ID));
+        assert_eq!(credentials.account_key(), Some(ACCOUNT_KEY));
+        assert_eq!(credentials.session_token(), None);
+
+        fs::write(&config, "{not-json").expect("replace with malformed config");
+        assert!(load_reusable_cli_credentials(Some(&config)).is_err());
     }
 
     #[test]

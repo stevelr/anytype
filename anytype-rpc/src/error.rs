@@ -62,8 +62,8 @@ pub enum ConfigError {
     #[snafu(display("Parse error: {source}"))]
     Parse { source: serde_json::Error },
 
-    /// HOME environment variable not set.
-    #[snafu(display("HOME environment variable not set"))]
+    /// Home-directory environment variables are unavailable.
+    #[snafu(display("home directory environment variable not set"))]
     MissingHome,
 }
 

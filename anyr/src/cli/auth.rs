@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use anytype::prelude::*;
 use serde_json::json;
 
@@ -139,16 +139,6 @@ fn set_http(ctx: &AppContext) -> Result<()> {
     ctx.output.emit_json(&response)
 }
 
-#[derive(serde::Deserialize)]
-struct HeadlessConfig {
-    #[serde(default, rename = "accountId")]
-    account_id: Option<String>,
-    #[serde(default, rename = "accountKey")]
-    account_key: Option<String>,
-    #[serde(default, rename = "sessionToken")]
-    session_token: Option<String>,
-}
-
 fn set_grpc(
     ctx: &AppContext,
     config: Option<std::path::PathBuf>,
@@ -198,19 +188,7 @@ fn set_grpc(
         let path = config.ok_or_else(|| {
             anyhow::anyhow!("--config PATH, --account-key, --bip39, or --token is required")
         })?;
-        let contents = std::fs::read_to_string(&path)?;
-        let cfg: HeadlessConfig = serde_json::from_str(&contents)?;
-        let mut creds = GrpcCredentials::default();
-        if let Some(account_id) = cfg.account_id {
-            creds = creds.with_account_id(account_id);
-        }
-        if let Some(account_key) = cfg.account_key {
-            creds = creds.with_account_key(account_key);
-        }
-        if let Some(session_token) = cfg.session_token {
-            creds = creds.with_session_token(session_token);
-        }
-        creds
+        GrpcCredentials::from_cli_config(Some(&path))?.context("headless config not found")?
     };
 
     ctx.client.get_key_store().update_grpc_credentials(&creds)?;

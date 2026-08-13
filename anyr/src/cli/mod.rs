@@ -106,7 +106,7 @@ pub enum Commands {
         #[arg(long, value_name = "INVITE_LINK")]
         join: Option<String>,
 
-        /// Save generated credentials as a sourceable POSIX shell environment file
+        /// Save initialized credentials as a sourceable POSIX shell environment file
         #[arg(long, value_name = "FILE")]
         save_env: Option<PathBuf>,
     },

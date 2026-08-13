@@ -526,13 +526,19 @@ anyr ARGS ...
 
 - **Desktop**: If the Anytype desktop app is running, type `anyr auth login` and the app will display a 4-digit code. Enter the code into the anyr prompt, and a key is generated and stored in the KeyStore.
 
-- **Headless server**: Start the server, then run `anyr init-cli`. The command
-  invokes `anytype` to create an account key and HTTP token and stores both
-  directly in the selected `anyr` keystore without displaying either
-  credential. Set `ANYTYPE_CLI_BIN` to an alternate executable path when
-  `anytype` is not on `PATH`. The generated account name is `bot_<timestamp>`;
-  set `ANY_USER` to choose it explicitly. To join a space during setup, use
-  `anyr init-cli --join "$INVITE_LINK"`.
+- **Headless server**: Start the server, then run `anyr init-cli`. If the
+  default Anytype CLI config at `~/.anytype/config.json` exists, the command
+  reuses its validated `accountId` and `accountKey`, creates a fresh HTTP
+  token, and stores both credential families directly in the selected `anyr`
+  keystore without displaying either credential. It derives gRPC sessions
+  from the account key instead of retaining the config's session token. This
+  preserves the server's existing account and spaces. An unreadable,
+  malformed, or incomplete config stops initialization; only a missing config
+  permits `anytype auth create` to create a new account. Set
+  `ANYTYPE_CLI_BIN` to an alternate executable path when `anytype` is not on
+  `PATH`. A new account is named `bot_<timestamp>`; set `ANY_USER` to choose
+  it explicitly. To join a space during setup, use `anyr init-cli --join
+  "$INVITE_LINK"`.
 
   Unless overridden globally with `--url` / `--grpc` or
   `ANYTYPE_URL` / `ANYTYPE_GRPC_ENDPOINT`, `init-cli` uses the headless
@@ -540,8 +546,8 @@ anyr ARGS ...
   effective endpoints are also passed to every Anytype CLI subprocess. After
   storing the pair, `init-cli` verifies authenticated HTTP and gRPC access
   before reporting success. A later verification or join failure leaves the
-  newly generated credentials stored so the operator can retry without losing
-  them.
+  newly initialized credentials stored so the operator can retry without
+  losing them.
 
   `--save-env FILE` additionally writes the effective endpoints, keystore
   service, HTTP token, gRPC account key, and
@@ -553,7 +559,7 @@ anyr ARGS ...
   created with mode `0600` on Unix and the command refuses to replace an
   existing destination. It contains credentials in plaintext; keep it outside
   shared directories and configuration repositories. If file creation fails,
-  the generated credentials may already be in the selected keystore.
+  the initialized credentials may already be in the selected keystore.
   Credential values remain absent from normal command output and errors.
 
 The global `--keystore` and `--keystore-service` options (or their environment

@@ -10,6 +10,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 **Changed:**
 
+- Make `load_headless_config` return `None` only for a missing file and report
+  other I/O failures, preventing bootstrap callers from treating an unreadable
+  config as an uninitialized account. Windows default-path resolution now
+  falls back to `USERPROFILE` when `HOME` is unavailable.
 - Move the former `anytype-rpc` administrative executable to the source-built
   `admin` example. The crate no longer publishes a standalone CLI binary.
 - Simplified bootstrap example error checks and normalized its formatting.

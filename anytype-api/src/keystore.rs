@@ -133,6 +133,25 @@ impl HttpCredentials {
 }
 
 impl GrpcCredentials {
+    /// Loads gRPC credentials from an Anytype CLI `config.json` file.
+    ///
+    /// Passing `None` selects the CLI's default `~/.anytype/config.json` path.
+    /// A missing file returns `Ok(None)`; malformed or unreadable files return
+    /// an error so callers can distinguish an uninitialized CLI from a broken
+    /// configuration.
+    pub fn from_cli_config(path: Option<&Path>) -> Result<Option<Self>, KeyStoreError> {
+        use anytype_rpc::config::load_headless_config;
+
+        let config = load_headless_config(path).map_err(|err| KeyStoreError::External {
+            message: format!("failed to load headless config: {err}"),
+        })?;
+        Ok(config.map(|config| Self {
+            account_id: config.account_id,
+            account_key: config.account_key,
+            session_token: config.session_token,
+        }))
+    }
+
     pub fn from_token(token: impl Into<String>) -> Self {
         Self {
             session_token: Some(token.into()),
@@ -628,19 +647,11 @@ impl KeyStore {
 
     /// Update gRPC credentials from the headless CLI config.json.
     pub fn update_grpc_from_cli_config(&self, path: Option<&Path>) -> Result<(), KeyStoreError> {
-        use anytype_rpc::config::load_headless_config;
-        let config = load_headless_config(path).map_err(|err| KeyStoreError::External {
-            message: format!("failed to load headless config: {err}"),
-        })?;
-        let config = config.ok_or_else(|| KeyStoreError::External {
-            message: "headless config not found".to_string(),
-        })?;
-        let creds = GrpcCredentials {
-            account_id: config.account_id,
-            account_key: config.account_key,
-            session_token: config.session_token,
-        };
-        self.update_grpc_credentials(&creds)
+        let credentials =
+            GrpcCredentials::from_cli_config(path)?.ok_or_else(|| KeyStoreError::External {
+                message: "headless config not found".to_string(),
+            })?;
+        self.update_grpc_credentials(&credentials)
     }
 }
 
@@ -679,6 +690,28 @@ mod tests {
         let (_, modifiers) =
             parse_keystore("file:path=first.db:path=second.db").expect("duplicate grammar");
         assert_eq!(modifiers.get("path"), Some(&"second.db"));
+    }
+
+    #[test]
+    fn grpc_credentials_load_from_cli_config_without_storing() {
+        let path = std::env::temp_dir().join(format!(
+            "anytype_cli_credentials_{}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            r#"{"accountId":"account-id","accountKey":"account-key","sessionToken":"session-token"}"#,
+        )
+        .expect("write CLI config");
+
+        let credentials = GrpcCredentials::from_cli_config(Some(&path))
+            .expect("load CLI config")
+            .expect("CLI config exists");
+        assert_eq!(credentials.account_id(), Some("account-id"));
+        assert_eq!(credentials.account_key(), Some("account-key"));
+        assert_eq!(credentials.session_token(), Some("session-token"));
+
+        fs::remove_file(path).expect("remove CLI config");
     }
 
     #[cfg(feature = "test-fixtures")]

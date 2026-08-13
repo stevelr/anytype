@@ -33,6 +33,11 @@ The gRPC api isn't officially supported (by Anytype) for third party clients. Ho
 
 ## Building
 
+`config::load_headless_config` reads the account fields used for gRPC
+authentication from an explicit path or the default
+`~/.anytype/config.json`. It returns `None` only when the file is absent;
+unreadable and malformed files are errors.
+
 For normal builds, you need a rust toolchain. `protoc` is not required, as the crate ships with generated Rust sources in `src/gen`.
 
 ```

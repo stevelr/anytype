@@ -82,10 +82,10 @@ if [[ ! -x "$anyr_bin" ]]; then
 fi
 
 # init-cli runs inside the namespace (as the runner user) because the server
-# and the anytype CLI meet over namespace-local loopback there. Its account
-# creation is what starts the HTTP API listener, and its single-shot
-# verification can race that startup, so it gets a few bounded attempts
-# (duplicate throwaway accounts on the disposable server are harmless).
+# and the anytype CLI meet over namespace-local loopback there. Its first-run
+# account creation starts the HTTP API listener, and its single-shot
+# verification can race that startup, so it gets a few bounded attempts.
+# Later attempts reuse the account recorded in the CLI config.
 env_file="$RUNNER_TEMP/headless-credentials.env"
 keystore="$RUNNER_TEMP/headless-ci-keystore.db"
 attempt=1
@@ -108,7 +108,7 @@ if [[ ! -s "$env_file" ]]; then
   exit 1
 fi
 
-# Account creation started the HTTP API listener; make sure the host-side
+# Account initialization started the HTTP API listener; make sure the host-side
 # gates can reach it over loopback before handing over. The probe must see
 # an HTTP response, not just a connect: the loopback forwarder accepts
 # unconditionally even while the namespace-side listener is still absent.

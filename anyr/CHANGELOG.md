@@ -20,7 +20,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   generates shell and PowerShell installers plus Homebrew formulae, validates
   the POSIX artifacts on Linux and macOS, and cannot publish releases while
   the matrix is being debugged.
-- Add `anyr init-cli --save-env FILE` to save generated HTTP and gRPC
+- Add `anyr init-cli --save-env FILE` to save initialized HTTP and gRPC
   credentials, effective endpoints, the keystore service, and the `xtest`
   disposable-space prefix as a directly sourceable POSIX shell environment
   file. The command uses owner-only Unix permissions, refuses to overwrite an
@@ -28,6 +28,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Make `anyr init-cli` reuse the account ID and account key from the default
+  Anytype CLI config when it exists. The command derives new sessions from the
+  account key and creates only a fresh HTTP token, preserving the existing
+  account and spaces. Missing configs retain first-run account creation;
+  unreadable, malformed, or incomplete configs fail closed.
 - Render the new anytype-api HTTP deadline and indeterminate-mutation errors
   through their typed, secret-safe display output.
 - The required anyr live gates (Python CLI suite and type-property

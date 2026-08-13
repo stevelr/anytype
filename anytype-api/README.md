@@ -1014,6 +1014,11 @@ loopback HTTP script. Production dependents must not enable either feature.
 
 A Keystore stores authentication tokens for http and grpc endpoints. Various implementations store keys in memory, on disk, or in the OS Keyring
 
+`GrpcCredentials::from_cli_config` reads account credentials from the Anytype
+CLI's default `~/.anytype/config.json`, or from an explicit path, without
+storing them. A missing file is reported separately from malformed or
+unreadable configuration so account-bootstrap callers can fail safely.
+
 More info about using and configuring keystores is in [Keystores](./Keystores.md)
 
 ## Known issues & Troubleshooting
