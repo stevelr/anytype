@@ -250,11 +250,12 @@ fn load_reusable_cli_credentials(path: Option<&Path>) -> Result<Option<GrpcCrede
     let credentials = GrpcCredentials::from_cli_config(path)
         .context("failed to inspect the Anytype CLI account configuration")?;
     credentials
+        .as_ref()
         .map(validate_reusable_cli_credentials)
         .transpose()
 }
 
-fn validate_reusable_cli_credentials(credentials: GrpcCredentials) -> Result<GrpcCredentials> {
+fn validate_reusable_cli_credentials(credentials: &GrpcCredentials) -> Result<GrpcCredentials> {
     let account_id = credentials
         .account_id()
         .filter(|value| valid_credential(value))
@@ -970,7 +971,7 @@ esac
         let configured = GrpcCredentials::from_account_key(ACCOUNT_KEY)
             .with_account_id(ACCOUNT_ID)
             .with_session_token("ignored-existing-session-token");
-        let reusable = validate_reusable_cli_credentials(configured)
+        let reusable = validate_reusable_cli_credentials(&configured)
             .expect("validate existing CLI credentials");
         initialize_keystore(
             client.get_key_store(),
@@ -1005,18 +1006,18 @@ esac
             .with_account_id(ACCOUNT_ID)
             .with_session_token("ignored-existing-session-token");
         let reusable =
-            validate_reusable_cli_credentials(valid).expect("valid reusable credentials");
+            validate_reusable_cli_credentials(&valid).expect("valid reusable credentials");
         assert_eq!(reusable.account_id(), Some(ACCOUNT_ID));
         assert_eq!(reusable.account_key(), Some(ACCOUNT_KEY));
         assert_eq!(reusable.session_token(), None);
 
         assert!(
-            validate_reusable_cli_credentials(GrpcCredentials::from_account_key(ACCOUNT_KEY))
+            validate_reusable_cli_credentials(&GrpcCredentials::from_account_key(ACCOUNT_KEY))
                 .is_err()
         );
         assert!(
             validate_reusable_cli_credentials(
-                GrpcCredentials::default().with_account_id(ACCOUNT_ID)
+                &GrpcCredentials::default().with_account_id(ACCOUNT_ID)
             )
             .is_err()
         );
