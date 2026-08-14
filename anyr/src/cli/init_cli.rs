@@ -529,6 +529,8 @@ struct CliProcess {
     http_endpoint: String,
     grpc_endpoint: String,
     timeout: Duration,
+    #[cfg(all(test, unix))]
+    script: Option<OsString>,
 }
 
 impl CliProcess {
@@ -538,6 +540,8 @@ impl CliProcess {
             http_endpoint,
             grpc_endpoint,
             timeout: CLI_TIMEOUT,
+            #[cfg(all(test, unix))]
+            script: None,
         }
     }
 
@@ -550,6 +554,10 @@ impl CliProcess {
 
     fn command(&self, args: &[&OsStr]) -> Command {
         let mut command = Command::new(&self.executable);
+        #[cfg(all(test, unix))]
+        if let Some(script) = &self.script {
+            command.arg(script);
+        }
         command
             .args(args)
             .stdin(Stdio::null())
@@ -895,10 +903,10 @@ esac
         config.keystore = Some("env".to_owned());
         config.keystore_service = Some("anyr-init-cli-test".to_owned());
         let client = AnytypeClient::with_config(config).expect("build test client");
-        let process = CliProcess::new(
-            executable.into_os_string(),
-            "http://headless.test:31012".to_owned(),
-            "http://headless.test:31010".to_owned(),
+        let process = test_process_with_endpoints(
+            &executable,
+            "http://headless.test:31012",
+            "http://headless.test:31010",
         );
         let environment_path = temp.path().join("anyr.env");
         let environment_file = EnvironmentFile {
@@ -1169,7 +1177,7 @@ esac
         );
         write_executable(&executable, &script);
         let process = test_process(&executable);
-        let error = process
+        let failure = process
             .run_capture(
                 CommandKind::CreateHttpToken,
                 &[
@@ -1180,9 +1188,11 @@ esac
                 ],
             )
             .await
-            .expect_err("failed child must fail")
-            .to_string();
-        assert_eq!(fs::read_to_string(marker).expect("child marker"), "ran");
+            .expect_err("failed child must fail");
+        let error = format!("{failure:#}");
+        let marker = fs::read_to_string(marker)
+            .unwrap_or_else(|marker_error| panic!("child marker: {marker_error}; {error}"));
+        assert_eq!(marker, "ran");
         assert!(!error.contains(HTTP_TOKEN));
         assert!(error.contains("HTTP token creation"));
     }
@@ -1193,22 +1203,29 @@ esac
         let temp = TestDir::new();
         let executable = temp.path().join("overflow-anytype");
         let pid_file = temp.path().join("overflow.pid");
+        let oversized_len = usize::try_from(MAX_CREDENTIAL_OUTPUT_BYTES + 1)
+            .expect("credential output cap fits usize");
+        let oversized_output = "x".repeat(oversized_len);
         let script = format!(
-            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nwhile :; do printf '0123456789abcdef'; done\n",
-            pid_file.display()
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nprintf '%s' '{}'\nexec sleep 60\n",
+            pid_file.display(),
+            oversized_output
         );
         write_executable(&executable, &script);
         let process = test_process(&executable).with_timeout(Duration::from_secs(2));
 
-        let error = process
+        let failure = process
             .run_capture(
                 CommandKind::CreateHttpToken,
                 &[OsStr::new("auth"), OsStr::new("apikey")],
             )
             .await
-            .expect_err("oversized output must fail")
-            .to_string();
-        assert!(error.contains("safety limit"));
+            .expect_err("oversized output must fail");
+        let error = format!("{failure:#}");
+        assert!(
+            error.contains("safety limit"),
+            "unexpected oversized-output error: {error}"
+        );
         assert_process_reaped(&pid_file);
     }
 
@@ -1225,12 +1242,12 @@ esac
         write_executable(&executable, &script);
         let process = test_process(&executable).with_timeout(Duration::from_millis(50));
 
-        let error = process
+        let failure = process
             .run_capture(CommandKind::CreateAccount, &[OsStr::new("auth")])
             .await
-            .expect_err("hung child must time out")
-            .to_string();
-        assert!(error.contains("timed out"));
+            .expect_err("hung child must time out");
+        let error = format!("{failure:#}");
+        assert!(error.contains("timed out"), "unexpected error: {error}");
         assert_process_reaped(&pid_file);
     }
 
@@ -1247,12 +1264,12 @@ esac
         write_executable(&executable, &script);
         let process = test_process(&executable).with_timeout(Duration::from_millis(50));
 
-        let error = process
+        let failure = process
             .run_capture(CommandKind::CreateAccount, &[OsStr::new("auth")])
             .await
-            .expect_err("child wait must time out")
-            .to_string();
-        assert!(error.contains("timed out"));
+            .expect_err("child wait must time out");
+        let error = format!("{failure:#}");
+        assert!(error.contains("timed out"), "unexpected error: {error}");
         assert_process_reaped(&pid_file);
     }
 
@@ -1564,11 +1581,26 @@ esac
 
     #[cfg(unix)]
     fn test_process(executable: &Path) -> CliProcess {
-        CliProcess::new(
-            executable.as_os_str().to_owned(),
-            "http://127.0.0.1:31012".to_owned(),
-            "http://127.0.0.1:31010".to_owned(),
+        test_process_with_endpoints(
+            executable,
+            "http://127.0.0.1:31012",
+            "http://127.0.0.1:31010",
         )
+    }
+
+    #[cfg(unix)]
+    fn test_process_with_endpoints(
+        executable: &Path,
+        http_endpoint: &str,
+        grpc_endpoint: &str,
+    ) -> CliProcess {
+        let mut process = CliProcess::new(
+            OsString::from("/bin/sh"),
+            http_endpoint.to_owned(),
+            grpc_endpoint.to_owned(),
+        );
+        process.script = Some(executable.as_os_str().to_owned());
+        process
     }
 
     #[cfg(unix)]

@@ -402,4 +402,6 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
         assert!(!block.contains("stat -Lc '%F"));
         assert!(!block.contains("tee"));
     }
+    assert!(!required.contains("ANYTYPE_HEADLESS_NETWORK_MODE: connected"));
+    assert!(soak.contains("ANYTYPE_HEADLESS_NETWORK_MODE: connected"));
 }

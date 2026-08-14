@@ -563,6 +563,7 @@ anyr ARGS ...
   Credential values remain absent from normal command output and errors.
   Subprocess failures identify the Anytype CLI operation; child output remains
   withheld, while platform-specific exit-status text is diagnostic detail.
+  Credential-bearing output is captured under a fixed byte limit.
 
 The global `--keystore` and `--keystore-service` options (or their environment
 variables) select where `init-cli` stores credentials. See

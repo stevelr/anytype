@@ -1193,10 +1193,11 @@ cargo test --locked -p anytype --test live_gate_manifest
 ```
 
 The driver runs every admitted entry in its own process and rejects zero-test
-and skip results. The space-administration soak case waits until read-only
-invitation state is available before issuing sharing mutations, because a
-fresh server can expose a REST-created space before its gRPC administration
-service admits it.
+and skip results. The required tier uses a sync-isolated server. The small soak
+tier uses a connected disposable server because Heart's space-sharing command
+calls its coordinator service; every created resource remains cleanup-owned.
+Sharing enablement retries only Heart's definitive `NO_SUCH_SPACE` response
+while a newly REST-created space enters the administration service.
 
 With the same protected environment loaded, reproduce the two focused Set/view
 entries exactly:

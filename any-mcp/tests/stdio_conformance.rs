@@ -389,6 +389,7 @@ impl ConformanceProcessExt for ProtocolProcess {
             .env("ANYTYPE_KEYSTORE_SERVICE", "any-mcp-conformance")
             .env("ANYTYPE_KEY_HTTP_TOKEN", HTTP_TOKEN)
             .env("ANY_MCP_READ_ONLY", if read_only { "1" } else { "0" })
+            .env("ANY_MCP_MAX_CONCURRENCY", "1")
             .env("ANY_MCP_STARTUP_TIMEOUT_SECS", "5")
             .env("ANY_MCP_REQUEST_TIMEOUT_SECS", "5")
             .env("RUST_LOG", "any_mcp=info")
@@ -759,8 +760,10 @@ fn run_legacy_stdio_regression(read_only: bool) {
         "notifications/cancelled",
         json!({"requestId": 80, "reason": "bounded conformance cancellation"}),
     );
-    let ping = process.request(81, "ping", json!({}));
-    assert_eq!(ping["result"], json!({}));
+    // With one runtime permit, this read cannot complete until cancellation
+    // has released the hanging request's permit.
+    let after_cancel = process.request(81, "resources/read", json!({"uri": RESOURCE_URI}));
+    assert_eq!(after_cancel["result"]["contents"][0]["uri"], RESOURCE_URI);
     fixture.release_hanging_requests();
 
     let unknown_tool = process.request(
@@ -967,9 +970,14 @@ fn run_modern_stdio_acceptance(read_only: bool) {
         "notifications/cancelled",
         json!({"requestId": 80, "reason": "bounded modern cancellation"}),
     );
-    let after_cancel =
-        process.modern_request(81, "server/discover", json!({"_meta": modern_meta()}));
-    assert_eq!(after_cancel["result"]["resultType"], "complete");
+    // With one runtime permit, this read cannot complete until cancellation
+    // has released the hanging request's permit.
+    let after_cancel = process.modern_request(
+        81,
+        "resources/read",
+        json!({"uri": RESOURCE_URI, "_meta": modern_meta()}),
+    );
+    assert_eq!(after_cancel["result"]["contents"][0]["uri"], RESOURCE_URI);
     fixture.release_hanging_requests();
 
     let output = process.finish();

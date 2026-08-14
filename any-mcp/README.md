@@ -1746,7 +1746,9 @@ adversarial case matrix — serially. The process harness uses only portable
 Rust process, TCP, path, environment, thread, and channel APIs; it does not
 depend on Unix signals, `/tmp`, executable suffixes, or shell scripts. Each
 protocol response has a finite two-minute hang bound for debug binaries on
-loaded or emulated runners.
+loaded or emulated runners. Cancellation cases use one runtime operation
+permit and require a subsequent upstream read to acquire it before the held
+fixture request is released.
 
 The workflow is manual-only during matrix qualification. Its tier selector
 always runs the portable matrix, then optionally adds the existing headless or

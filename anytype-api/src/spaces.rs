@@ -88,6 +88,8 @@ use crate::{
 };
 
 const ARCHIVED_PAGE_DEFAULT_LIMIT: u32 = 100;
+const SPACE_SHARING_ADMISSION_ATTEMPTS: usize = 60;
+const SPACE_SHARING_ADMISSION_DELAY: Duration = Duration::from_millis(500);
 const ARCHIVED_COUNT_PAGE_SIZE: u32 = 500;
 const SPACE_UX_TYPE_KEY: &str = "spaceUxType";
 
@@ -238,6 +240,10 @@ fn is_no_active_member_invite(code: i32) -> bool {
 
 fn is_guest_invite_unavailable(code: i32) -> bool {
     code == rpc::space::invite_get_guest::response::error::Code::InvalidSpaceType as i32
+}
+
+fn space_sharing_admission_is_pending(code: i32) -> bool {
+    code == rpc::space::make_shareable::response::error::Code::NoSuchSpace as i32
 }
 
 impl Space {
@@ -1439,6 +1445,10 @@ impl AnytypeClient {
 
     /// Enables sharing for a space.
     ///
+    /// A newly REST-created space can briefly be absent from Heart's sharing
+    /// service. This method retries only that definitive `NO_SUCH_SPACE`
+    /// response within a bounded admission window.
+    ///
     /// # Errors
     ///
     /// Returns an error when the request is rejected or credentials are absent.
@@ -1460,21 +1470,30 @@ impl AnytypeClient {
 
         let grpc = self.grpc_client().await?;
         if enabled {
-            let request = rpc::space::make_shareable::Request {
-                space_id: space_id.to_owned(),
-            };
-            let request = with_token_request(Request::new(request), grpc.token())?;
-            let response = ClientCommandsClient::new(grpc.channel())
-                .space_make_shareable(request)
-                .await
-                .map_err(grpc_status)?
-                .into_inner();
-            if let Some(error) = response.error.as_ref().filter(|error| error.code != 0) {
-                return Err(space_rpc_error(
-                    "space sharing enable",
-                    error.code,
-                    &error.description,
-                ));
+            let mut attempts_remaining = SPACE_SHARING_ADMISSION_ATTEMPTS;
+            loop {
+                let request = rpc::space::make_shareable::Request {
+                    space_id: space_id.to_owned(),
+                };
+                let request = with_token_request(Request::new(request), grpc.token())?;
+                let response = ClientCommandsClient::new(grpc.channel())
+                    .space_make_shareable(request)
+                    .await
+                    .map_err(grpc_status)?
+                    .into_inner();
+                if let Some(error) = response.error.as_ref().filter(|error| error.code != 0) {
+                    attempts_remaining = attempts_remaining.saturating_sub(1);
+                    if space_sharing_admission_is_pending(error.code) && attempts_remaining > 0 {
+                        tokio::time::sleep(SPACE_SHARING_ADMISSION_DELAY).await;
+                        continue;
+                    }
+                    return Err(space_rpc_error(
+                        "space sharing enable",
+                        error.code,
+                        &error.description,
+                    ));
+                }
+                return Ok(());
             }
         } else {
             let request = rpc::space::stop_sharing::Request {
@@ -2210,6 +2229,22 @@ mod tests {
         use std::str::FromStr;
         assert_eq!(SpaceModel::from_str("space").unwrap(), SpaceModel::Space);
         assert_eq!(SpaceModel::from_str("chat").unwrap(), SpaceModel::Chat);
+    }
+
+    #[test]
+    fn only_definitive_missing_space_is_retryable_for_sharing_admission() {
+        use rpc::space::make_shareable::response::error::Code;
+
+        assert!(space_sharing_admission_is_pending(Code::NoSuchSpace as i32));
+        for code in [
+            Code::UnknownError,
+            Code::BadInput,
+            Code::SpaceIsDeleted,
+            Code::RequestFailed,
+            Code::LimitReached,
+        ] {
+            assert!(!space_sharing_admission_is_pending(code as i32));
+        }
     }
 
     #[test]

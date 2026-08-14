@@ -272,6 +272,8 @@ fn shared_headless_provisioner_honors_the_cli_override() {
     let provisioner = include_str!("../../.github/scripts/provision-headless-server.sh");
     assert!(provisioner.contains("ANYTYPE_CLI_BIN=\"${ANYTYPE_CLI_BIN:-anytype}\""));
     assert!(provisioner.contains("command -v -- \"$ANYTYPE_CLI_BIN\""));
+    assert!(provisioner.contains("network_mode=\"${ANYTYPE_HEADLESS_NETWORK_MODE:-isolated}\""));
+    assert!(provisioner.contains("isolated | connected"));
     assert!(!provisioner.contains("command -v anytype"));
 }
 

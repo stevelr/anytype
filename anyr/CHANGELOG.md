@@ -46,6 +46,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Make the `init-cli` child-failure regression assert its stable operation and
   redaction contract instead of requiring platform-specific exit-status text.
+- Make the oversized `init-cli` output regression emit its limit-crossing
+  payload deterministically under loaded CI runners.
 - Validate cargo-dist's generated Homebrew formula in formula mode, applying
   Homebrew's formula rules without the library-only Sorbet sigil checks.
 - Accept unnamed ambient spaces in the Python CLI harness's space

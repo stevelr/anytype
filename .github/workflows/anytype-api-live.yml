@@ -211,10 +211,12 @@ jobs:
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: anytype-api-headless
-      # The disposable per-runner server is always clean, so the soak tier no
-      # longer needs a host-side reset script.
-      - name: Provision an isolated headless server with ephemeral credentials
+      # Space sharing calls Heart's coordinator service, so this small,
+      # cleanup-owned tier cannot use the outbound-blocked server mode.
+      - name: Provision a connected headless server with ephemeral credentials
         shell: bash
+        env:
+          ANYTYPE_HEADLESS_NETWORK_MODE: connected
         run: bash .github/scripts/provision-headless-server.sh ANY_MCP_HEADLESS
       - name: Run soak disposable ignored tests serially
         shell: bash

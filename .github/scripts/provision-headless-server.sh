@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 
-# Provision a disposable, sync-isolated headless Anytype server on a
-# GitHub-hosted runner and mint ephemeral credentials for it.
+# Provision a disposable headless Anytype server on a GitHub-hosted runner
+# and mint ephemeral credentials for it.
 #
 # The anytype-cli selected by ANYTYPE_CLI_BIN, or `anytype` on PATH when it is
 # unset, serves inside the outbound-blocking network namespace created by
-# scripts/anytype-nonet, so test activity never reaches the Anytype network.
+# scripts/anytype-nonet. Set ANYTYPE_HEADLESS_NETWORK_MODE=connected only for
+# a bounded gate whose API requires an Anytype network service.
 # Credentials are created with `anyr init-cli --save-env`, which verifies
 # HTTP and gRPC authentication before saving. Nothing here outlives the
 # runner: the account, keys, keystore, server state, and log are disposable.
@@ -31,6 +32,14 @@ case "$var_prefix" in
     exit 2
     ;;
 esac
+network_mode="${ANYTYPE_HEADLESS_NETWORK_MODE:-isolated}"
+case "$network_mode" in
+  isolated | connected) ;;
+  *)
+    printf '%s\n' "ANYTYPE_HEADLESS_NETWORK_MODE must be isolated or connected" >&2
+    exit 2
+    ;;
+esac
 
 sudo apt-get update -qq
 sudo apt-get install -y -qq nftables socat
@@ -49,20 +58,26 @@ anytype_bin="$(command -v -- "$ANYTYPE_CLI_BIN")" || {
   exit 1
 }
 
-setsid env ANYTYPE_CLI_BIN="$anytype_bin" \
-  bash scripts/anytype-nonet > "$server_log" 2>&1 < /dev/null &
+server_host="10.222.0.2"
+if [[ "$network_mode" == "isolated" ]]; then
+  setsid env ANYTYPE_CLI_BIN="$anytype_bin" \
+    bash scripts/anytype-nonet > "$server_log" 2>&1 < /dev/null &
+else
+  server_host="127.0.0.1"
+  setsid "$anytype_bin" serve > "$server_log" 2>&1 < /dev/null &
+fi
 # A fresh server has no account, and the HTTP API listener (31012) starts
 # only after login, so first-boot readiness gates on the gRPC port instead.
 up=""
 for _ in $(seq 90); do
-  if timeout 2 bash -c 'exec 3<>/dev/tcp/10.222.0.2/31010' 2>/dev/null; then
+  if timeout 2 bash -c "exec 3<>/dev/tcp/$server_host/31010" 2>/dev/null; then
     up=1
     break
   fi
   sleep 2
 done
 if [[ -z "$up" ]]; then
-  printf '%s\n' "headless server did not open 10.222.0.2:31010" >&2
+  printf '%s\n' "headless server did not open $server_host:31010" >&2
   tail -c 4096 -- "$server_log" >&2
   exit 1
 fi
@@ -71,11 +86,14 @@ sleep 20
 
 # The gate policies admit loopback endpoints only, so host loopback is
 # bridged into the namespace instead of pointing the gates at the veth
-# address. The forwarders die with the runner.
-for port in 31010 31012; do
-  setsid socat "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" \
-    "TCP:10.222.0.2:$port" > /dev/null 2>&1 < /dev/null &
-done
+# address. The forwarders die with the runner. Connected servers already
+# listen on host loopback and do not need the bridge.
+if [[ "$network_mode" == "isolated" ]]; then
+  for port in 31010 31012; do
+    setsid socat "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" \
+      "TCP:10.222.0.2:$port" > /dev/null 2>&1 < /dev/null &
+  done
+fi
 
 anyr_bin="${ANYR_BIN:-}"
 if [[ -z "$anyr_bin" ]]; then
@@ -87,19 +105,28 @@ if [[ ! -x "$anyr_bin" ]]; then
   exit 1
 fi
 
-# init-cli runs inside the namespace (as the runner user) because the server
-# and the anytype CLI meet over namespace-local loopback there. Its first-run
-# account creation starts the HTTP API listener, and its single-shot
-# verification can race that startup, so it gets a few bounded attempts.
-# Later attempts reuse the account recorded in the CLI config.
+# In isolated mode, init-cli runs inside the namespace as the runner user.
+# Its first-run account creation starts the HTTP API listener, and its
+# single-shot verification can race that startup, so it gets a few bounded
+# attempts. Later attempts reuse the account recorded in the CLI config.
 env_file="$RUNNER_TEMP/headless-credentials.env"
 keystore="$RUNNER_TEMP/headless-ci-keystore.db"
 attempt=1
-until sudo ip netns exec anycli_block runuser "$(whoami)" -c \
-  "env ANYTYPE_CLI_BIN='$anytype_bin' \
-    ANYTYPE_KEYSTORE='file:path=$keystore' \
-    ANYTYPE_KEYSTORE_SERVICE=anyr \
-    '$anyr_bin' init-cli --save-env '$env_file'"; do
+run_init_cli() {
+  if [[ "$network_mode" == "isolated" ]]; then
+    sudo ip netns exec anycli_block runuser "$(whoami)" -c \
+      "env ANYTYPE_CLI_BIN='$anytype_bin' \
+        ANYTYPE_KEYSTORE='file:path=$keystore' \
+        ANYTYPE_KEYSTORE_SERVICE=anyr \
+        '$anyr_bin' init-cli --save-env '$env_file'"
+  else
+    env ANYTYPE_CLI_BIN="$anytype_bin" \
+      ANYTYPE_KEYSTORE="file:path=$keystore" \
+      ANYTYPE_KEYSTORE_SERVICE=anyr \
+      "$anyr_bin" init-cli --save-env "$env_file"
+  fi
+}
+until run_init_cli; do
   if [[ "$attempt" -ge 3 ]]; then
     printf '%s\n' "init-cli failed after $attempt attempts" >&2
     tail -c 4096 -- "$server_log" >&2
@@ -136,7 +163,8 @@ if ! kill -0 "$reviewer_pid" 2>/dev/null; then
   exit 1
 fi
 
-# The saved loopback endpoints hold on the host too, through the forwarders.
+# The saved loopback endpoints reach either the connected server directly or
+# the isolated server through the forwarders.
 # shellcheck disable=SC2016 # the reference expands when the file is sourced
 printf 'export ANYTYPE_TEST_URL="$ANYTYPE_URL"\n' >> "$env_file"
 
