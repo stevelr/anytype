@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Let disposable headless live workflows select the Anytype CLI through
+  `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
 - Separate capture fidelity from restore fidelity in the live gate: the
   source object's body must be server-readable before the backup runs,
   the archive is then proven to contain the body via `backup extract`,

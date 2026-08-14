@@ -28,6 +28,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Let disposable headless live workflows select the Anytype CLI through
+  `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
 - Make `anyr init-cli` reuse the account ID and account key from the default
   Anytype CLI config when it exists. The command derives new sessions from the
   account key and creates only a fresh HTTP token, preserving the existing

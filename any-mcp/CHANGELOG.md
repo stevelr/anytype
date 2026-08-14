@@ -8,6 +8,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Let disposable headless live workflows select the Anytype CLI through
+  `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
 - Bind staged document creates and updates to their idempotency operation
   before mutation dispatch, restoring the staged source after a definitive
   rejection and retaining the exact candidate across uncertain outcomes.

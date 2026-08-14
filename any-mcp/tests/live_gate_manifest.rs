@@ -268,6 +268,14 @@ fn compact_whitespace(value: &str) -> String {
 }
 
 #[test]
+fn shared_headless_provisioner_honors_the_cli_override() {
+    let provisioner = include_str!("../../.github/scripts/provision-headless-server.sh");
+    assert!(provisioner.contains("ANYTYPE_CLI_BIN=\"${ANYTYPE_CLI_BIN:-anytype}\""));
+    assert!(provisioner.contains("command -v -- \"$ANYTYPE_CLI_BIN\""));
+    assert!(!provisioner.contains("command -v anytype"));
+}
+
+#[test]
 fn ignored_library_manifest_is_closed_and_filter_safe() {
     assert_eq!(ADMITTED_IGNORED_LIB_TESTS.len(), 38);
     assert_sorted_unique(ADMITTED_IGNORED_LIB_TESTS);

@@ -8,6 +8,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Let disposable headless live workflows select the Anytype CLI through
+  `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
 - Expose side-effect-free loading of Anytype CLI account credentials through
   `GrpcCredentials::from_cli_config`, distinguishing a missing config from an
   unreadable or malformed one.

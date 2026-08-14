@@ -65,7 +65,8 @@ native Arch Linux lane. Nix drives Linux and macOS builds, Windows builds run
 natively, and Linux builds can produce loadable x86_64 or arm64 OCI image
 archives. The release-artifact workflow generates shell and PowerShell
 installers and Homebrew formulae, then validates the POSIX artifacts on both
-Linux and macOS without publishing a release.
+Linux and macOS without publishing a release. Linux live workflows select the
+headless server through `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
 
 ## Compatibility notes
 

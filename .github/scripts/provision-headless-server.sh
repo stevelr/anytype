@@ -3,8 +3,8 @@
 # Provision a disposable, sync-isolated headless Anytype server on a
 # GitHub-hosted runner and mint ephemeral credentials for it.
 #
-# The pinned anytype-cli (expected on PATH, normally exposed from the Nix
-# devshell) serves inside the outbound-blocking network namespace created by
+# The anytype-cli selected by ANYTYPE_CLI_BIN, or `anytype` on PATH when it is
+# unset, serves inside the outbound-blocking network namespace created by
 # scripts/anytype-nonet, so test activity never reaches the Anytype network.
 # Credentials are created with `anyr init-cli --save-env`, which verifies
 # HTTP and gRPC authentication before saving. Nothing here outlives the
@@ -38,8 +38,9 @@ sudo apt-get install -y -qq nftables socat
 umask 077
 server_log="$RUNNER_TEMP/anytype-headless-server.log"
 : > "$server_log"
-anytype_bin="$(command -v anytype)" || {
-  printf '%s\n' "anytype CLI is not on PATH (expose the Nix devshell first)" >&2
+ANYTYPE_CLI_BIN="${ANYTYPE_CLI_BIN:-anytype}"
+anytype_bin="$(command -v -- "$ANYTYPE_CLI_BIN")" || {
+  printf 'anytype CLI executable is unavailable: %s\n' "$ANYTYPE_CLI_BIN" >&2
   exit 1
 }
 
