@@ -57,15 +57,18 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result.stdout, "required live gate discussions completed\n")
         self.assertEqual(result.stderr, "")
 
-    def test_secret_and_skip_transcripts_are_never_emitted(self) -> None:
-        for child in [
+    def test_secret_failure_transcript_is_never_emitted(self) -> None:
+        result = self.invoke(
+            "test",
+            "discussions",
             "print('PRIVATE_SECRET'); raise SystemExit(2)",
-            "print('skipped PRIVATE_SECRET'); print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s')",
-        ]:
-            result = self.invoke("test", "discussions", child)
-            self.assertEqual(result.returncode, 1)
-            self.assertNotIn("PRIVATE_SECRET", result.stdout + result.stderr)
-            self.assertEqual(result.stderr, "required live gate discussions failed\n")
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("PRIVATE_SECRET", result.stdout + result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "required live gate discussions failed reason=child_exit\n",
+        )
 
     def test_failed_test_name_is_reported_without_its_transcript(self) -> None:
         result = self.invoke(
@@ -78,7 +81,28 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_SECRET", result.stderr)
         self.assertEqual(
             result.stderr,
-            "required live gate discussions failed tests=module_name::case_name\n",
+            "required live gate discussions failed reason=child_exit tests=module_name::case_name\n",
+        )
+
+    def test_only_typed_disposable_skip_reasons_fail_admission(self) -> None:
+        harmless = self.invoke(
+            "test",
+            "discussions",
+            "print('ordinary operation skipped a redundant read PRIVATE_SECRET'); print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s')",
+        )
+        self.assertEqual(harmless.returncode, 0)
+        self.assertNotIn("PRIVATE_SECRET", harmless.stdout + harmless.stderr)
+        self.assertEqual(harmless.stdout, "required live gate discussions completed\n")
+
+        admission = self.invoke(
+            "test",
+            "discussions",
+            "print('disposable workflow skipped before callback: PrefixNotConfigured'); print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s')",
+        )
+        self.assertEqual(admission.returncode, 1)
+        self.assertEqual(
+            admission.stderr,
+            "required live gate discussions failed reason=skipped_admission\n",
         )
 
     def test_zero_multiple_and_replacement_counts_fail(self) -> None:
@@ -97,7 +121,10 @@ class RunnerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "required live gate discussions failed\n")
+        self.assertEqual(
+            result.stderr,
+            "required live gate discussions failed reason=runner_bound\n",
+        )
 
 
 class EvidenceTests(unittest.TestCase):

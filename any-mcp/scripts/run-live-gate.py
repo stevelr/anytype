@@ -22,6 +22,11 @@ TEST_SUMMARY = re.compile(
     rb"test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored; 0 measured; "
     rb"[0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s"
 )
+SKIPPED_ADMISSION = re.compile(
+    rb"(?m)^.*skipped.*(?:PrefixNotConfigured|PrefixInvalid|"
+    rb"PlatformIsolationUnavailable|ProcessIsolationUnavailable|"
+    rb"EnvironmentProvisioningUnavailable).*$"
+)
 EXPECTED = {"direct": 38, "stdio": 30, "discussions": 1}
 COMMAND_LABELS = {"auth", "reset"}
 
@@ -30,9 +35,16 @@ class RunnerError(Exception):
     """A child failure whose raw details must remain private."""
 
 
-def fail(label: str, failed_tests: tuple[str, ...] = ()) -> None:
-    suffix = f" tests={','.join(failed_tests)}" if failed_tests else ""
-    print(f"required live gate {label} failed{suffix}", file=sys.stderr)
+def fail(
+    label: str,
+    reason: str = "invocation",
+    failed_tests: tuple[str, ...] = (),
+) -> None:
+    tests = f" tests={','.join(failed_tests)}" if failed_tests else ""
+    print(
+        f"required live gate {label} failed reason={reason}{tests}",
+        file=sys.stderr,
+    )
     raise SystemExit(1)
 
 
@@ -119,19 +131,24 @@ def main() -> None:
         fail(label)
     try:
         status, output = run_bounded(command, private_dir)
-    except (OSError, RunnerError):
-        fail(label)
+    except OSError:
+        fail(label, "runner_io")
+    except RunnerError:
+        fail(label, "runner_bound")
     if status != 0:
-        fail(label, failed_test_names(label, output))
+        reason = "child_signal" if status < 0 else "child_exit"
+        fail(label, reason, failed_test_names(label, output))
     if mode == "test":
         summaries = SUMMARY_LINE.findall(output)
-        match = TEST_SUMMARY.fullmatch(summaries[0]) if len(summaries) == 1 else None
-        if (
-            match is None
-            or int(match.group(1)) != EXPECTED[label]
-            or b"skipped" in output.lower()
-        ):
-            fail(label)
+        if len(summaries) != 1:
+            fail(label, "summary_count")
+        match = TEST_SUMMARY.fullmatch(summaries[0])
+        if match is None:
+            fail(label, "summary_shape")
+        if int(match.group(1)) != EXPECTED[label]:
+            fail(label, "test_count")
+        if SKIPPED_ADMISSION.search(output) is not None:
+            fail(label, "skipped_admission")
     print(f"required live gate {label} completed")
 
 
