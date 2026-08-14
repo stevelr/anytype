@@ -589,7 +589,12 @@ impl CliProcess {
         };
         if let Err(err) = read {
             stop_child(&mut child).await;
-            return Err(err);
+            return Err(err).with_context(|| {
+                format!(
+                    "Anytype CLI {} failed while collecting output",
+                    kind.description()
+                )
+            });
         }
         if output.len() as u64 > MAX_CREDENTIAL_OUTPUT_BYTES {
             stop_child(&mut child).await;
@@ -1157,7 +1162,11 @@ esac
     async fn child_failure_withholds_credential_output() {
         let temp = TestDir::new();
         let executable = temp.path().join("failing-anytype");
-        let script = format!("#!/bin/sh\nprintf 'Key: {HTTP_TOKEN}\\n'\nexit 7\n");
+        let marker = temp.path().join("child-ran");
+        let script = format!(
+            "#!/bin/sh\nprintf ran > '{}'\nprintf 'Key: {HTTP_TOKEN}\\n'\nexit 7\n",
+            marker.display()
+        );
         write_executable(&executable, &script);
         let process = test_process(&executable);
         let error = process
@@ -1173,8 +1182,9 @@ esac
             .await
             .expect_err("failed child must fail")
             .to_string();
+        assert_eq!(fs::read_to_string(marker).expect("child marker"), "ran");
         assert!(!error.contains(HTTP_TOKEN));
-        assert!(error.contains("status"));
+        assert!(error.contains("HTTP token creation"));
     }
 
     #[cfg(unix)]

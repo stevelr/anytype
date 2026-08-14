@@ -561,6 +561,8 @@ anyr ARGS ...
   shared directories and configuration repositories. If file creation fails,
   the initialized credentials may already be in the selected keystore.
   Credential values remain absent from normal command output and errors.
+  Subprocess failures identify the Anytype CLI operation; child output remains
+  withheld, while platform-specific exit-status text is diagnostic detail.
 
 The global `--keystore` and `--keystore-service` options (or their environment
 variables) select where `init-cli` stores credentials. See

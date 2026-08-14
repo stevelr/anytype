@@ -63,9 +63,7 @@ async fn space_administration_lifecycle() -> TestResult<()> {
         let space_name = format!("space-admin-{}", unique_suffix());
         let space = ctx.create_space_fixture(space_name).await?;
 
-        // REST creation returns before the gRPC ACL service always admits the
-        // new space on fresh servers.
-        sleep(Duration::from_secs(2)).await;
+        wait_for_space_administration_ready(&ctx.client, &space.id).await?;
         eprintln!("space administration phase: enable sharing");
         ctx.client.enable_space_sharing(&space.id).await?;
 
@@ -216,6 +214,23 @@ async fn wait_for_space_invite(
     };
     Err(TestError::Assertion {
         message: format!("created space invitation did not converge: {category}"),
+    })
+}
+
+async fn wait_for_space_administration_ready(
+    client: &AnytypeClient,
+    space_id: &str,
+) -> TestResult<()> {
+    for attempt in 0..READBACK_ATTEMPTS {
+        if client.list_space_invites(space_id).await.is_ok() {
+            return Ok(());
+        }
+        if attempt + 1 < READBACK_ATTEMPTS {
+            sleep(READBACK_DELAY).await;
+        }
+    }
+    Err(TestError::Assertion {
+        message: "created space did not become readable by the administration service".to_owned(),
     })
 }
 

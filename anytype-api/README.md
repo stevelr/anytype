@@ -1193,7 +1193,10 @@ cargo test --locked -p anytype --test live_gate_manifest
 ```
 
 The driver runs every admitted entry in its own process and rejects zero-test
-and skip results.
+and skip results. The space-administration soak case waits until read-only
+invitation state is available before issuing sharing mutations, because a
+fresh server can expose a REST-created space before its gRPC administration
+service admits it.
 
 With the same protected environment loaded, reproduce the two focused Set/view
 entries exactly:

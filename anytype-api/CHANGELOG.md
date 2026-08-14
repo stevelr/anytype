@@ -13,9 +13,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   while its REST space readback reports the immutable regular-space type, so
   the disposable test accepts that response as well as APIs that expose the
   UX as a `chat` discriminator. The test allows up to 30 seconds for fresh CI
-  state to converge, uses a valid reader-tier auto-approve invite, accepts the
-  two observed guest-permission readback shapes, and waits for ACL revocation
-  to settle before replacing an invite.
+  state to converge, waits for read-only administration access before enabling
+  sharing, uses a valid reader-tier auto-approve invite, accepts the two
+  observed guest-permission readback shapes, and waits for ACL revocation to
+  settle before replacing an invite.
 - Let disposable headless live workflows select the Anytype CLI through
   `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
 - Expose side-effect-free loading of Anytype CLI account credentials through
