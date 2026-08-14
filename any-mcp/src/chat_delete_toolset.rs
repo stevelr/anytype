@@ -1036,7 +1036,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn handler_delete_deadline_is_post_dispatch_indeterminate() {
         let entered = Arc::new(Notify::new());
         let delete_entered = entered.clone();
@@ -1059,6 +1059,7 @@ mod tests {
             .await
         });
         entered.notified().await;
+        tokio::time::advance(Duration::from_millis(101)).await;
         let result = task.await.expect("delete deadline task");
         assert_indeterminate(&result);
         assert_eq!(
@@ -1067,7 +1068,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn handler_verification_cancellation_and_deadline_are_indeterminate() {
         let entered = Arc::new(Notify::new());
         let read_entered = entered.clone();
@@ -1120,6 +1121,7 @@ mod tests {
             .await
         });
         entered.notified().await;
+        tokio::time::advance(Duration::from_millis(101)).await;
         let timed_out = task.await.expect("verification deadline task");
         assert_indeterminate(&timed_out);
         assert_eq!(

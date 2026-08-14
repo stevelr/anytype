@@ -2,6 +2,10 @@ use anytype::{
     prelude::*,
     test_util::{TestError, TestResult, unique_suffix, with_test_context},
 };
+use tokio::time::{Duration, sleep};
+
+const CHAT_SPACE_READBACK_ATTEMPTS: usize = 20;
+const CHAT_SPACE_READBACK_DELAY: Duration = Duration::from_millis(250);
 
 #[tokio::test]
 async fn space_administration_validates_before_transport() {
@@ -132,17 +136,18 @@ async fn verify_chat_space(
     space_id: &str,
     expected_name: &str,
 ) -> TestResult<()> {
-    let spaces = client.spaces().list().await?.collect_all().await?;
-    let space = spaces
-        .into_iter()
-        .find(|space| space.id == space_id)
-        .ok_or_else(|| TestError::Assertion {
-            message: "created chat space was not returned by spaces()".to_owned(),
-        })?;
-    if space.name != expected_name || space.object != SpaceModel::Chat {
-        return Err(TestError::Assertion {
-            message: "created chat space identity did not round-trip".to_owned(),
-        });
+    for attempt in 0..CHAT_SPACE_READBACK_ATTEMPTS {
+        let spaces = client.spaces().list().await?.collect_all().await?;
+        if spaces.into_iter().any(|space| {
+            space.id == space_id && space.name == expected_name && space.object == SpaceModel::Chat
+        }) {
+            return Ok(());
+        }
+        if attempt + 1 < CHAT_SPACE_READBACK_ATTEMPTS {
+            sleep(CHAT_SPACE_READBACK_DELAY).await;
+        }
     }
-    Ok(())
+    Err(TestError::Assertion {
+        message: "created chat space identity did not converge".to_owned(),
+    })
 }

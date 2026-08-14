@@ -15,6 +15,9 @@ from pathlib import Path
 OUTPUT_LIMIT = 1024 * 1024
 PROCESS_TIMEOUT = 1200
 SUMMARY_LINE = re.compile(rb"(?m)^test result:.*$")
+FAILED_TEST_LINE = re.compile(
+    rb"(?m)^test ([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*) \.\.\. FAILED$"
+)
 TEST_SUMMARY = re.compile(
     rb"test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored; 0 measured; "
     rb"[0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s"
@@ -27,9 +30,19 @@ class RunnerError(Exception):
     """A child failure whose raw details must remain private."""
 
 
-def fail(label: str) -> None:
-    print(f"required live gate {label} failed", file=sys.stderr)
+def fail(label: str, failed_tests: tuple[str, ...] = ()) -> None:
+    suffix = f" tests={','.join(failed_tests)}" if failed_tests else ""
+    print(f"required live gate {label} failed{suffix}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def failed_test_names(label: str, output: bytes) -> tuple[str, ...]:
+    names = tuple(
+        sorted({match.decode("ascii") for match in FAILED_TEST_LINE.findall(output)})
+    )
+    if len(names) > EXPECTED.get(label, 0):
+        return ()
+    return names
 
 
 def terminate(process: subprocess.Popen[bytes]) -> None:
@@ -109,7 +122,7 @@ def main() -> None:
     except (OSError, RunnerError):
         fail(label)
     if status != 0:
-        fail(label)
+        fail(label, failed_test_names(label, output))
     if mode == "test":
         summaries = SUMMARY_LINE.findall(output)
         match = TEST_SUMMARY.fullmatch(summaries[0]) if len(summaries) == 1 else None

@@ -67,6 +67,20 @@ class RunnerTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_SECRET", result.stdout + result.stderr)
             self.assertEqual(result.stderr, "required live gate discussions failed\n")
 
+    def test_failed_test_name_is_reported_without_its_transcript(self) -> None:
+        result = self.invoke(
+            "test",
+            "discussions",
+            "print('test module_name::case_name ... FAILED'); print('PRIVATE_SECRET'); raise SystemExit(2)",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("PRIVATE_SECRET", result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "required live gate discussions failed tests=module_name::case_name\n",
+        )
+
     def test_zero_multiple_and_replacement_counts_fail(self) -> None:
         for child in [
             "print('no summary')",

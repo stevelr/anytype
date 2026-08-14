@@ -8,6 +8,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Poll boundedly for a newly created chat space's name and model to converge
+  before the disposable administration test evaluates its exact identity.
 - Let disposable headless live workflows select the Anytype CLI through
   `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
 - Expose side-effect-free loading of Anytype CLI account credentials through

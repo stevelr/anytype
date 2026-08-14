@@ -1827,8 +1827,9 @@ underscores after sourcing its environment, exports the dedicated-process
 gate, and rejects captured test output that reports a skipped admission or an
 unexpected executable count. The hosted test lane compares every ignored
 library and whole-binary test name with closed manifests without contacting a
-server. Protected CI therefore cannot pass without running the disposable
-callbacks.
+server. A failed child reports only matching compiled test names; its captured
+transcript remains private. Protected CI therefore cannot pass without running
+the disposable callbacks.
 
 The selectable `headless_direct_standard_*` and
 `headless_stdio_standard_*` cases cover discovery, document/resource access,
