@@ -1015,8 +1015,10 @@ mod tests {
             execute_test_operation(
                 Ok(message(MESSAGE_ID, MODIFIED)),
                 move || {
-                    delete_entered.notify_one();
-                    Box::pin(std::future::pending())
+                    Box::pin(async move {
+                        delete_entered.notify_one();
+                        std::future::pending().await
+                    })
                 },
                 || Box::pin(async { Err(absent()) }),
                 &task_cancellation,
@@ -1047,8 +1049,10 @@ mod tests {
             execute_test_operation(
                 Ok(message(MESSAGE_ID, MODIFIED)),
                 move || {
-                    delete_entered.notify_one();
-                    Box::pin(std::future::pending())
+                    Box::pin(async move {
+                        delete_entered.notify_one();
+                        std::future::pending().await
+                    })
                 },
                 || Box::pin(async { Err(absent()) }),
                 &CancellationToken::new(),
@@ -1081,8 +1085,11 @@ mod tests {
                 Ok(message(MESSAGE_ID, MODIFIED)),
                 || Box::pin(async { Ok(()) }),
                 move || {
-                    read_entered.notify_one();
-                    Box::pin(std::future::pending())
+                    let read_entered = read_entered.clone();
+                    Box::pin(async move {
+                        read_entered.notify_one();
+                        std::future::pending().await
+                    })
                 },
                 &task_cancellation,
                 &task_progress,
@@ -1110,8 +1117,11 @@ mod tests {
                 Ok(message(MESSAGE_ID, MODIFIED)),
                 || Box::pin(async { Ok(()) }),
                 move || {
-                    read_entered.notify_one();
-                    Box::pin(std::future::pending())
+                    let read_entered = read_entered.clone();
+                    Box::pin(async move {
+                        read_entered.notify_one();
+                        std::future::pending().await
+                    })
                 },
                 &CancellationToken::new(),
                 &task_progress,
@@ -1140,8 +1150,11 @@ mod tests {
         let result = run_delete_flow(
             || Box::pin(async { Ok(()) }),
             move || {
-                read_entered.notify_one();
-                Box::pin(std::future::pending())
+                let read_entered = read_entered.clone();
+                Box::pin(async move {
+                    read_entered.notify_one();
+                    std::future::pending().await
+                })
             },
             &progress,
             Instant::now() + Duration::from_secs(1),

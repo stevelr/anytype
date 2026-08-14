@@ -182,27 +182,7 @@ pub async fn serve_http(
     });
     let signal_shutdown = shutdown.clone();
     let signals = tokio::spawn(async move {
-        let interrupt = tokio::signal::ctrl_c();
-        #[cfg(unix)]
-        {
-            let mut terminate =
-                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                    Ok(terminate) => terminate,
-                    Err(_) => {
-                        let _ = interrupt.await;
-                        signal_shutdown.cancel();
-                        return;
-                    }
-                };
-            tokio::select! {
-                _ = interrupt => {}
-                _ = terminate.recv() => {}
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = interrupt.await;
-        }
+        crate::runtime::wait_for_shutdown_signal().await;
         signal_shutdown.cancel();
     });
 

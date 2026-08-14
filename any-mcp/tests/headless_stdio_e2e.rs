@@ -1451,7 +1451,7 @@ fn inspect_reviewed_body_server_log(secrets: &[&[u8]]) -> TestResult<()> {
     let keystore = KeyStore::new(service, &specification)
         .map_err(|_| sentinel_assertion("reviewed log keystore could not be opened"))?;
     inspect_reviewed_body_server_log_at(
-        std::env::var_os("ANY_MCP_HEADLESS_REDACTED_LOG_FILE"),
+        std::env::var_os("ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"),
         std::env::var_os("ANY_MCP_HEADLESS_EVIDENCE_CONTEXT"),
         Some(&marker),
         secrets,

@@ -68,7 +68,15 @@ where
     // this session. Preview stdio and multi-session transports do not.
     server.runtime().client_roots().enable();
     loop {
-        let frame = match read_frame(&mut reader).await {
+        let runtime_shutdown = server.runtime().shutdown_token();
+        let frame = match tokio::select! {
+            biased;
+            () = runtime_shutdown.cancelled() => {
+                shutdown_runtime(server.runtime()).await;
+                return Ok(());
+            }
+            frame = read_frame(&mut reader) => frame,
+        } {
             Ok(Some(frame)) if frame.iter().all(u8::is_ascii_whitespace) => continue,
             Ok(Some(frame)) => frame,
             Ok(None) => {
@@ -128,7 +136,15 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let first = loop {
-        match read_frame(&mut reader).await {
+        let runtime_shutdown = server.runtime().shutdown_token();
+        match tokio::select! {
+            biased;
+            () = runtime_shutdown.cancelled() => {
+                shutdown_runtime(server.runtime()).await;
+                return Ok(());
+            }
+            frame = read_frame(&mut reader) => frame,
+        } {
             Ok(Some(frame)) if frame.iter().all(u8::is_ascii_whitespace) => continue,
             Ok(frame) => break frame,
             Err(FrameReadError::TooLarge) => {
@@ -453,17 +469,17 @@ where
                 runtime
                     .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
                     .await;
-                // Attribute the shutdown to its fixed category: staging
-                // durability uncertainty is the only self-initiated runtime
-                // shutdown; anything else remains a generic service failure.
+                // Staging durability uncertainty is the only internal source
+                // that cancels this runtime token. EOF and process signals are
+                // ordinary transport shutdowns.
                 let durability = runtime
                     .artifact_staging()
                     .is_some_and(crate::artifact_staging::ArtifactStaging::durability_uncertain);
-                return Err(if durability {
-                    ServeError::ArtifactDurability
+                return if durability {
+                    Err(ServeError::ArtifactDurability)
                 } else {
-                    ServeError::ServiceTask
-                });
+                    Ok(())
+                };
             }
             writer_result = &mut writer_task => {
                 runtime.begin_shutdown();
@@ -787,6 +803,79 @@ mod tests {
         .await
         .expect("clean preview shutdown");
         assert!(!preview.client_roots().is_enabled());
+    }
+
+    #[tokio::test]
+    async fn preinitialize_stdio_stops_when_runtime_shutdown_begins() {
+        let stable = test_runtime();
+        let (stable_client, stable_server) = duplex(64);
+        let (reader, writer) = tokio::io::split(stable_server);
+        let stable_runtime = stable.clone();
+        let stable_task = tokio::spawn(async move {
+            serve_stable(
+                AnyMcpServer::new(stable_runtime).expect("static catalog"),
+                BufReader::new(reader),
+                writer,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        stable.begin_shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(1), stable_task)
+            .await
+            .expect("stable stdio shutdown deadline")
+            .expect("stable stdio task")
+            .expect("stable stdio shutdown");
+        drop(stable_client);
+
+        let preview = test_runtime();
+        let (preview_client, preview_server) = duplex(64);
+        let (reader, writer) = tokio::io::split(preview_server);
+        let preview_runtime = preview.clone();
+        let preview_task = tokio::spawn(async move {
+            serve_preview(
+                AnyMcpServer::new(preview_runtime).expect("static catalog"),
+                BufReader::new(reader),
+                writer,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        preview.begin_shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(1), preview_task)
+            .await
+            .expect("preview stdio shutdown deadline")
+            .expect("preview stdio task")
+            .expect("preview stdio shutdown");
+        drop(preview_client);
+    }
+
+    #[tokio::test]
+    async fn initialized_preview_stops_cleanly_when_runtime_shutdown_begins() {
+        let runtime = test_runtime();
+        let (mut client, server_side) = duplex(1024);
+        let (reader, writer) = tokio::io::split(server_side);
+        let served_runtime = runtime.clone();
+        let task = tokio::spawn(async move {
+            serve_preview(
+                AnyMcpServer::new(served_runtime).expect("static catalog"),
+                BufReader::new(reader),
+                writer,
+            )
+            .await
+        });
+        client
+            .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}"#)
+            .await
+            .expect("write preview request");
+        client.write_all(b"\n").await.expect("write frame boundary");
+        tokio::task::yield_now().await;
+        runtime.begin_shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("preview stdio shutdown deadline")
+            .expect("preview stdio task")
+            .expect("preview stdio shutdown");
     }
 
     #[tokio::test]

@@ -89,6 +89,7 @@ use crate::{
 
 const ARCHIVED_PAGE_DEFAULT_LIMIT: u32 = 100;
 const ARCHIVED_COUNT_PAGE_SIZE: u32 = 500;
+const SPACE_UX_TYPE_KEY: &str = "spaceUxType";
 
 /// Model type for spaces.
 ///
@@ -1211,18 +1212,7 @@ impl AnytypeClient {
         self.config.limits.validate_name(&name, "space")?;
 
         let grpc = self.grpc_client().await?;
-        let mut fields = BTreeMap::new();
-        fields.insert(
-            "name".to_owned(),
-            prost_types::Value {
-                kind: Some(prost_types::value::Kind::StringValue(name.clone())),
-            },
-        );
-        let request = rpc::workspace::create::Request {
-            details: Some(prost_types::Struct { fields }),
-            use_case: rpc::object::import_use_case::request::UseCase::None as i32,
-            with_chat: true,
-        };
+        let request = chat_space_create_request(name.clone());
         let request = with_token_request(Request::new(request), grpc.token())?;
         let response = ClientCommandsClient::new(grpc.channel())
             .workspace_create(request)
@@ -1763,6 +1753,31 @@ impl AnytypeClient {
     }
 }
 
+fn chat_space_create_request(name: String) -> rpc::workspace::create::Request {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "name".to_owned(),
+        Value {
+            kind: Some(prost_types::value::Kind::StringValue(name)),
+        },
+    );
+    fields.insert(
+        SPACE_UX_TYPE_KEY.to_owned(),
+        Value {
+            kind: Some(prost_types::value::Kind::NumberValue(f64::from(
+                model::SpaceUxType::Chat as i32,
+            ))),
+        },
+    );
+    rpc::workspace::create::Request {
+        details: Some(prost_types::Struct { fields }),
+        use_case: rpc::object::import_use_case::request::UseCase::None as i32,
+        // Retain the legacy protocol flag alongside the detail. Heart 0.50.10
+        // selects chat UX from `spaceUxType` during workspace creation.
+        with_chat: true,
+    }
+}
+
 async fn search_archived_objects(
     client: &AnytypeClient,
     space_id: &str,
@@ -2195,6 +2210,24 @@ mod tests {
         use std::str::FromStr;
         assert_eq!(SpaceModel::from_str("space").unwrap(), SpaceModel::Space);
         assert_eq!(SpaceModel::from_str("chat").unwrap(), SpaceModel::Chat);
+    }
+
+    #[test]
+    fn chat_space_request_sends_ux_detail_and_legacy_flag() {
+        let request = chat_space_create_request("Chat name".to_owned());
+        let fields = request.details.expect("chat details").fields;
+        assert!(matches!(
+            fields.get("name").and_then(|value| value.kind.as_ref()),
+            Some(prost_types::value::Kind::StringValue(name)) if name == "Chat name"
+        ));
+        assert!(matches!(
+            fields
+                .get(SPACE_UX_TYPE_KEY)
+                .and_then(|value| value.kind.as_ref()),
+            Some(prost_types::value::Kind::NumberValue(value))
+                if *value == f64::from(model::SpaceUxType::Chat as i32)
+        ));
+        assert!(request.with_chat);
     }
 
     #[test]

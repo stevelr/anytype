@@ -147,6 +147,7 @@ pub use space_policy::{
 };
 
 const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+const RUNTIME_THREAD_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Run the any-mcp process command and return a process exit status.
 ///
@@ -249,11 +250,18 @@ fn start_server(
             return std::process::ExitCode::FAILURE;
         }
     };
-    if let Err(error) = runtime.block_on(run_server(arguments, keystore, acceptance_process)) {
-        tracing::error!(reason = %error, "any-mcp startup or service failure");
-        return std::process::ExitCode::FAILURE;
-    }
-    std::process::ExitCode::SUCCESS
+    let status = match runtime.block_on(run_server(arguments, keystore, acceptance_process)) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!(reason = %error, "any-mcp startup or service failure");
+            std::process::ExitCode::FAILURE
+        }
+    };
+    // Tokio's stdin adapter owns a blocking read thread that cannot be
+    // cancelled while a parent keeps the pipe open. Protocol and runtime work
+    // have already drained above, so bound only the executor-thread teardown.
+    runtime.shutdown_timeout(RUNTIME_THREAD_SHUTDOWN_TIMEOUT);
+    status
 }
 
 fn production_runtime() -> std::io::Result<tokio::runtime::Runtime> {
@@ -294,7 +302,15 @@ async fn run_server(
                 grpc_available = runtime.startup_status().grpc_available,
                 "authenticated Anytype runtime ready"
             );
-            serve_stdio(runtime, protocol_mode).await?;
+            let signal_runtime = runtime.clone();
+            let signals = tokio::spawn(async move {
+                runtime::wait_for_shutdown_signal().await;
+                signal_runtime.begin_shutdown();
+                tracing::info!(target: "any_mcp::stdio", "stdio_transport_stopping");
+            });
+            let result = serve_stdio(runtime, protocol_mode).await;
+            signals.abort();
+            result?;
             #[cfg(feature = "acceptance-harness")]
             drop(acceptance_gate_coordinator);
         }

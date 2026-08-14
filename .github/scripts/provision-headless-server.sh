@@ -14,10 +14,10 @@
 #
 # Appends to $GITHUB_ENV:
 #   <VAR_PREFIX>_ENV_FILE          sourceable env file with endpoints and keys
-#   <VAR_PREFIX>_REDACTED_LOG_FILE server log path (stands in for the reviewed
-#                                  log: with throwaway credentials on an
-#                                  ephemeral runner there is nothing durable
-#                                  to redact)
+#   <VAR_PREFIX>_REDACTED_LOG_FILE raw ephemeral server log path for bounded
+#                                  descriptor-based test audits
+#   <VAR_PREFIX>_REVIEWED_LOG_FILE content-free reviewed event stream for
+#                                  failure evidence and strict log consumers
 #
 # If ANYR_BIN names an existing anyr executable it is used for init-cli;
 # otherwise a debug anyr is built from the workspace.
@@ -37,7 +37,12 @@ sudo apt-get install -y -qq nftables socat
 
 umask 077
 server_log="$RUNNER_TEMP/anytype-headless-server.log"
+reviewed_log="$RUNNER_TEMP/anytype-headless-reviewed.log"
 : > "$server_log"
+: > "$reviewed_log"
+setsid python3 any-mcp/scripts/review-server-log.py \
+  "$server_log" "$reviewed_log" > /dev/null 2>&1 < /dev/null &
+reviewer_pid=$!
 ANYTYPE_CLI_BIN="${ANYTYPE_CLI_BIN:-anytype}"
 anytype_bin="$(command -v -- "$ANYTYPE_CLI_BIN")" || {
   printf 'anytype CLI executable is unavailable: %s\n' "$ANYTYPE_CLI_BIN" >&2
@@ -126,6 +131,10 @@ if [[ -z "$http_up" ]]; then
   tail -c 4096 -- "$server_log" >&2
   exit 1
 fi
+if ! kill -0 "$reviewer_pid" 2>/dev/null; then
+  printf '%s\n' "headless server log reviewer stopped unexpectedly" >&2
+  exit 1
+fi
 
 # The saved loopback endpoints hold on the host too, through the forwarders.
 # shellcheck disable=SC2016 # the reference expands when the file is sourced
@@ -134,4 +143,5 @@ printf 'export ANYTYPE_TEST_URL="$ANYTYPE_URL"\n' >> "$env_file"
 {
   printf '%s_ENV_FILE=%s\n' "$var_prefix" "$env_file"
   printf '%s_REDACTED_LOG_FILE=%s\n' "$var_prefix" "$server_log"
+  printf '%s_REVIEWED_LOG_FILE=%s\n' "$var_prefix" "$reviewed_log"
 } >> "$GITHUB_ENV"

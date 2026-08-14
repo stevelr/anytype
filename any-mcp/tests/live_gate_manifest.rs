@@ -410,7 +410,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     assert_eq!(
-        digest, "9b52548008c53a49c9ad225c832cd93f277c4154643221f5e0281f4dfddd1ca2",
+        digest, "a847f21ef6938c7426be615bb7e3a01f0ca812149e730b04b8e125e406e5bb87",
         "workflow policy is an exact reviewed representation; audit before updating this digest"
     );
     let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
@@ -462,6 +462,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         assert!(block.contains("reviewed-evidence.py start"));
         assert!(block.contains("reviewed-evidence.py capture"));
         assert!(block.contains("ANY_MCP_HEADLESS_EVIDENCE_CONTEXT"));
+        assert!(block.contains("ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"));
         assert!(block.contains("retention-days: 7"));
         assert!(block.contains("\"$RUNNER_TEMP\"/any-mcp-live-??????"));
         assert!(block.contains("systemctl --user show-environment"));
@@ -562,6 +563,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
 fn live_helpers_pin_counts_and_source_bound_fresh_evidence() {
     let runner = include_str!("../scripts/run-live-gate.py");
     let evidence = include_str!("../scripts/reviewed-evidence.py");
+    let reviewer = include_str!("../scripts/review-server-log.py");
     let cgroup = include_str!("../scripts/run-live-cgroup.sh");
     let helper_tests = include_str!("../scripts/test_live_gate_security.py");
 
@@ -601,6 +603,19 @@ fn live_helpers_pin_counts_and_source_bound_fresh_evidence() {
     assert!(helper_tests.contains("source.chmod(0o640)"));
     assert!(helper_tests.contains("PRIVATE_MALFORMED"));
     assert!(!evidence.contains("payload = payload + fresh"));
+    for required in [
+        "LINE_BYTES = 64 * 1024",
+        "O_NOFOLLOW",
+        "metadata.st_mode & 0o777 != 0o600",
+        "server_oversized",
+        "separators=(\",\", \":\")",
+    ] {
+        assert!(
+            reviewer.contains(required),
+            "missing server-log reviewer guard {required:?}"
+        );
+    }
+    assert!(!reviewer.contains("decode("));
     for required in [
         "systemd-run --user --scope",
         "--property=RuntimeMaxSec=1100s",

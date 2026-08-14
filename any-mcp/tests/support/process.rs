@@ -319,7 +319,7 @@ impl ProtocolProcess {
             Ok(bytes) => bytes,
             Err(error) => {
                 let transcript = self.redacted_transcript();
-                let output = self.shutdown(false, false).unwrap_or(ProcessOutput {
+                let output = self.shutdown(false, false, true).unwrap_or(ProcessOutput {
                     stdout: Vec::new(),
                     consumed_stdout: Vec::new(),
                     stderr: Vec::new(),
@@ -362,8 +362,15 @@ impl ProtocolProcess {
         self.failure.take()
     }
 
-    fn shutdown(&mut self, graceful: bool, require_success: bool) -> Result<ProcessOutput, String> {
-        drop(self.stdin.take());
+    fn shutdown(
+        &mut self,
+        graceful: bool,
+        require_success: bool,
+        close_stdin: bool,
+    ) -> Result<ProcessOutput, String> {
+        if close_stdin {
+            drop(self.stdin.take());
+        }
         let mut errors = Vec::new();
         let mut terminated_by_driver = false;
         let status = self.child.take().and_then(|mut child| {
@@ -375,7 +382,7 @@ impl ProtocolProcess {
                         Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
                         Ok(None) => {
                             terminated_by_driver = true;
-                            errors.push("any-mcp did not exit after clean stdin EOF".to_owned());
+                            errors.push("any-mcp did not exit after graceful shutdown".to_owned());
                             if let Err(error) = child.kill() {
                                 errors.push(format!("kill hung any-mcp child: {error}"));
                             }
@@ -451,9 +458,11 @@ impl ProtocolProcess {
             && !status.success()
         {
             errors.push(format!(
-                "any-mcp exited unsuccessfully after stdin EOF: {status}"
+                "any-mcp exited unsuccessfully after graceful shutdown: {status}"
             ));
         }
+
+        drop(self.stdin.take());
 
         let stdout = join_reader(self.stdout_thread.take(), "stdout", &mut errors);
         let stderr = join_reader(self.stderr_thread.take(), "stderr", &mut errors);
@@ -501,12 +510,38 @@ impl ProtocolProcess {
                 .send(())
                 .map_err(|_| "release paused production stdout reader".to_owned())?;
         }
-        self.shutdown(false, false)
+        self.shutdown(false, false, true)
+    }
+
+    /// Sends one Unix process signal while stdin remains open, then waits for
+    /// a successful bounded shutdown and returns the captured output.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub fn signal_and_finish(mut self, signal: i32) -> Result<ProcessOutput, String> {
+        let child = self
+            .child
+            .as_ref()
+            .ok_or_else(|| "signal target was absent".to_owned())?;
+        let process_id = i32::try_from(child.id())
+            .map_err(|_| "signal target identifier was out of range".to_owned())?;
+        // SAFETY: `kill` receives a positive process identifier owned by this
+        // harness and a caller-supplied platform signal number.
+        if unsafe { libc::kill(process_id, signal) } != 0 {
+            return Err(format!(
+                "signal production any-mcp child: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let output = self.shutdown(true, true, false)?;
+        if output.stdout != output.consumed_stdout {
+            return Err("any-mcp emitted unconsumed protocol output before shutdown".to_owned());
+        }
+        Ok(output)
     }
 
     /// Closes stdin and reports bounded shutdown defects without panicking.
     pub fn try_finish(mut self) -> Result<ProcessOutput, String> {
-        let output = self.shutdown(true, true)?;
+        let output = self.shutdown(true, true, true)?;
         if output.stdout != output.consumed_stdout {
             return Err("any-mcp emitted unconsumed protocol output before shutdown".to_owned());
         }
@@ -523,7 +558,7 @@ impl Drop for ProtocolProcess {
             || self.stdin.is_some()
             || self.stdout_thread.is_some()
             || self.stderr_thread.is_some())
-            && let Err(error) = self.shutdown(false, false)
+            && let Err(error) = self.shutdown(false, false, true)
             && !thread::panicking()
         {
             panic!("bounded dropped protocol process cleanup failed: {error}");

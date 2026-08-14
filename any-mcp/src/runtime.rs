@@ -1446,6 +1446,30 @@ pub async fn serve_stdio(
     crate::stdio::serve_stdio(server, protocol_mode).await
 }
 
+/// Waits for the process interrupt signal, or the terminate signal on Unix.
+pub(crate) async fn wait_for_shutdown_signal() {
+    let interrupt = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(terminate) => terminate,
+                Err(_) => {
+                    let _ = interrupt.await;
+                    return;
+                }
+            };
+        tokio::select! {
+            _ = interrupt => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = interrupt.await;
+    }
+}
+
 /// Runs an initialized handler over an arbitrary rmcp transport.
 ///
 /// This seam supports protocol lifecycle tests without redirecting process

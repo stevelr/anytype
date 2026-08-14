@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -16,10 +17,15 @@ SCRIPT_DIR = Path(__file__).parent
 sys.dont_write_bytecode = True
 RUNNER = SCRIPT_DIR / "run-live-gate.py"
 EVIDENCE = SCRIPT_DIR / "reviewed-evidence.py"
+REVIEWER = SCRIPT_DIR / "review-server-log.py"
 spec = importlib.util.spec_from_file_location("reviewed_evidence", EVIDENCE)
 assert spec is not None and spec.loader is not None
 reviewed_evidence = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(reviewed_evidence)
+reviewer_spec = importlib.util.spec_from_file_location("review_server_log", REVIEWER)
+assert reviewer_spec is not None and reviewer_spec.loader is not None
+review_server_log = importlib.util.module_from_spec(reviewer_spec)
+reviewer_spec.loader.exec_module(review_server_log)
 
 
 class RunnerTests(unittest.TestCase):
@@ -125,6 +131,55 @@ class RunnerTests(unittest.TestCase):
             result.stderr,
             "required live gate discussions failed reason=runner_bound\n",
         )
+
+
+class ReviewerTests(unittest.TestCase):
+    def test_raw_content_is_reduced_to_fixed_categories(self) -> None:
+        cases = [
+            (b'{"level":"INFO","msg":"PRIVATE_SECRET"}', b'"server_event"'),
+            (b'{"level":"ERROR","msg":"bearer PRIVATE_SECRET"}', b'"server_error"'),
+            (b"runtime panic PRIVATE_SECRET", b'"server_fatal"'),
+        ]
+        for raw, category in cases:
+            reviewed = review_server_log.review_line(raw)
+            self.assertIn(category, reviewed)
+            self.assertNotIn(b"PRIVATE_SECRET", reviewed)
+            self.assertLessEqual(len(reviewed), 256)
+
+    def test_oversized_input_has_a_fixed_error_category(self) -> None:
+        reviewed = review_server_log.review_line(b"PRIVATE_SECRET", oversized=True)
+        self.assertIn(b'"severity":"error"', reviewed)
+        self.assertIn(b'"category":"server_oversized"', reviewed)
+        self.assertNotIn(b"PRIVATE_SECRET", reviewed)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process and mode policy")
+    def test_follower_emits_only_reviewed_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, destination = root / "raw", root / "reviewed"
+            source.write_bytes(b"")
+            destination.write_bytes(b"")
+            source.chmod(0o600)
+            destination.chmod(0o600)
+            process = subprocess.Popen(
+                [sys.executable, REVIEWER, source, destination],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                with source.open("ab") as stream:
+                    stream.write(b'PRIVATE_SECRET {"level":"ERROR"}\n')
+                    stream.flush()
+                deadline = time.monotonic() + 2
+                while destination.stat().st_size == 0 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                reviewed = destination.read_bytes()
+                self.assertIn(b'"category":"server_error"', reviewed)
+                self.assertNotIn(b"PRIVATE_SECRET", reviewed)
+                self.assertIsNone(process.poll())
+            finally:
+                process.terminate()
+                process.wait(timeout=2)
 
 
 class EvidenceTests(unittest.TestCase):

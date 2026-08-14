@@ -25,6 +25,11 @@ while waiting for a valid initialize request. The preview retains discovery,
 per-request metadata, result discrimination, cache hints, and inline version
 errors. Both modes use the same handler and catalog implementation.
 
+Closing stdin, `SIGINT`, and Unix `SIGTERM` are clean shutdown paths before or
+after protocol initialization. They stop admission, cancel active work, drain
+runtime-owned artifact settlement and staging work, and return a successful
+process status without writing protocol-invalid diagnostics to stdout.
+
 Both eras return one JSON-RPC error `-32700` with an explicitly present null
 response ID for each syntactically malformed newline frame and continue reading
 the stream. The stable path uses a bounded decoder in front of rmcp dispatch,
@@ -69,11 +74,13 @@ through production stdio, then independently verify stored state through
 ```sh
 source .test-env
 export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
-# Set redacted_log to the absolute mode-0600 reviewed server event file.
-export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$redacted_log"
+# Set raw_log and reviewed_log to distinct absolute mode-0600 files. Run
+# review-server-log.py as a supervisor-owned background process before tests.
+export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$raw_log"
+export ANY_MCP_HEADLESS_REVIEWED_LOG_FILE="$reviewed_log"
 export ANY_MCP_LIVE_PRIVATE_DIR="$(mktemp -d)"
 chmod 0700 "$ANY_MCP_LIVE_PRIVATE_DIR"
-python3 any-mcp/scripts/reviewed-evidence.py start "$redacted_log" \
+python3 any-mcp/scripts/reviewed-evidence.py start "$reviewed_log" \
   "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" > "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"
 set -a; source "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"; set +a
 bash any-mcp/scripts/run-live-cgroup.sh test stdio -- \

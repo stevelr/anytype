@@ -999,6 +999,49 @@ fn production_stdio_read_only_mode_supports_stateless_2026_revision() {
     run_modern_stdio_acceptance(true);
 }
 
+#[cfg(unix)]
+fn assert_signal_shutdown(output: &process_support::ProcessOutput) {
+    assert_eq!(output.exit_category, "success");
+    assert_stdout_purity(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stdio_transport_stopping"),
+        "signal shutdown emits its fixed diagnostic"
+    );
+    for secret in [HTTP_TOKEN, INPUT_SECRET, DOCUMENT_BODY] {
+        assert!(!stderr.contains(secret), "signal diagnostic is redacted");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn initialized_stable_stdio_exits_successfully_on_sigint_with_stdin_open() {
+    let fixture = HttpFixture::start();
+    let mut process = ProtocolProcess::start(&fixture, true);
+    initialize_legacy_session(&mut process);
+
+    let output = process
+        .signal_and_finish(libc::SIGINT)
+        .expect("SIGINT stops production stdio cleanly");
+    fixture.finish();
+    assert_signal_shutdown(&output);
+}
+
+#[cfg(unix)]
+#[test]
+fn initialized_preview_stdio_exits_successfully_on_sigterm_with_stdin_open() {
+    let fixture = HttpFixture::start();
+    let mut process = ProtocolProcess::start_preview(&fixture, true);
+    let discovered = process.modern_request(1, "server/discover", json!({"_meta": modern_meta()}));
+    assert_eq!(discovered["result"]["resultType"], "complete");
+
+    let output = process
+        .signal_and_finish(libc::SIGTERM)
+        .expect("SIGTERM stops production stdio cleanly");
+    fixture.finish();
+    assert_signal_shutdown(&output);
+}
+
 #[test]
 fn compact_catalog_is_identical_on_session_and_stateless_transports() {
     let fixture = HttpFixture::start();

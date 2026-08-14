@@ -8,6 +8,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Shut down stdio cleanly on `SIGINT` and, on Unix, `SIGTERM`, including before
+  protocol initialization and while serving either stable or preview traffic.
+  Shutdown rejects new work, cancels in-flight requests, drains owned artifact
+  settlement and staging work, and returns a successful process status.
+- Derive a separate content-free reviewed event stream from disposable
+  Anytype's raw server log. Live failure evidence and body-log assertions use
+  only fixed severity/component/category records, while descriptor-based
+  artifact audits retain access to the ephemeral raw log they must inspect.
 - Drive delete deadline tests with paused Tokio time so runner scheduling
   cannot strand their phase-entry notification. Private live-gate failures
   report fixed runner categories and strict compiled test names without

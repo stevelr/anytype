@@ -693,9 +693,11 @@ worker; physical commitment remains operating-system dependent.
 
 Every workflow handler uses the runtime execution seam, which includes permit
 wait in its timeout and observes request cancellation. The client
-is shared without a mutex held across upstream awaits. Closing stdin cleanly
-closes the permit pool, signals the process shutdown token, cancels running and
-waiting operations, and drains the selected protocol service.
+is shared without a mutex held across upstream awaits. Closing stdin, receiving
+`SIGINT`, or receiving `SIGTERM` cleanly closes the permit pool, signals the
+process shutdown token, cancels running and waiting operations, drains owned
+artifact settlement and staging work, and exits successfully. `SIGTERM` is
+supported on Unix; Windows uses its interrupt signal support.
 
 Each operation emits a structured completion diagnostic by default with a
 validated static operation name, a monotonic per-runtime server correlation
@@ -1802,12 +1804,14 @@ root:
 
 ```sh
 source .test-env
-# Set redacted_log to the absolute mode-0600 reviewed server event file.
+# Set raw_log and reviewed_log to distinct absolute mode-0600 files. Run
+# review-server-log.py as a supervisor-owned background process before tests.
 export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
-export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$redacted_log"
+export ANY_MCP_HEADLESS_REDACTED_LOG_FILE="$raw_log"
+export ANY_MCP_HEADLESS_REVIEWED_LOG_FILE="$reviewed_log"
 export ANY_MCP_LIVE_PRIVATE_DIR="$(mktemp -d)"
 chmod 0700 "$ANY_MCP_LIVE_PRIVATE_DIR"
-python3 any-mcp/scripts/reviewed-evidence.py start "$redacted_log" \
+python3 any-mcp/scripts/reviewed-evidence.py start "$reviewed_log" \
   "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" > "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"
 set -a; source "$ANY_MCP_LIVE_PRIVATE_DIR/evidence.env"; set +a
 bash any-mcp/scripts/run-live-cgroup.sh test direct -- \
@@ -2023,10 +2027,12 @@ prefix-authorized disposable space, a private `0700` policy tree with `0600`
 sources and operator policy, immediate registration of every created object and
 file, exact teardown when the fixture is dropped, and rejection of skipped
 disposable admission. The protected gate requires
-`ANY_MCP_HEADLESS_REDACTED_LOG_FILE` to name its captured Anytype server log.
-Direct and spawned owners audit only the descriptor-bound appended window and
-fail on any panic, fatal, or error class outside the already isolated upstream
-set; only counts and fixed category names are reported, never log lines.
+`ANY_MCP_HEADLESS_REDACTED_LOG_FILE` to name its ephemeral raw Anytype server
+log and `ANY_MCP_HEADLESS_REVIEWED_LOG_FILE` to name its separately generated,
+content-free JSONL event stream. Descriptor-bound artifact audits inspect the
+raw appended window because their classification owns the required allow-list;
+body-log assertions and retained failure evidence consume only fixed reviewed
+severity, component, and category fields. Neither path prints log lines.
 
 Select the live acceptance targets explicitly: six direct-router cases by
 their exact paths, and the five spawned cases by their shared prefix:
@@ -2090,28 +2096,20 @@ contains exactly one path pointing only to that snapshot. Plain defaults and
 missing, empty, or duplicate file/SQLite paths are rejected because they cannot
 be isolated safely; keep the source quiescent while the snapshot is created.
 
-The dedicated `headless-e2e` CI job is intentionally Linux/self-hosted rather
-than part of the portable hosted-runner matrix. Runners labeled
-`anytype-headless` must provide a running isolated Anytype server and set the
-repository variable `ANY_MCP_HEADLESS_ENV_FILE` to a readable, protected
-environment file with the same endpoint, keystore, and test-space settings as
-`.test-env`. It must also set `ANY_MCP_HEADLESS_REDACTED_LOG_FILE` to an
-absolute, readable runner-produced JSONL event file with credentials and
-content removed. The job records the opened regular file's device, inode,
-length, and bounded trailing anchor before testing. The body audit accepts only
-allow-listed events appended after that offset when the identity and anchor are
+The dedicated live CI jobs run on GitHub-hosted Linux runners after the
+portable matrix. Their provisioner starts a fresh namespace-isolated Anytype
+server, creates throwaway credentials, and publishes the protected environment
+and both mode-0600 log paths. A descriptor-bound reviewer converts each raw
+server line into fixed severity, component, and category fields without
+copying content. The body audit accepts only reviewed events appended after
+its recorded offset when file identity and bounded trailing anchor are
 unchanged. On failure, CI validates at most 64 KiB from that fresh reviewed
 window and retains only fixed validity categories and event counters in a
 mode-0600 artifact for seven days; it never uploads raw server-log bytes. Each
-live driver runs in a unique transient user scope with
-an exact-unit cleanup trap and a manager-enforced runtime ceiling, so runners
-must provide an available systemd user manager. Protect the `anytype-headless`
-environment so untrusted code cannot reach the self-hosted runner or
-credentials. Both live jobs run only after the hosted contract matrix on a
-manual dispatch or a push to `main`; pull requests and tag pushes run the
-hosted offline inventory only. The clean-server job first invokes an
-operator-owned absolute reset script, then runs the same three explicit
-targets.
+live driver runs in a unique transient user scope with an exact-unit cleanup
+trap and a manager-enforced runtime ceiling. The jobs are manual-only during
+cross-platform qualification; their tier selector runs either the required
+live row, the clean-server soak row, or both.
 
 `space_list` continuation uses two disposable spaces created and immediately
 registered through the test-only `anytype-api` fixture lifecycle. Their complete

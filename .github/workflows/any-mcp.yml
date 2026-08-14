@@ -187,6 +187,9 @@ jobs:
           test -n "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          test -n "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"
+          test "${ANY_MCP_HEADLESS_REVIEWED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"
+          test -r "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"
           set -a
           source "$ANY_MCP_HEADLESS_ENV_FILE"
           set +a
@@ -199,7 +202,7 @@ jobs:
           unset test_prefix
           context="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context"
           python3 any-mcp/scripts/reviewed-evidence.py start \
-            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" "$context" >> "$GITHUB_ENV"
+            "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE" "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_EVIDENCE_CONTEXT="$context"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER
           ANY_MCP_HEADLESS_LOG_RUN_MARKER="$(sed -n 's/^run_marker=//p' "$context")"
@@ -220,13 +223,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE:-}" ]]; then
+          if [[ -z "${ANY_MCP_HEADLESS_REVIEWED_LOG_FILE:-}" ]]; then
             printf '%s\n' "no server log was provisioned before the failure" >&2
             exit 0
           fi
           artifact="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-server-events.txt"
           python3 any-mcp/scripts/reviewed-evidence.py capture \
-            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" \
+            "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE" \
             "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" "$artifact"
           printf 'ANY_MCP_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
 
@@ -334,6 +337,9 @@ jobs:
           test -n "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
+          test -n "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"
+          test "${ANY_MCP_HEADLESS_REVIEWED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"
+          test -r "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"
           set -a
           source "$ANY_MCP_HEADLESS_ENV_FILE"
           set +a
@@ -346,7 +352,7 @@ jobs:
           unset test_prefix
           context="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context"
           python3 any-mcp/scripts/reviewed-evidence.py start \
-            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" "$context" >> "$GITHUB_ENV"
+            "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE" "$context" >> "$GITHUB_ENV"
           export ANY_MCP_HEADLESS_EVIDENCE_CONTEXT="$context"
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER
           ANY_MCP_HEADLESS_LOG_RUN_MARKER="$(sed -n 's/^run_marker=//p' "$context")"
@@ -367,13 +373,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE:-}" ]]; then
+          if [[ -z "${ANY_MCP_HEADLESS_REVIEWED_LOG_FILE:-}" ]]; then
             printf '%s\n' "no server log was provisioned before the failure" >&2
             exit 0
           fi
           artifact="$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-server-events.txt"
           python3 any-mcp/scripts/reviewed-evidence.py capture \
-            "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE" \
+            "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE" \
             "$ANY_MCP_LIVE_PRIVATE_DIR/reviewed-context" "$artifact"
           printf 'ANY_MCP_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
 
