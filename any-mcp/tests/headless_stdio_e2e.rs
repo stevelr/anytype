@@ -100,7 +100,7 @@ use support::{
 const STDIO_RESPONSE_DEADLINE: Duration = Duration::from_secs(30);
 #[cfg(feature = "acceptance-harness")]
 const GATED_STDIO_RESPONSE_DEADLINE: Duration = Duration::from_secs(60);
-#[cfg(feature = "acceptance-harness")]
+#[cfg(all(unix, feature = "acceptance-harness"))]
 const REVIEWED_LOG_WINDOW_LIMIT: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
