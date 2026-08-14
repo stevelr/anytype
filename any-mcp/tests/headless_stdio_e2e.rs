@@ -97,6 +97,12 @@ use support::{
     process::{ProcessOutput, ProtocolProcess},
 };
 
+const STDIO_RESPONSE_DEADLINE: Duration = Duration::from_secs(30);
+#[cfg(feature = "acceptance-harness")]
+const GATED_STDIO_RESPONSE_DEADLINE: Duration = Duration::from_secs(60);
+#[cfg(feature = "acceptance-harness")]
+const REVIEWED_LOG_WINDOW_LIMIT: usize = 32 * 1024 * 1024;
+
 #[derive(Clone, Copy)]
 struct DriverOptions {
     profile: &'static str,
@@ -514,7 +520,16 @@ impl StdioDriver {
         options: DriverOptions,
         keystore: Option<TemporaryKeystore>,
     ) -> Self {
-        let process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(30));
+        Self::spawn_with_response_deadline(command, options, keystore, STDIO_RESPONSE_DEADLINE)
+    }
+
+    fn spawn_with_response_deadline(
+        command: Command,
+        options: DriverOptions,
+        keystore: Option<TemporaryKeystore>,
+        response_deadline: Duration,
+    ) -> Self {
+        let process = ProtocolProcess::spawn_with_deadline(command, response_deadline);
         Self {
             process,
             next_id: 1,
@@ -1631,13 +1646,15 @@ fn inspect_reviewed_body_server_log_at(
                     sentinel_assertion("reviewed headless server-log window was unreadable")
                 })?;
             let mut log = Vec::new();
-            file.take(524_289).read_to_end(&mut log).map_err(|_| {
-                sentinel_assertion("reviewed headless server-log window was unreadable")
-            })?;
+            file.take(REVIEWED_LOG_WINDOW_LIMIT as u64 + 1)
+                .read_to_end(&mut log)
+                .map_err(|_| {
+                    sentinel_assertion("reviewed headless server-log window was unreadable")
+                })?;
             log
         };
         if log.is_empty()
-            || log.len() > 524_288
+            || log.len() > REVIEWED_LOG_WINDOW_LIMIT
             || std::str::from_utf8(&log).is_err()
             || secrets
                 .iter()
@@ -2572,6 +2589,14 @@ fn spawn_disposable_artifact_driver_configured(
     if let Some(config) = policy.selected_config_path() {
         command.env("ANY_MCP_CONFIG", config);
     }
+    let response_deadline = if gate.is_some() {
+        // The private production gate can wait 30 seconds for its release.
+        // Keep the enclosing protocol deadline strictly larger so the harness
+        // reports a gate failure instead of racing its own response timeout.
+        GATED_STDIO_RESPONSE_DEADLINE
+    } else {
+        STDIO_RESPONSE_DEADLINE
+    };
     if let Some((gate, point, key)) = gate {
         gate.configure(&mut command, point, key);
     }
@@ -2579,7 +2604,12 @@ fn spawn_disposable_artifact_driver_configured(
         // The fixture tree must outlive the child so no export or staged byte
         // is removed while the production process still holds its roots.
         let mut retained_policy = Some(policy);
-        let driver = Arc::new(Mutex::new(Some(StdioDriver::spawn(command, options, None))));
+        let driver = Arc::new(Mutex::new(Some(StdioDriver::spawn_with_response_deadline(
+            command,
+            options,
+            None,
+            response_deadline,
+        ))));
         let stopped = Arc::clone(&driver);
         (driver, move || {
             *cleanup_record.lock().expect("child cleanup record lock") =
@@ -7388,7 +7418,7 @@ fn run_dynamic_symlink_startup_rejection(
         .lines()
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
-    if !matches!(
+    let diagnostic_matches = matches!(
         lines.as_slice(),
         [line]
             if line.strip_suffix(&expected_suffix).is_some_and(|prefix| {
@@ -7396,7 +7426,22 @@ fn run_dynamic_symlink_startup_rejection(
                     .split_ascii_whitespace()
                     .any(|field| field == "ERROR")
             })
-    ) {
+    );
+    if !diagnostic_matches {
+        eprintln!(
+            "dynamic symlink startup target={target:?} diagnostic_lines={} expected_category_present={} runtime_root_category_present={} runtime_staging_category_present={} invalid_staging_category_present={}",
+            lines.len(),
+            lines.iter().any(|line| line.ends_with(&expected_suffix)),
+            lines.iter().any(|line| line.ends_with(
+                "any-mcp startup or service failure reason=unable to initialize configured artifact roots"
+            )),
+            lines.iter().any(|line| line.ends_with(
+                "any-mcp startup or service failure reason=unable to initialize configured artifact staging"
+            )),
+            lines.iter().any(|line| line.ends_with(
+                "any-mcp startup or service failure reason=invalid staging policy"
+            )),
+        );
         return Err(sentinel_assertion(
             "dynamic symlink startup category diverged",
         ));
@@ -7569,13 +7614,13 @@ async fn headless_artifact_adversarial_spawned_stdio_scenarios() {
                         let sym11 = run_dynamic_symlink_startup_rejection(
                             ctx.as_ref(),
                             ArtifactSymlinkStartupTarget::ImportRoot,
-                            "invalid any-mcp artifact root",
+                            "unable to initialize configured artifact roots",
                             &callback_audit_needles,
                         )?;
                         let sym12 = run_dynamic_symlink_startup_rejection(
                             ctx.as_ref(),
                             ArtifactSymlinkStartupTarget::StagingRoot,
-                            "invalid any-mcp staging policy",
+                            "invalid staging policy",
                             &callback_audit_needles,
                         )?;
                         let startup =

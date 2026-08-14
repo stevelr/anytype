@@ -541,6 +541,8 @@ declared, root-based calls explain that you must select a policy file with
 SHA-256 before mutation. Exports use create-new publication and never overwrite
 an existing destination. Document update requires the current canonical body
 hash and skips the mutation when the replacement is already canonical.
+A staged source for that no-op is consumed under the same idempotency
+operation, so replay does not require a new mutation candidate.
 
 Remote staging binds only a configured loopback address. An external deployment
 terminates HTTPS in a separately managed reverse proxy and points
@@ -1835,7 +1837,10 @@ an unexpected executable count. The hosted test lane compares every ignored
 library and whole-binary test name with closed manifests without contacting a
 server. A failure reports a fixed runner category and, when available, matching
 compiled test names; its captured transcript remains private. Protected CI
-therefore cannot pass without running the disposable callbacks.
+therefore cannot pass without running the disposable callbacks. Reviewed-log
+validation reads at most 32 MiB from the run-bound source identity, accepts
+only the closed event schema, and exposes only an event count in the bounded
+failure artifact.
 
 The selectable `headless_direct_standard_*` and
 `headless_stdio_standard_*` cases cover discovery, document/resource access,

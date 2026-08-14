@@ -905,20 +905,18 @@ fn durable_shape_valid(document: &DurableStageRecord) -> bool {
                 && offset_complete
                 && has_observed
                 && has_operation
-                && has_candidate
                 && document.candidate_cleanup.is_none()
                 && no_cleanup
-                && document.uncertainty.is_none()
+                && ((has_candidate && document.uncertainty.is_none())
+                    || (!has_candidate && document.uncertainty.as_deref() == Some("no_op")))
         }
         DurableStageState::CleanupPending => {
             matches!(
                 document.cleanup_evidence.as_deref(),
                 Some("tombstone_pending" | "pathname_authority_closed")
-            ) && document
-                .uncertainty
-                .as_deref()
-                .is_none_or(|value| matches!(value, "pre_dispatch" | "mutation_dispatched"))
-                && candidate_cleanup_valid
+            ) && document.uncertainty.as_deref().is_none_or(|value| {
+                matches!(value, "pre_dispatch" | "mutation_dispatched" | "no_op")
+            }) && candidate_cleanup_valid
         }
         // This is an in-memory state only. Persisting it cannot prove which
         // side of an atomic publication became durable.
@@ -2733,6 +2731,19 @@ impl ArtifactStaging {
     /// Marks one verified import source consumed while retaining the exact
     /// metadata required for same-key replay.
     pub(crate) async fn consume(&self, source: &mut StageSource) -> Result<(), StagingError> {
+        self.consume_with_disposition(source, false).await
+    }
+
+    /// Consumes a verified no-op document source without inventing a mutation candidate.
+    pub(crate) async fn consume_no_op(&self, source: &mut StageSource) -> Result<(), StagingError> {
+        self.consume_with_disposition(source, true).await
+    }
+
+    async fn consume_with_disposition(
+        &self,
+        source: &mut StageSource,
+        no_op: bool,
+    ) -> Result<(), StagingError> {
         if !matches!(*source.lease, RecordState::Reconciliation { .. }) {
             return Err(StagingError::NotFound);
         }
@@ -2755,7 +2766,7 @@ impl ArtifactStaging {
             .persist_transition(&source.record_owner, |document| {
                 document.state = DurableStageState::Consumed;
                 document.operation_fingerprint = Some(bytes_hex(&source.operation));
-                document.uncertainty = None;
+                document.uncertainty = no_op.then(|| "no_op".to_owned());
             })
             .await
         {
@@ -4088,6 +4099,14 @@ mod tests {
             .consume(&mut source)
             .await
             .expect("consume source");
+        let consumed = source.record_owner.durable.lock().await.document.clone();
+        assert!(durable_shape_valid(&consumed));
+        let mut no_op_consumed = consumed.clone();
+        no_op_consumed.candidate_id = None;
+        no_op_consumed.uncertainty = Some("no_op".to_owned());
+        assert!(durable_shape_valid(&no_op_consumed));
+        no_op_consumed.uncertainty = None;
+        assert!(!durable_shape_valid(&no_op_consumed));
         drop(source);
         let same = test
             .staging

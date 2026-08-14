@@ -2786,6 +2786,20 @@ impl PreparedDocument {
             .map_err(classify_staging_error)?;
         Ok(true)
     }
+
+    async fn consume_staged_no_op(
+        &mut self,
+        runtime: &RuntimeContext,
+    ) -> Result<bool, ArtifactToolError> {
+        let PreparedImport::Staged(source) = &mut self.source else {
+            return Ok(false);
+        };
+        staging(runtime)?
+            .consume_no_op(source)
+            .await
+            .map_err(classify_staging_error)?;
+        Ok(true)
+    }
 }
 
 async fn verify_document_source_before_dispatch(
@@ -3418,7 +3432,7 @@ async fn document_import_update(
             &source,
         )
         .await?;
-        let consumed = source.consume_staged(runtime).await?;
+        let consumed = source.consume_staged_no_op(runtime).await?;
         let output = document_output(
             &space_id,
             &object_id,

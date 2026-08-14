@@ -276,6 +276,28 @@ class EvidenceTests(unittest.TestCase):
                     b"any-mcp reviewed failure evidence\nreviewed_log_invalid\nevent_count=0\n",
                 )
 
+    def test_oversized_fresh_window_is_never_disclosed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, context, artifact = (
+                root / "source-oversized",
+                root / "context-oversized",
+                root / "artifact-oversized",
+            )
+            source.write_bytes(b"baseline\n")
+            source.chmod(0o600)
+            with contextlib.redirect_stdout(io.StringIO()):
+                reviewed_evidence.start(source, context)
+            with source.open("ab") as output:
+                output.truncate(
+                    source.stat().st_size + reviewed_evidence.FRESH_ARTIFACT_LIMIT + 1
+                )
+            reviewed_evidence.capture(source, context, artifact)
+            self.assertEqual(
+                artifact.read_bytes(),
+                b"any-mcp reviewed failure evidence\nreviewed_log_invalid\nevent_count=0\n",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

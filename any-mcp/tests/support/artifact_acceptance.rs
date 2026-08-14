@@ -4374,6 +4374,7 @@ pub async fn run_artifact_client_roots_scenario(
         return Err("a read-only status projection requested a client-root snapshot".to_owned());
     }
 
+    let repeated_source = seed_distinct_import_source(run.policy, "client-roots-repeat")?;
     let import_before = RootInventory::capture(run.policy.import_root())?;
     let export_before = run.policy.export_snapshot()?;
 
@@ -4436,7 +4437,6 @@ pub async fn run_artifact_client_roots_scenario(
 
     // A second local operation must reuse the frozen session decision: it
     // neither re-queries the client nor observes a widened authority.
-    let repeated_source = seed_distinct_import_source(run.policy, "client-roots-repeat")?;
     let repeated = driver
         .call_tool(
             "file_import",
@@ -7156,13 +7156,9 @@ pub fn record_artifact_dynamic_filesystem_startup_cases(
         (
             AdversarialCaseId::Sym11,
             sym11,
-            "invalid any-mcp artifact root",
+            "unable to initialize configured artifact roots",
         ),
-        (
-            AdversarialCaseId::Sym12,
-            sym12,
-            "invalid any-mcp staging policy",
-        ),
+        (AdversarialCaseId::Sym12, sym12, "invalid staging policy"),
     ] {
         match observed {
             ArtifactStartupCaseOutcome::Rejected(category) if category == expected => {
@@ -10023,6 +10019,7 @@ impl DocumentPlane<'_> {
                 }),
             )
             .await
+            .map_err(|error| format!("document {label}+{} update failed: {error}", self.plane))
     }
 }
 
@@ -12842,8 +12839,8 @@ mod tests {
     #[test]
     fn dynamic_startup_evidence_rejects_forged_categories_and_capabilities() {
         let exact = record_artifact_dynamic_filesystem_startup_cases(
-            ArtifactStartupCaseOutcome::Rejected("invalid any-mcp artifact root"),
-            ArtifactStartupCaseOutcome::Rejected("invalid any-mcp staging policy"),
+            ArtifactStartupCaseOutcome::Rejected("unable to initialize configured artifact roots"),
+            ArtifactStartupCaseOutcome::Rejected("invalid staging policy"),
         )
         .expect("record exact startup evidence");
         assert_eq!(
@@ -12852,8 +12849,8 @@ mod tests {
         );
         assert!(
             record_artifact_dynamic_filesystem_startup_cases(
-                ArtifactStartupCaseOutcome::Rejected("invalid any-mcp staging policy"),
-                ArtifactStartupCaseOutcome::Rejected("invalid any-mcp staging policy"),
+                ArtifactStartupCaseOutcome::Rejected("invalid staging policy"),
+                ArtifactStartupCaseOutcome::Rejected("invalid staging policy"),
             )
             .is_err()
         );
@@ -12861,7 +12858,7 @@ mod tests {
             assert!(
                 record_artifact_dynamic_filesystem_startup_cases(
                     ArtifactStartupCaseOutcome::Unsupported,
-                    ArtifactStartupCaseOutcome::Rejected("invalid any-mcp staging policy"),
+                    ArtifactStartupCaseOutcome::Rejected("invalid staging policy"),
                 )
                 .is_err()
             );

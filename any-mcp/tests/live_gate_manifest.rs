@@ -588,7 +588,7 @@ fn live_helpers_pin_counts_and_source_bound_fresh_evidence() {
         "metadata.st_ino",
         "metadata.st_size < start_bytes",
         "hashlib.sha256(anchor).hexdigest()",
-        "FRESH_ARTIFACT_LIMIT = 64_000",
+        "FRESH_ARTIFACT_LIMIT = 32 * 1024 * 1024",
         "ARTIFACT_LIMIT = 65_536",
         "reviewed_log_invalid",
         "reviewed_log_unavailable",

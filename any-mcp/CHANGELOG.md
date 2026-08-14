@@ -8,6 +8,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Persist staged no-op document updates as an explicit no-op consumed state,
+  preserving same-key replay without inventing a mutation candidate. Artifact
+  acceptance seeds all client-root inputs before its immutability snapshot and
+  recognizes symlink-root rejection at the runtime activation boundary. Gated
+  race cases now keep their protocol deadline above the production gate bound,
+  while reviewed-log validation accommodates the full serialized live suite
+  without relaxing its closed event schema or bounded failure artifact.
 - Shut down stdio cleanly on `SIGINT` and, on Unix, `SIGTERM`, including before
   protocol initialization and while serving either stable or preview traffic.
   Shutdown rejects new work, cancels in-flight requests, drains owned artifact

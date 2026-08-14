@@ -13,7 +13,7 @@ from pathlib import Path
 
 ANCHOR_LIMIT = 4096
 ARTIFACT_LIMIT = 65_536
-FRESH_ARTIFACT_LIMIT = 64_000
+FRESH_ARTIFACT_LIMIT = 32 * 1024 * 1024
 ALLOWED_EVENT_KEYS = {"timestamp", "severity", "component", "category", "fixture_id"}
 CREDENTIAL_LIKE = re.compile(
     r"(?i)(authorization|bearer|password|secret|token|api[_-]?key)|"
