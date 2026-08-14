@@ -23,10 +23,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   Anytype's raw server log. Live failure evidence and body-log assertions use
   only fixed severity/component/category records, while descriptor-based
   artifact audits retain access to the ephemeral raw log they must inspect.
-- Drive delete deadline tests with paused Tokio time so runner scheduling
-  cannot strand their phase-entry notification. Private live-gate failures
-  report fixed runner categories and strict compiled test names without
-  exposing transcripts, and only typed disposable skips fail admission.
+- Drive delete deadline tests directly through pending post-dispatch futures
+  under paused Tokio time, without scheduler-dependent notification handoffs.
+  Private live-gate failures report fixed runner categories and strict compiled
+  test names without exposing transcripts, and only typed disposable skips fail
+  admission.
 - Let disposable headless live workflows select the Anytype CLI through
   `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
 - Bind staged document creates and updates to their idempotency operation

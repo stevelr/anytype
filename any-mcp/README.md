@@ -1194,15 +1194,16 @@ can still evade it. A successful result additionally requires bounded exact
 GET verification to observe authoritative absence. A lost, malformed,
 cancelled, or timed-out DELETE response remains mutation-indeterminate even if
 verification later observes absence; the handler never retries DELETE.
-Accepted-but-unverified deletion is also indeterminate. The result contains
-only resolved identities, `deleted: true`, and the accepted prior timestamp;
-message content never enters results or diagnostics. Each verification read
-is capped by both the remaining three-second/ten-attempt verification budget
-and the common request deadline. A stable-ID invocation admits at most 12
-logical operations and 67 physical attempts; maximum name resolution raises
-those aggregate ceilings to 23 and 133 respectively, with exactly one physical
-DELETE in either case. The complete production `chats` registry composes this
-slice without broadening its contract.
+Accepted-but-unverified deletion is also indeterminate. Cancellation, timeout,
+or shutdown during post-dispatch verification preserves that outcome. The
+result contains only resolved identities, `deleted: true`, and the accepted
+prior timestamp; message content never enters results or diagnostics. Each
+verification read is capped by both the remaining three-second/ten-attempt
+verification budget and the common request deadline. A stable-ID invocation
+admits at most 12 logical operations and 67 physical attempts; maximum name
+resolution raises those aggregate ceilings to 23 and 133 respectively, with
+exactly one physical DELETE in either case. The complete production `chats`
+registry composes this slice without broadening its contract.
 
 The production `schema` registry includes `property_create` and
 `property_update` through `anytype-api` only. Create accepts every closed

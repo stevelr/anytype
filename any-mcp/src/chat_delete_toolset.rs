@@ -1040,31 +1040,18 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn handler_delete_deadline_is_post_dispatch_indeterminate() {
-        let entered = Arc::new(Notify::new());
-        let delete_entered = entered.clone();
         let progress = MutationProgress::new();
-        let task_progress = progress.clone();
         let deadline = Instant::now() + Duration::from_millis(100);
-        let task = tokio::spawn(async move {
-            execute_test_operation(
-                Ok(message(MESSAGE_ID, MODIFIED)),
-                move || {
-                    Box::pin(async move {
-                        delete_entered.notify_one();
-                        std::future::pending().await
-                    })
-                },
-                || Box::pin(async { Err(absent()) }),
-                &CancellationToken::new(),
-                &task_progress,
-                deadline,
-                immediate_verify(),
-            )
-            .await
-        });
-        entered.notified().await;
-        tokio::time::advance(Duration::from_millis(101)).await;
-        let result = task.await.expect("delete deadline task");
+        let result = execute_test_operation(
+            Ok(message(MESSAGE_ID, MODIFIED)),
+            || Box::pin(std::future::pending()),
+            || Box::pin(async { Err(absent()) }),
+            &CancellationToken::new(),
+            &progress,
+            deadline,
+            immediate_verify(),
+        )
+        .await;
         assert_indeterminate(&result);
         assert_eq!(
             progress.stage(),
@@ -1107,32 +1094,18 @@ mod tests {
             crate::handler_support::MutationStage::Dispatched
         );
 
-        let entered = Arc::new(Notify::new());
-        let read_entered = entered.clone();
         let progress = MutationProgress::new();
-        let task_progress = progress.clone();
         let deadline = Instant::now() + Duration::from_millis(100);
-        let task = tokio::spawn(async move {
-            execute_test_operation(
-                Ok(message(MESSAGE_ID, MODIFIED)),
-                || Box::pin(async { Ok(()) }),
-                move || {
-                    let read_entered = read_entered.clone();
-                    Box::pin(async move {
-                        read_entered.notify_one();
-                        std::future::pending().await
-                    })
-                },
-                &CancellationToken::new(),
-                &task_progress,
-                deadline,
-                immediate_verify(),
-            )
-            .await
-        });
-        entered.notified().await;
-        tokio::time::advance(Duration::from_millis(101)).await;
-        let timed_out = task.await.expect("verification deadline task");
+        let timed_out = execute_test_operation(
+            Ok(message(MESSAGE_ID, MODIFIED)),
+            || Box::pin(async { Ok(()) }),
+            || Box::pin(std::future::pending()),
+            &CancellationToken::new(),
+            &progress,
+            deadline,
+            immediate_verify(),
+        )
+        .await;
         assert_indeterminate(&timed_out);
         assert_eq!(
             progress.stage(),
