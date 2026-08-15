@@ -258,9 +258,34 @@ impl StableBackend {
         config: &HttpConfig,
         cancellation: CancellationToken,
     ) -> Self {
+        Self::build(runtime, config, cancellation, SSE_KEEP_ALIVE)
+    }
+
+    /// Builds the backend with a caller-selected SSE keep-alive interval.
+    ///
+    /// Production always uses the reviewed [`SSE_KEEP_ALIVE`]; this seam lets
+    /// the stream contract tests observe several live keep-alives and the
+    /// reconnect behaviour within a bounded wall-clock budget. The retry hint,
+    /// session policy, and every other setting are exactly production's.
+    #[cfg(test)]
+    pub(crate) fn with_sse_keep_alive(
+        runtime: RuntimeContext,
+        config: &HttpConfig,
+        cancellation: CancellationToken,
+        sse_keep_alive: Duration,
+    ) -> Self {
+        Self::build(runtime, config, cancellation, sse_keep_alive)
+    }
+
+    fn build(
+        runtime: RuntimeContext,
+        config: &HttpConfig,
+        cancellation: CancellationToken,
+        sse_keep_alive: Duration,
+    ) -> Self {
         let session_manager = Arc::new(LocalSessionManager::default());
         let rmcp_config = StreamableHttpServerConfig::default()
-            .with_sse_keep_alive(Some(SSE_KEEP_ALIVE))
+            .with_sse_keep_alive(Some(sse_keep_alive))
             .with_sse_retry(Some(SSE_RETRY))
             .with_stateful_mode(true)
             .with_json_response(false)

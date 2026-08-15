@@ -8,6 +8,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add Streamable HTTP conformance across the shipped `anyr mcp` command
+  boundary: a portable test spawns the real binary in `streamable-http` mode
+  with a private static-token file and a bounded scripted Anytype upstream,
+  waits for the loopback listener, and drives authentication, initialize and
+  initialized, `tools/list` over SSE, the standalone GET stream, session
+  DELETE, and the stateless preview JSON sentinel, then requires a graceful
+  exit on Unix, empty stdout, fixed transport diagnostics, and no disclosure
+  of tokens, the session ID, or bodies on stderr.
 - Add portable release binaries and a tier-1 smoke workflow. The build
   workflow gains `static-{x86_64,aarch64}` rows producing fully static
   musl `anyr` binaries (the glibc nix build's ELF interpreter points into

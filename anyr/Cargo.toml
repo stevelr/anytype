@@ -47,3 +47,9 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 hex = "0.4"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys.workspace = true

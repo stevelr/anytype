@@ -28,6 +28,8 @@ pub(crate) mod preview;
 mod process_tests;
 pub mod secret;
 pub(crate) mod session;
+#[cfg(test)]
+mod stream_tests;
 
 pub use config::{HttpAuthConfig, HttpConfig, HttpConfigError, TransportSelection};
 pub use secret::{StaticToken, StaticTokenError};

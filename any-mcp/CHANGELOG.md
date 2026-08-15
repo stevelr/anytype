@@ -8,6 +8,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Automate the stable Streamable HTTP event-stream contract over real
+  loopback sockets: the standalone GET stream's priming event and repeated
+  live keep-alives, session survival across an abrupt stream disconnect, the
+  exact `Last-Event-ID` behavior (a POST response stream resumes only while
+  its request is in flight and then delivers the response once without
+  redispatching upstream; completed, unknown, and malformed IDs yield an empty
+  successful stream; the standalone stream resumes as a live keep-alive
+  stream), and stream termination on session DELETE. The slow-reader load
+  case now serves an application-generated incremental event stream and
+  proves generation stalls under backpressure and completes exactly once the
+  reader resumes. The README documents the supported reconnect contract.
 - Define the terminal contract for a live file import that does not settle
   after a mid-body source race. The single dispatched upload remains bounded by
   the request deadline, returns mutation-indeterminate guidance, and is not

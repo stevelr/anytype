@@ -61,9 +61,9 @@ const SOCKET_DEADLINE: Duration = Duration::from_secs(10);
 /// Bounded deadline for every awaited counter or in-flight condition.
 const CONDITION_DEADLINE: Duration = Duration::from_secs(10);
 /// Rate budget large enough that only the boundary under test can reject.
-const UNCONSTRAINED_RATE: &str = "600";
+pub(super) const UNCONSTRAINED_RATE: &str = "600";
 /// Negotiated revision used by every session in this module.
-const REVISION: &str = "2025-11-25";
+pub(super) const REVISION: &str = "2025-11-25";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -73,12 +73,12 @@ const REVISION: &str = "2025-11-25";
 ///
 /// Boundary tests reject before any handler runs, so no upstream traffic is
 /// expected; an unroutable port makes an accidental call fail loudly.
-fn offline_runtime() -> RuntimeContext {
+pub(super) fn offline_runtime() -> RuntimeContext {
     upstream_runtime("http://127.0.0.1:1", ApplicationProfile::Compact, false)
 }
 
 /// Builds a runtime bound to one scripted loopback upstream.
-fn upstream_runtime(
+pub(super) fn upstream_runtime(
     base_url: &str,
     profile: ApplicationProfile,
     grpc_available: bool,
@@ -227,14 +227,14 @@ impl Gate {
 }
 
 /// One listener bound to an OS-assigned loopback port.
-struct LoadServer {
+pub(super) struct LoadServer {
     address: SocketAddr,
     shutdown: CancellationToken,
     task: JoinHandle<Result<(), HttpServeError>>,
 }
 
 impl LoadServer {
-    async fn start(state: Arc<ListenerState>, drain: Duration) -> Self {
+    pub(super) async fn start(state: Arc<ListenerState>, drain: Duration) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind load test listener");
@@ -248,22 +248,22 @@ impl LoadServer {
         }
     }
 
-    fn base(&self) -> String {
+    pub(super) fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.address.port())
     }
 
-    fn host(&self) -> String {
+    pub(super) fn host(&self) -> String {
         format!("127.0.0.1:{}", self.address.port())
     }
 
-    async fn connect(&self) -> TcpStream {
+    pub(super) async fn connect(&self) -> TcpStream {
         TcpStream::connect(self.address)
             .await
             .expect("connect to load test listener")
     }
 
     /// Shuts down and returns the drain duration actually taken.
-    async fn stop(self) -> Duration {
+    pub(super) async fn stop(self) -> Duration {
         let started = Instant::now();
         self.shutdown.cancel();
         let result = tokio::time::timeout(Duration::from_secs(30), self.task)
@@ -275,14 +275,14 @@ impl LoadServer {
     }
 }
 
-fn client() -> reqwest::Client {
+pub(super) fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .build()
         .expect("load test client")
 }
 
 /// Extracts the last `data:` payload from one SSE body.
-fn last_sse_data(body: &str) -> Value {
+pub(super) fn last_sse_data(body: &str) -> Value {
     let data = body
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))
@@ -795,32 +795,55 @@ const SLOW_CONSUMER_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// Request header that selects the large event-stream body from the fixture.
 const STREAM_HEADER: &str = "x-load-test-stream";
 
-/// Builds the exact SSE body served to a slow consumer.
-fn slow_consumer_body() -> Bytes {
-    let filler = "x".repeat(4096);
-    let mut body = String::with_capacity(SLOW_CONSUMER_BODY_BYTES + 8192);
-    while body.len() < SLOW_CONSUMER_BODY_BYTES {
-        body.push_str("event: message\ndata: ");
-        body.push_str(&filler);
-        body.push_str("\n\n");
-    }
-    Bytes::from(body)
+/// One SSE frame emitted by the incremental generator: a fixed-size event.
+fn slow_consumer_frame() -> Bytes {
+    Bytes::from(format!("event: message\ndata: {}\n\n", "x".repeat(4096)))
 }
 
-/// A service that answers the stream marker with one large event-stream body
-/// and every other request with a short fixed body.
-fn streaming_service(stream: Bytes) -> McpService {
+/// Number of generated frames; the total exceeds any plausible pair of
+/// socket buffers so a stalled reader necessarily blocks the producer.
+fn slow_consumer_frames() -> usize {
+    SLOW_CONSUMER_BODY_BYTES.div_ceil(slow_consumer_frame().len())
+}
+
+/// A service that answers the stream marker with an application-generated
+/// incremental event stream and every other request with a short fixed body.
+///
+/// Frames are produced one at a time, on demand, as the HTTP body is polled;
+/// `produced` counts frames handed to the transport so a test can prove that
+/// a stalled reader stops generation (backpressure reaches the application)
+/// and that generation resumes and completes once the reader catches up. The
+/// exact total length is declared up front so the reader can account for
+/// every byte without chunked framing.
+fn incremental_streaming_service(frames: usize, produced: Arc<AtomicUsize>) -> McpService {
     Arc::new(move |admitted: AdmittedRequest| {
-        let stream = stream.clone();
+        let produced = produced.clone();
         Box::pin(async move {
             if !admitted.parts.headers.contains_key(STREAM_HEADER) {
                 return fixed_response(StatusCode::OK, "ok");
             }
+            let frame = slow_consumer_frame();
+            let total = frames * frame.len();
+            let generator = futures::stream::unfold(0_usize, move |index| {
+                let frame = frame.clone();
+                let produced = produced.clone();
+                async move {
+                    if index >= frames {
+                        return None;
+                    }
+                    produced.fetch_add(1, Ordering::SeqCst);
+                    Some((
+                        Ok::<_, std::convert::Infallible>(http_body::Frame::data(frame)),
+                        index + 1,
+                    ))
+                }
+            });
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "text/event-stream")
                 .header(header::CACHE_CONTROL, "no-store")
-                .body(Full::new(stream).boxed())
+                .header(header::CONTENT_LENGTH, total)
+                .body(http_body_util::StreamBody::new(generator).boxed())
                 .expect("streamed load test response")
         })
     })
@@ -878,19 +901,21 @@ fn declared_content_length(head: &str) -> usize {
 }
 
 /// A reader that stops consuming a flowing event stream applies backpressure to
-/// its own connection only: the listener keeps serving other clients, and the
-/// stalled response resumes and completes once the reader catches up.
+/// its own connection only: generation stalls at the application seam, the
+/// listener keeps serving other clients, and the stalled response resumes and
+/// completes exactly once the reader catches up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slow_sse_consumer_applies_backpressure_without_stalling() {
     const BEARER: &str = "slow-consumer";
 
-    let body = slow_consumer_body();
-    let expected = body.len();
+    let frames = slow_consumer_frames();
+    let expected = frames * slow_consumer_frame().len();
+    let produced = Arc::new(AtomicUsize::new(0));
     let state = Arc::new(ListenerState::new(
         &test_config(&[("ANY_MCP_HTTP_REQUESTS_PER_MINUTE", UNCONSTRAINED_RATE)]),
         Authenticator::SyntheticAllow,
         None,
-        streaming_service(body),
+        incremental_streaming_service(frames, produced.clone()),
     ));
     let server = LoadServer::start(state, Duration::from_secs(5)).await;
 
@@ -918,6 +943,14 @@ async fn slow_sse_consumer_applies_backpressure_without_stalling() {
         "the stalled reader received the entire body: {prefix} of {expected}"
     );
 
+    // Backpressure reaches the application: generation stops well short of
+    // the total and stays stopped while the reader is stalled.
+    let stalled_at = wait_for_stable_count(&produced).await;
+    assert!(
+        stalled_at > 0 && stalled_at < frames,
+        "generation must stall between the first and last frame: {stalled_at} of {frames}"
+    );
+
     // A different client is served promptly while the slow reader stalls.
     let http = client();
     let response = tokio::time::timeout(
@@ -934,17 +967,42 @@ async fn slow_sse_consumer_applies_backpressure_without_stalling() {
     .expect("unrelated request");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.text().await.expect("unrelated body"), "ok");
+    assert_eq!(
+        produced.load(Ordering::SeqCst),
+        stalled_at,
+        "serving another client must not advance the stalled generator"
+    );
 
-    // Once the reader resumes, the stalled write completes exactly, with no
-    // truncated or duplicated bytes.
+    // Once the reader resumes, generation resumes and the stalled write
+    // completes exactly, with no truncated or duplicated bytes or frames.
     let remainder = read_body_remainder(&mut slow, expected - prefix).await;
     assert_eq!(prefix + remainder, expected);
+    assert_eq!(produced.load(Ordering::SeqCst), frames);
 
     let drained = server.stop().await;
     assert!(
         drained < Duration::from_secs(5),
         "a completed slow-consumer stream must not hold the drain: {drained:?}"
     );
+}
+
+/// Awaits the generator count becoming stable across two consecutive samples
+/// and returns it, bounded by the shared condition deadline.
+async fn wait_for_stable_count(counter: &AtomicUsize) -> usize {
+    let deadline = Instant::now() + CONDITION_DEADLINE;
+    let mut previous = counter.load(Ordering::SeqCst);
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let current = counter.load(Ordering::SeqCst);
+        if current == previous && current > 0 {
+            return current;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the generator never stalled: {current} frames"
+        );
+        previous = current;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,9 +1090,10 @@ async fn shutdown_cancels_work_that_outlives_the_drain_deadline() {
 // Abrupt disconnect during a mutation
 // ---------------------------------------------------------------------------
 
-const SPACE_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
+pub(super) const SPACE_ID: &str =
+    "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
 const TYPE_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y";
-const OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
+pub(super) const OBJECT_ID: &str = "bafyreie6n5l5nkbjal37su54cha4coy7qzuhrnajluzv5qd5jvtsrxkequ";
 
 fn type_document() -> Value {
     json!({
@@ -1053,7 +1112,7 @@ fn type_document() -> Value {
     })
 }
 
-fn object_document() -> Value {
+pub(super) fn object_document() -> Value {
     json!({
         "object": {
             "archived": false,
@@ -1097,16 +1156,20 @@ fn create_arguments(key: &str) -> Value {
 }
 
 /// One scripted reply from the loopback Anytype upstream.
-struct UpstreamReply {
+pub(super) struct UpstreamReply {
     body: String,
     delay: Duration,
+    /// When set, the reply is written only after this token is cancelled, so
+    /// a test can hold an upstream call in flight deterministically.
+    held_until: Option<CancellationToken>,
 }
 
 impl UpstreamReply {
-    fn json(value: &Value) -> Self {
+    pub(super) fn json(value: &Value) -> Self {
         Self {
             body: value.to_string(),
             delay: Duration::ZERO,
+            held_until: None,
         }
     }
 
@@ -1114,19 +1177,25 @@ impl UpstreamReply {
         self.delay = delay;
         self
     }
+
+    /// Holds the reply until `release` is cancelled.
+    pub(super) fn held_until(mut self, release: CancellationToken) -> Self {
+        self.held_until = Some(release);
+        self
+    }
 }
 
 /// A scripted loopback upstream that publishes its exact request tape.
-struct UpstreamFixture {
-    endpoint: String,
-    received: Arc<AtomicUsize>,
-    served: Arc<AtomicUsize>,
+pub(super) struct UpstreamFixture {
+    pub(super) endpoint: String,
+    pub(super) received: Arc<AtomicUsize>,
+    pub(super) served: Arc<AtomicUsize>,
     shutdown: CancellationToken,
     task: JoinHandle<Vec<String>>,
 }
 
 impl UpstreamFixture {
-    async fn start(replies: Vec<UpstreamReply>) -> Self {
+    pub(super) async fn start(replies: Vec<UpstreamReply>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind upstream fixture");
@@ -1177,17 +1246,29 @@ impl UpstreamFixture {
                     .to_owned(),
             );
             received.fetch_add(1, Ordering::SeqCst);
-            let (status, body, delay) = match replies.get(index) {
-                Some(reply) => ("200 OK", reply.body.clone(), reply.delay),
+            let (status, body, delay, held_until) = match replies.get(index) {
+                Some(reply) => (
+                    "200 OK",
+                    reply.body.clone(),
+                    reply.delay,
+                    reply.held_until.clone(),
+                ),
                 None => (
                     "500 Internal Server Error",
                     "{\"error\":\"unscripted\"}".to_owned(),
                     Duration::ZERO,
+                    None,
                 ),
             };
             index += 1;
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
+            }
+            if let Some(release) = held_until {
+                tokio::select! {
+                    () = release.cancelled() => {}
+                    () = shutdown.cancelled() => break,
+                }
             }
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1200,7 +1281,7 @@ impl UpstreamFixture {
         tape
     }
 
-    async fn finish(self) -> Vec<String> {
+    pub(super) async fn finish(self) -> Vec<String> {
         self.shutdown.cancel();
         // Unblock the accept loop so the recorded tape is returned promptly.
         let _ = TcpStream::connect(
@@ -1261,7 +1342,11 @@ async fn read_upstream_request(socket: &mut TcpStream) -> Option<String> {
 }
 
 /// Runs the initialize lifecycle and returns the issued session id.
-async fn initialize_over_http(client: &reqwest::Client, base: &str, bearer: &str) -> String {
+pub(super) async fn initialize_over_http(
+    client: &reqwest::Client,
+    base: &str,
+    bearer: &str,
+) -> String {
     let response = client
         .post(format!("{base}/mcp"))
         .bearer_auth(bearer)
@@ -1297,7 +1382,7 @@ async fn initialize_over_http(client: &reqwest::Client, base: &str, bearer: &str
 }
 
 /// Issues one JSON-RPC request on a session and returns the decoded message.
-async fn call_over_http(
+pub(super) async fn call_over_http(
     client: &reqwest::Client,
     base: &str,
     bearer: &str,

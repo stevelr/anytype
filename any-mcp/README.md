@@ -2232,6 +2232,25 @@ origins; absent means every Origin-bearing request is rejected) and must use
 a fetch-based SSE reader because native `EventSource` cannot attach the
 `Authorization` header. Cookies and query-string tokens are never accepted.
 
+Event streams follow a fixed contract. Every stream opens with a priming event
+(`data:` empty, `retry: 3000`) whose ID is `0` on the standalone GET stream and
+`0/<request>` on a POST response stream, then carries `:` keep-alive comments
+every 15 seconds while idle. Reconnecting with `Last-Event-ID` is supported in
+exactly two forms. A POST response stream whose connection was lost while the
+request was still in flight can be resumed with its priming ID; the response
+is then delivered once on the resumed stream, which ends afterwards, and the
+upstream call is never redispatched. The standalone stream resumes as a live
+keep-alive stream; any-mcp emits no server-initiated messages, so it has
+nothing to replay. Once a response has been emitted its request-scoped stream
+is gone, and reconnecting after that point — like reconnecting with an unknown
+or malformed ID — returns an empty successful stream rather than an error, so
+a client that never read a delivered response must repeat the request
+(mutations remain safe through the process-lifetime idempotency described
+above). Deleting the session ends every stream bound to it. Recurring
+loopback tests consume live priming, keep-alive, and resumed frames and prove
+that a stalled reader stops application-side event generation without
+affecting other connections.
+
 Remaining settings: `ANY_MCP_HTTP_BIND`, `ANY_MCP_HTTP_ALLOWED_HOSTS`
 (exact authorities, default local names), `ANY_MCP_HTTP_REQUESTS_PER_MINUTE`
 (default 120), and `ANY_MCP_HTTP_SHUTDOWN_SECS` (drain deadline, default
@@ -2244,7 +2263,10 @@ of the supported operator contract.
 shutdown deadline, and exit successfully. Spawned-process conformance checks
 both signals across stable and preview listeners after proving that the real
 loopback endpoint is responding; the same signal pair is covered for
-initialized stdio servers.
+initialized stdio servers. The `anyr` crate additionally spawns the shipped
+`anyr mcp` command in HTTP mode against a scripted upstream and drives the
+complete authenticated stable lifecycle and the preview JSON sentinel across
+the command boundary.
 
 ## License
 

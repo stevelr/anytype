@@ -219,7 +219,7 @@ ultimately exercises the `anytype` client, but it does not change the direct
 API status rows above. The stdio suite is the deeper end-to-end protocol suite.
 The HTTP interface is nevertheless substantially automated:
 
-- The current library inventory has 75 HTTP-specific tests across exact
+- The current library inventory has 77 HTTP-specific tests across exact
   environment parsing, owner-private static tokens, OAuth metadata and JWKS,
   Host/Origin/CORS gates, authentication ordering, session ownership and
   deletion, protocol negotiation, preview behavior, listener admission, and
@@ -229,31 +229,36 @@ The HTTP interface is nevertheless substantially automated:
 - Real-socket stable tests cover authentication, CORS preflight, initialize and
   initialized lifecycle, POST SSE responses, exact `tools/list` catalog parity,
   opening the standalone GET SSE stream, and session DELETE. These tests run
-  the production listener and backend in-process rather than spawning the
-  shipped command.
+  the production listener and backend in-process. The `anyr` crate's
+  `mcp_streamable_http` suite additionally spawns the shipped `anyr mcp`
+  command in HTTP mode against a scripted upstream and drives the complete
+  authenticated stable lifecycle plus the preview JSON sentinel across the
+  command boundary, with bounded waits, empty stdout, fixed diagnostics, and
+  token/session/body non-disclosure (`any-2c9n`, closed).
+- Stream contract tests consume live frames from the standalone GET stream
+  (priming, repeated keep-alives, disconnect, resume, termination on DELETE)
+  and prove the exact `rmcp` 2.2.0 `Last-Event-ID` behavior: an in-flight
+  POST response stream resumes and delivers its response once without
+  redispatching upstream, while completed, unknown, and malformed IDs yield an
+  empty successful stream (`any-ddpp`, closed).
 - Load/fault tests cover session, rate, concurrency, and body ceilings; the
   exact 2 MiB boundary and streamed chunked overflow; idle SSE disconnect;
-  per-connection slow-reader backpressure; drain-then-cancel shutdown; and an
-  abrupt disconnect during mutation followed by a safe keyed retry. The 4 MiB
-  slow-reader case uses a prebuilt body, so it proves socket backpressure, not
-  incremental application-side event generation. Incremental generation and
-  its slow-reader behavior are tracked by `any-ddpp` (P2).
+  per-connection slow-reader backpressure against an application-generated
+  incremental event stream whose generation provably stalls and resumes;
+  drain-then-cancel shutdown; and an abrupt disconnect during mutation
+  followed by a safe keyed retry.
 - Spawned-process coverage now sends `SIGINT` to stable stdio and HTTP servers
   and `SIGTERM` to preview stdio and HTTP servers. Stdio is initialized before
   the signal. HTTP must bind and return the expected unauthenticated response
   before the signal. All four cases require a bounded successful exit, fixed
   stopping diagnostics, empty or protocol-pure stdout, and redacted secrets.
 
-Streaming has one important evidence split. Recorded browser and reverse-proxy
-smoke runs prove incremental fetch consumption, unbuffered TLS proxying, and
-live 15-second keepalives, but those are manual qualification rather than
-recurring CI. Automated tests do not yet consume multiple real rmcp events or
-keepalives from a standalone GET stream or exercise the exact supported
-`Last-Event-ID` reconnect contract; `any-ddpp` (P2) owns those stable
-Streamable HTTP gaps. Tests also do not spawn the shipped HTTP command for a
-complete MCP exchange; `any-2c9n` (P2) owns that command-boundary coverage. The
-preview HTTP mode is intentionally stateless JSON and rejects GET and DELETE,
-so the SSE gaps do not apply to preview mode.
+Recorded browser and reverse-proxy smoke runs remain the only evidence for
+unbuffered TLS proxying and the production 15-second keep-alive interval; the
+recurring stream tests observe keep-alives through a shorter test-only interval
+seam on the same production listener and backend. The preview HTTP mode is
+intentionally stateless JSON and rejects GET and DELETE, so the SSE contract
+does not apply to preview mode.
 
 ## Delivered coverage work
 
@@ -317,8 +322,6 @@ review.
 | -------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | P2       | `any-e7ei.3`              | Verified update-space omission, replacement, and clearing behavior.                                                                 |
 | P2       | `any-vvue`                | Real-server `ProcessWatcher` reconnect and fault coverage, blocked by the P4 `any-k6o5.4`–`any-k6o5.6` design/review/harness chain. |
-| P2       | `any-ddpp`                | Stable HTTP SSE events, keepalive, reconnect contract, and incremental backpressure.                                                |
-| P2       | `any-2c9n`                | Full Streamable HTTP conformance through the shipped `anyr mcp` command.                                                            |
 | P2       | `any-ucd.4`               | Literal all-target and clippy evidence on all five supported platform rows.                                                         |
 | P3       | `any-upsa`                | Direct assertions on the public HTTP metrics snapshot.                                                                              |
 | P3       | `any-ih7t`                | Direct `send_text`, `toggle_reaction`, and `read_all` coverage.                                                                     |
