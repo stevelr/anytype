@@ -81,19 +81,19 @@ Coverage classes:
 
 ### Auth and client lifecycle (REST unless noted)
 
-| Surface                                                | Evidence                                                                                                  | Status                   |
-| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------ |
-| REST: `create_auth_challenge`                          | Unit: exact wire and API errors                                                                           | covered                  |
-| REST: `create_api_key`                                 | Unit: exact wire and API errors                                                                           | covered                  |
-| REST: `authenticate_interactive`                       | Unit: fast, forced, callback, API, and persistence paths                                                  | covered                  |
-| Helper: `auth_status` / `logout`                       | Unit: exact memory and keystore transitions                                                               | covered                  |
-| Mixed: `ping_http` / `ping_grpc`                       | Unit: typed authentication failures<br>Live: every disposable readiness preflight                         | covered                  |
-| gRPC: `grpc_client`                                    | Live: indirect through all gRPC tests                                                                     | partial; `any-nsyi` (P2) |
-| Helper: `find_grpc`                                    | Unit: `extract_port_*` and lsof filtering only                                                            | partial; `any-nsyi` (P2) |
-| REST: `http_metrics`                                   | Live: indirect assertions in `test_cache` and `smoke_test`                                                | partial; `any-upsa` (P3) |
-| REST: HTTP pipeline                                    | Unit: 56 deadline, retry, limit, redirect, diagnostic, and metric tests<br>Live: `test_retry_helpers` (5) | covered                  |
-| Helper: cache enable/disable/clear                     | Unit: `cache.rs` (3)<br>Live: `test_cache` (28)                                                           | covered                  |
-| Helper: keystore save/load/update and modifier parsing | Unit: `keystore.rs` (6)<br>Live: env-only disposable credential setup                                     | covered                  |
+| Surface                                                | Evidence                                                                                                                                                | Status                   |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| REST: `create_auth_challenge`                          | Unit: exact wire and API errors                                                                                                                         | covered                  |
+| REST: `create_api_key`                                 | Unit: exact wire and API errors                                                                                                                         | covered                  |
+| REST: `authenticate_interactive`                       | Unit: fast, forced, callback, API, and persistence paths                                                                                                | covered                  |
+| Helper: `auth_status` / `logout`                       | Unit: exact memory and keystore transitions                                                                                                             | covered                  |
+| Mixed: `ping_http` / `ping_grpc`                       | Unit: typed authentication failures<br>Live: every disposable readiness preflight                                                                       | covered                  |
+| gRPC: `grpc_client`                                    | Unit: credential selection, cached/concurrent initialization, typed missing-credential and connection failures<br>Live: indirect through all gRPC tests | covered                  |
+| Helper: `find_grpc`                                    | Unit: lsof absence/failure, process/LISTEN/duplicate filtering, failed probes, first responsive candidate<br>Process: supported-Unix owned listener     | covered                  |
+| REST: `http_metrics`                                   | Live: indirect assertions in `test_cache` and `smoke_test`                                                                                              | partial; `any-upsa` (P3) |
+| REST: HTTP pipeline                                    | Unit: 56 deadline, retry, limit, redirect, diagnostic, and metric tests<br>Live: `test_retry_helpers` (5)                                               | covered                  |
+| Helper: cache enable/disable/clear                     | Unit: `cache.rs` (3)<br>Live: `test_cache` (28)                                                                                                         | covered                  |
+| Helper: keystore save/load/update and modifier parsing | Unit: `keystore.rs` (6)<br>Live: env-only disposable credential setup                                                                                   | covered                  |
 
 ### Spaces
 
@@ -116,18 +116,18 @@ Coverage classes:
 
 ### Objects and attached discussions
 
-| Surface                                           | Evidence                                                                                                                                              | Status                                                |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| REST: `object(..).get`                            | Live: `integration`, `smoke_test`, and other suites                                                                                                   | covered                                               |
-| REST: `objects(..).list`                          | Unit: endpoint selection for typed numeric, checkbox, and positive type filters<br>Live: `test_filters`, `integration`, and owned pagination fixtures | covered                                               |
-| REST: `new_object(..).create`                     | Unit: body serialization<br>Live: `integration`, `smoke_test`, and fixture setup                                                                      | covered                                               |
-| REST: `update_object(..).update`                  | Unit: body serialization<br>Live: `integration`, `smoke_test`                                                                                         | covered                                               |
-| REST: `object(..).delete` / `delete_once`         | Live: `integration`, `smoke_test`, and harness cleanup                                                                                                | covered                                               |
-| gRPC: `get_share_link`                            | Unit: missing-credentials classification<br>Live: blocked by removed Heart backend                                                                    | uncovered; `any-6s3` (P3), blocked by `any-x7f0` (P1) |
-| Helper: `set_properties`                          | Unit: typed property-value coercion<br>Live: all-format set/read matrix                                                                               | covered                                               |
-| Mixed: discussion discovery                       | Unit: `attached_discussions.rs` lifecycle cases<br>Live: ignored disposable suite                                                                     | covered                                               |
-| Mixed: discussion `ensure`                        | Unit: lifecycle and state-machine cases<br>Live: exact get/ensure/repeat                                                                              | covered                                               |
-| gRPC: repeated `ObjectAddDiscussion` defect probe | Live: two raw RPCs in a prefix-authorized evidence tier                                                                                               | covered (characterization)                            |
+| Surface                                           | Evidence                                                                                                                                              | Status                     |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| REST: `object(..).get`                            | Live: `integration`, `smoke_test`, and other suites                                                                                                   | covered                    |
+| REST: `objects(..).list`                          | Unit: endpoint selection for typed numeric, checkbox, and positive type filters<br>Live: `test_filters`, `integration`, and owned pagination fixtures | covered                    |
+| REST: `new_object(..).create`                     | Unit: body serialization<br>Live: `integration`, `smoke_test`, and fixture setup                                                                      | covered                    |
+| REST: `update_object(..).update`                  | Unit: body serialization<br>Live: `integration`, `smoke_test`                                                                                         | covered                    |
+| REST: `object(..).delete` / `delete_once`         | Live: `integration`, `smoke_test`, and harness cleanup                                                                                                | covered                    |
+| Helper: `get_share_link` / `Object::get_link`     | Unit: exact current-client universal URL and typed ID validation<br>Live: cleanup-owned object link and server-health proof                           | covered                    |
+| Helper: `set_properties`                          | Unit: typed property-value coercion<br>Live: all-format set/read matrix                                                                               | covered                    |
+| Mixed: discussion discovery                       | Unit: `attached_discussions.rs` lifecycle cases<br>Live: ignored disposable suite                                                                     | covered                    |
+| Mixed: discussion `ensure`                        | Unit: lifecycle and state-machine cases<br>Live: exact get/ensure/repeat                                                                              | covered                    |
+| gRPC: repeated `ObjectAddDiscussion` defect probe | Live: two raw RPCs in a prefix-authorized evidence tier                                                                                               | covered (characterization) |
 
 ### Body blocks (gRPC `ObjectShow`/mutation RPCs)
 
@@ -315,8 +315,6 @@ review.
 
 | Priority | Coverage owner            | Gap                                                                                                                                 |
 | -------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| P1       | `any-x7f0`                | Replace the removed, crashing share-link backend; it blocks `any-6s3` (P3) and its direct `get_share_link` test.                    |
-| P2       | `any-nsyi`                | Direct gRPC client initialization and local endpoint discovery.                                                                     |
 | P2       | `any-e7ei.3`              | Verified update-space omission, replacement, and clearing behavior.                                                                 |
 | P2       | `any-vvue`                | Real-server `ProcessWatcher` reconnect and fault coverage, blocked by the P4 `any-k6o5.4`–`any-k6o5.6` design/review/harness chain. |
 | P2       | `any-ddpp`                | Stable HTTP SSE events, keepalive, reconnect contract, and incremental backpressure.                                                |
@@ -325,7 +323,6 @@ review.
 | P3       | `any-upsa`                | Direct assertions on the public HTTP metrics snapshot.                                                                              |
 | P3       | `any-ih7t`                | Direct `send_text`, `toggle_reaction`, and `read_all` coverage.                                                                     |
 | P3       | `any-vjj`                 | Direct `delete_all_archived` live coverage.                                                                                         |
-| P3       | `any-6s3`                 | Direct `get_share_link` coverage; blocked by `any-x7f0` (P1).                                                                       |
 | P3       | `any-gz2k`                | Real-server negative tag-filter pagination.                                                                                         |
 | P4       | `any-k6o5.4`–`any-k6o5.6` | Reviewed external fault injection and chat-stream reconnect coverage.                                                               |
 

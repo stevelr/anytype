@@ -20,6 +20,13 @@ configuration failures plus structurally typed nested gRPC authentication
 failures without exposing or parsing response messages, URLs, or credentials,
 and callers do not need a direct `anytype-rpc` dependency.
 
+The first `grpc_client()` call selects a nonempty stored session token before
+falling back to an account key and initializes one cached channel. Concurrent
+first callers share that initialization. `find_grpc()` discovers a local
+Anytype listener on Linux and macOS by filtering `lsof` listeners and probing
+candidate ports in order; unsupported platforms and unavailable discovery
+return `None`.
+
 ### Features
 
 - Broad coverage of the Anytype REST API 2025-11-08: nearly every documented REST
@@ -318,6 +325,12 @@ space-scoped search reject `0` or larger values with `AnytypeError::Validation`
 before sending an HTTP request.
 
 See the [Examples](./examples/README.md) folder for more code samples.
+
+Universal object links are constructed locally and do not call Heart's retired
+`ObjectShareByLink` RPC. Use `object.get_link()` for an object returned by the
+API, or `client.get_share_link(space_id, object_id)?` when both validated IDs
+are already known. `object.get_link_shared(cid, key)?` adds an existing space
+invite to the link.
 
 For soft-delete workflows that reconcile uncertain responses themselves,
 `client.object(space_id, object_id).delete_once()` sends exactly one HTTP

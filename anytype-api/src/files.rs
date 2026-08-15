@@ -2659,15 +2659,19 @@ fn value_list(values: Vec<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use std::{
+        future::Future,
         path::PathBuf,
+        pin::Pin,
         sync::atomic::{AtomicU64, Ordering},
+        task::{Context, Poll},
     };
 
     use bytes::Bytes;
     use reqwest::StatusCode;
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf},
         net::TcpListener,
+        sync::{oneshot, watch},
         task::JoinHandle,
     };
 
@@ -2681,6 +2685,58 @@ mod tests {
     };
 
     static NEXT_MOCK_ID: AtomicU64 = AtomicU64::new(1);
+
+    struct PauseAfterFirstRead {
+        bytes: &'static [u8],
+        offset: usize,
+        entered: Option<oneshot::Sender<()>>,
+        released: watch::Receiver<bool>,
+        pause: Option<Pin<Box<dyn Future<Output = bool> + Send>>>,
+    }
+
+    impl AsyncRead for PauseAfterFirstRead {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.offset != 0 && !*self.released.borrow() {
+                if let Some(entered) = self.entered.take() {
+                    let _ = entered.send(());
+                }
+                if self.pause.is_none() {
+                    let mut released = self.released.clone();
+                    self.pause = Some(Box::pin(async move {
+                        released.changed().await.is_ok() && *released.borrow()
+                    }));
+                }
+                let Some(pause) = self.pause.as_mut() else {
+                    return Poll::Ready(Err(std::io::Error::other("pause state missing")));
+                };
+                match pause.as_mut().poll(context) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(true) => self.pause = None,
+                    Poll::Ready(false) => {
+                        return Poll::Ready(Err(std::io::Error::other(
+                            "pause sender closed before release",
+                        )));
+                    }
+                }
+            }
+            if self.offset >= self.bytes.len() || buffer.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let remaining = &self.bytes[self.offset..];
+            let length = if self.offset == 0 {
+                remaining.len().min(3).min(buffer.remaining())
+            } else {
+                remaining.len().min(buffer.remaining())
+            };
+            buffer.put_slice(&remaining[..length]);
+            self.offset = self.offset.saturating_add(length);
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[tokio::test]
     async fn generic_upload_reader_rejects_bytes_beyond_declared_length() {
@@ -2950,6 +3006,51 @@ mod tests {
                 .contains("\r\ncontent-length: ")
         );
         std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn retained_reader_upload_resumes_after_mid_body_pause() {
+        let (client, server) = mock_file_client(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Connection: close\r\n\r\n\
+             {\"object_id\":\"file-id\",\"size_in_bytes\":6}",
+        )
+        .await;
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = watch::channel(false);
+        let reader = PauseAfterFirstRead {
+            bytes: b"stream",
+            offset: 0,
+            entered: Some(entered_tx),
+            released: release_rx,
+            pause: None,
+        };
+        let upload = tokio::spawn(async move {
+            client
+                .files()
+                .upload("space-1")
+                .reader("stream.bin", reader, 6)
+                .mime("application/octet-stream")
+                .multipart_limit_bytes(1_024)
+                .upload()
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx)
+            .await
+            .expect("upload reaches the mid-body pause")
+            .expect("pause signal remains owned");
+        release_tx.send(true).expect("release paused upload");
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), upload)
+            .await
+            .expect("scripted multipart peer settles after release")
+            .expect("upload task completes")
+            .expect("stream reader upload succeeds");
+        assert_eq!(response.id, "file-id");
+        assert_eq!(response.size, Some(6));
+        let request = server.await.expect("mock server task");
+        assert!(request.contains("stream"));
     }
 
     #[tokio::test]

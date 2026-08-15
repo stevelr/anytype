@@ -13,11 +13,10 @@
 //!
 //!
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use anytype_rpc::client::default_grpc_endpoint;
 use anytype_rpc::client::{AnytypeGrpcClient, AnytypeGrpcConfig};
-use snafu::prelude::*;
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -463,12 +462,6 @@ impl AnytypeClient {
     ///
     /// Requires gRPC credentials saved to the keystore.
     pub async fn grpc_client(&self) -> Result<AnytypeGrpcClient> {
-        let guard = self.grpc.lock().await;
-        if let Some(client) = guard.as_ref() {
-            return Ok(client.clone());
-        }
-        drop(guard);
-
         let grpc_config = self
             .config
             .grpc_endpoint
@@ -477,11 +470,7 @@ impl AnytypeClient {
                 AnytypeGrpcConfig::new(endpoint.to_owned())
             });
 
-        self.create_grpc_client(&grpc_config).await?;
-        let guard = self.grpc.lock().await;
-        guard.as_ref().cloned().context(GrpcUnavailableSnafu {
-            message: "gRPC client was not created".to_string(),
-        })
+        get_or_try_init(&self.grpc, || self.create_grpc_client(&grpc_config)).await
     }
 
     /// Minimal authenticated HTTP ping (list spaces with limit 1).
@@ -491,28 +480,20 @@ impl AnytypeClient {
     }
 
     /// Create and cache a gRPC client using credentials stored in the keystore.
-    async fn create_grpc_client(&self, config: &AnytypeGrpcConfig) -> Result<()> {
+    async fn create_grpc_client(&self, config: &AnytypeGrpcConfig) -> Result<AnytypeGrpcClient> {
         let creds = self.keystore.get_grpc_credentials()?;
-        let client = if let Some(token) = creds.session_token() {
-            AnytypeGrpcClient::from_token(config, token.to_string())
-                .await
-                .map_err(|source| AnytypeError::Grpc { source })?
-        } else if let Some(account_key) = creds.account_key() {
-            AnytypeGrpcClient::from_account_key(config, account_key.to_string())
-                .await
-                .map_err(|source| AnytypeError::Grpc { source })?
-        } else {
-            return GrpcUnavailableSnafu {
-                message: "no grpc token or account key in keystore".to_string(),
+        match select_grpc_credential(&creds)? {
+            GrpcCredential::SessionToken(token) => {
+                AnytypeGrpcClient::from_token(config, token.to_owned())
+                    .await
+                    .map_err(|source| AnytypeError::Grpc { source })
             }
-            .fail();
-        };
-
-        {
-            let mut guard = self.grpc.lock().await;
-            *guard = Some(client);
+            GrpcCredential::AccountKey(account_key) => {
+                AnytypeGrpcClient::from_account_key(config, account_key.to_owned())
+                    .await
+                    .map_err(|source| AnytypeError::Grpc { source })
+            }
         }
-        Ok(())
     }
 
     /// Minimal authenticated gRPC ping (list apps).
@@ -635,6 +616,46 @@ impl AnytypeClient {
     }
 }
 
+async fn get_or_try_init<T, E, F, Fut>(slot: &Mutex<Option<T>>, initialize: F) -> Result<T, E>
+where
+    T: Clone,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::result::Result<T, E>>,
+{
+    let mut guard = slot.lock().await;
+    if let Some(value) = guard.as_ref() {
+        return Ok(value.clone());
+    }
+    let value = initialize().await?;
+    *guard = Some(value.clone());
+    Ok(value)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrpcCredential<'a> {
+    SessionToken(&'a str),
+    AccountKey(&'a str),
+}
+
+fn select_grpc_credential(credentials: &GrpcCredentials) -> Result<GrpcCredential<'_>> {
+    if let Some(token) = credentials
+        .session_token()
+        .filter(|token| !token.is_empty())
+    {
+        return Ok(GrpcCredential::SessionToken(token));
+    }
+    if let Some(account_key) = credentials
+        .account_key()
+        .filter(|account_key| !account_key.is_empty())
+    {
+        return Ok(GrpcCredential::AccountKey(account_key));
+    }
+    GrpcUnavailableSnafu {
+        message: "no grpc token or account key in keystore".to_string(),
+    }
+    .fail()
+}
+
 impl AnytypeClient {
     // accessor to support cache tests
     #[doc(hidden)]
@@ -654,27 +675,40 @@ impl AnytypeClient {
 ///
 /// Only supported on macOS and Linux.
 pub async fn find_grpc(program: Option<impl Into<String>>) -> Option<u16> {
-    let prefix = program.map_or_else(|| "anytype".to_string(), Into::into);
-
-    let ports = match lsof_listen_ports(&prefix).await {
-        Ok(ports) => ports,
-        Err(err) => {
-            debug!("lsof failed: {err}");
-            return None;
-        }
-    };
-
-    for port in &ports {
-        if probe_grpc_port(*port).await {
-            return Some(*port);
-        }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = program;
+        return None;
     }
-    None
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let prefix = program.map_or_else(|| "anytype".to_string(), Into::into);
+
+        let ports = match lsof_listen_ports(&prefix).await {
+            Ok(ports) => ports,
+            Err(err) => {
+                debug!("lsof failed: {err}");
+                return None;
+            }
+        };
+
+        first_responsive_port(&ports, probe_grpc_port).await
+    }
 }
 
 /// Run `lsof -Pni` and extract unique listening ports for the given program prefix.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 async fn lsof_listen_ports(prefix: &str) -> std::result::Result<Vec<u16>, String> {
-    let output = tokio::process::Command::new("lsof")
+    lsof_listen_ports_with("lsof", prefix).await
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+async fn lsof_listen_ports_with(
+    command: &str,
+    prefix: &str,
+) -> std::result::Result<Vec<u16>, String> {
+    let output = tokio::process::Command::new(command)
         .args(["-Pni"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -682,7 +716,20 @@ async fn lsof_listen_ports(prefix: &str) -> std::result::Result<Vec<u16>, String
         .await
         .map_err(|err| format!("failed to run lsof: {err}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_lsof_output(prefix, output.status.success(), &output.stdout)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn parse_lsof_output(
+    prefix: &str,
+    success: bool,
+    stdout: &[u8],
+) -> std::result::Result<Vec<u16>, String> {
+    if !success {
+        return Err("lsof exited unsuccessfully".to_owned());
+    }
+
+    let stdout = String::from_utf8_lossy(stdout);
     let mut ports = Vec::new();
 
     for line in stdout.lines() {
@@ -708,8 +755,23 @@ async fn lsof_listen_ports(prefix: &str) -> std::result::Result<Vec<u16>, String
     Ok(ports)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+async fn first_responsive_port<F, Fut>(ports: &[u16], mut probe: F) -> Option<u16>
+where
+    F: FnMut(u16) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    for port in ports {
+        if probe(*port).await {
+            return Some(*port);
+        }
+    }
+    None
+}
+
 /// Extract a port number from an lsof NAME column like `*:31010 (LISTEN)`
 /// or `127.0.0.1:31010 (LISTEN)` or `[::1]:31010 (LISTEN)`.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn extract_port(line: &str) -> Option<u16> {
     // Find the portion before "(LISTEN)" and work backwards to the last ':'
     let before_listen = line.split("(LISTEN)").next()?;
@@ -719,6 +781,7 @@ fn extract_port(line: &str) -> Option<u16> {
 }
 
 /// Try an unauthenticated `AppGetVersion` call on the given port.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn probe_grpc_port(port: u16) -> bool {
     use anytype_rpc::anytype::{
         ClientCommandsClient, rpc::app::get_version::Request as AppGetVersionRequest,
@@ -745,7 +808,22 @@ async fn probe_grpc_port(port: u16) -> bool {
 
 #[cfg(test)]
 mod find_grpc_tests {
-    use super::{extract_port, lsof_listen_ports};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use tokio::sync::Mutex;
+
+    use super::{
+        GrpcCredential, extract_port, first_responsive_port, get_or_try_init, lsof_listen_ports,
+        lsof_listen_ports_with, parse_lsof_output, select_grpc_credential,
+    };
+    use crate::{
+        client::{AnytypeClient, ClientConfig},
+        error::AnytypeError,
+        keystore::GrpcCredentials,
+    };
 
     #[test]
     fn extract_port_ipv4() {
@@ -774,6 +852,125 @@ mod find_grpc_tests {
         assert_eq!(extract_port(line), None);
     }
 
+    #[test]
+    fn lsof_output_filters_process_state_and_duplicate_ports() {
+        let output = b"COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n\
+            other 1 user 3u IPv4 0 0t0 TCP 127.0.0.1:31001 (LISTEN)\n\
+            anytype 2 user 4u IPv4 0 0t0 TCP 127.0.0.1:31002 (ESTABLISHED)\n\
+            anytype 2 user 5u IPv4 0 0t0 TCP 127.0.0.1:31003 (LISTEN)\n\
+            anytypeH 3 user 6u IPv6 0 0t0 TCP [::1]:31003 (LISTEN)\n";
+        assert_eq!(
+            parse_lsof_output("anytype", true, output).expect("parse successful lsof output"),
+            vec![31003]
+        );
+        assert!(parse_lsof_output("anytype", false, output).is_err());
+    }
+
+    #[tokio::test]
+    async fn lsof_absence_is_classified_without_panicking() {
+        let error = lsof_listen_ports_with("anytype-definitely-missing-lsof", "anytype")
+            .await
+            .expect_err("missing lsof command must be classified");
+        assert!(error.starts_with("failed to run lsof:"));
+    }
+
+    #[tokio::test]
+    async fn candidate_probe_selects_first_responsive_port() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let ports = [31001, 31002, 31003];
+        let selected = first_responsive_port(&ports, {
+            let observed = observed.clone();
+            move |port| {
+                let observed = observed.clone();
+                async move {
+                    observed.lock().await.push(port);
+                    port == 31002
+                }
+            }
+        })
+        .await;
+        assert_eq!(selected, Some(31002));
+        assert_eq!(*observed.lock().await, vec![31001, 31002]);
+    }
+
+    #[tokio::test]
+    async fn cache_initialization_is_reused_and_serialized() {
+        let slot = Mutex::new(None);
+        let initializations = AtomicUsize::new(0);
+        let first = get_or_try_init(&slot, || async {
+            initializations.fetch_add(1, Ordering::Relaxed);
+            tokio::task::yield_now().await;
+            Ok::<usize, ()>(42)
+        });
+        let second = get_or_try_init(&slot, || async {
+            initializations.fetch_add(1, Ordering::Relaxed);
+            Ok::<usize, ()>(43)
+        });
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first, Ok(42));
+        assert_eq!(second, Ok(42));
+        assert_eq!(initializations.load(Ordering::Relaxed), 1);
+
+        let cached = get_or_try_init(&slot, || async {
+            initializations.fetch_add(1, Ordering::Relaxed);
+            Ok::<usize, ()>(44)
+        })
+        .await;
+        assert_eq!(cached, Ok(42));
+        assert_eq!(initializations.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn credential_selection_prefers_session_token_and_rejects_empty_values() {
+        let both = GrpcCredentials::new(
+            None,
+            Some("account-key".to_owned()),
+            Some("session-token".to_owned()),
+        );
+        assert!(matches!(
+            select_grpc_credential(&both),
+            Ok(GrpcCredential::SessionToken("session-token"))
+        ));
+        let account = GrpcCredentials::from_account_key("account-key");
+        assert!(matches!(
+            select_grpc_credential(&account),
+            Ok(GrpcCredential::AccountKey("account-key"))
+        ));
+        let empty = GrpcCredentials::new(None, Some(String::new()), Some(String::new()));
+        assert!(matches!(
+            select_grpc_credential(&empty),
+            Err(AnytypeError::GrpcUnavailable { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn grpc_client_classifies_connection_failure() {
+        let id = std::process::id();
+        let path = std::env::temp_dir().join(format!("anytype-grpc-client-{id}.db"));
+        let mut config = ClientConfig::default().app_name("grpc-connection-failure");
+        config.grpc_endpoint = Some("http://127.0.0.1:1".to_owned());
+        config.keystore = Some(format!("file:path={}", path.display()));
+        config.keystore_service = Some(format!("grpc-connection-failure-{id}"));
+        let client = AnytypeClient::with_config(config).expect("construct gRPC failure client");
+        client
+            .keystore
+            .update_grpc_credentials(&GrpcCredentials::from_token("test-session-token"))
+            .expect("store test gRPC credentials");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), client.grpc_client())
+            .await
+            .expect("connection failure is bounded")
+            .expect_err("closed loopback port must reject gRPC connection");
+        assert!(matches!(error, AnytypeError::Grpc { .. }));
+        client
+            .keystore
+            .clear_all_credentials()
+            .expect("clear test credentials");
+        for suffix in ["", "-shm", "-wal"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
     #[tokio::test]
     async fn lsof_listen_ports_filters_prefix() {
         // With an unlikely prefix, we should get an empty list. A host
@@ -783,5 +980,18 @@ mod find_grpc_tests {
             Ok(ports) => assert!(ports.is_empty()),
             Err(error) => assert!(error.starts_with("failed to run lsof:")),
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn lsof_observes_a_listener_owned_by_this_process() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind process-owned listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let ports = lsof_listen_ports("")
+            .await
+            .expect("supported Unix host provides lsof");
+        assert!(ports.contains(&port));
     }
 }

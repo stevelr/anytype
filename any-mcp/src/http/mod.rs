@@ -168,22 +168,26 @@ pub async fn serve_http(
         metadata,
         service,
     ));
-    let bound = tokio::net::TcpListener::bind(config.bind)
-        .await
-        .map_err(|_| HttpTransportError::Bind)?;
+    let shutdown = CancellationToken::new();
+    let signal_shutdown = shutdown.clone();
+    let signals = tokio::spawn(async move {
+        crate::runtime::wait_for_shutdown_signal().await;
+        signal_shutdown.cancel();
+    });
+    let bound = match tokio::net::TcpListener::bind(config.bind).await {
+        Ok(bound) => bound,
+        Err(_) => {
+            signals.abort();
+            return Err(HttpTransportError::Bind);
+        }
+    };
     tracing::info!(target: "any_mcp::http", "http_transport_ready");
 
-    let shutdown = CancellationToken::new();
     let runtime_shutdown = runtime.shutdown_token();
     let staging_shutdown = shutdown.clone();
     let staging_failure = tokio::spawn(async move {
         runtime_shutdown.cancelled().await;
         staging_shutdown.cancel();
-    });
-    let signal_shutdown = shutdown.clone();
-    let signals = tokio::spawn(async move {
-        crate::runtime::wait_for_shutdown_signal().await;
-        signal_shutdown.cancel();
     });
 
     let result = listener::run_listener(bound, state, shutdown.clone(), config.shutdown).await;

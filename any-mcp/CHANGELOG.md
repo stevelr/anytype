@@ -8,6 +8,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Define the terminal contract for a live file import that does not settle
+  after a mid-body source race. The single dispatched upload remains bounded by
+  the request deadline, returns mutation-indeterminate guidance, and is not
+  retried; a scripted multipart-peer regression separately proves that the
+  retained-reader client resumes promptly after its pause is released.
 - Persist staged no-op document updates as an explicit no-op consumed state,
   preserving same-key replay without inventing a mutation candidate. Artifact
   acceptance seeds all client-root inputs before its immutability snapshot and

@@ -58,13 +58,10 @@
 
 use std::{borrow::Cow, sync::Arc};
 
-use crate::grpc_util::{grpc_status, with_token_request};
-use anytype_rpc::anytype::rpc::object::share_by_link;
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use snafu::prelude::*;
-use tonic::Request;
 
 use crate::{
     Result,
@@ -1475,35 +1472,21 @@ impl AnytypeClient {
         ListObjectsRequest::new(self.client.clone(), self.config.limits.clone(), space_id)
     }
 
-    /// Get a share link for an object by id.
-    pub async fn get_share_link(&self, object_id: impl AsRef<str>) -> Result<String> {
+    /// Returns the universal web link for an object in a space.
+    ///
+    /// Current Anytype clients construct this link locally. The retired
+    /// `ObjectShareByLink` RPC must not be called because supported Heart
+    /// versions retain it only as a compatibility stub that panics.
+    pub fn get_share_link(
+        &self,
+        space_id: impl AsRef<str>,
+        object_id: impl AsRef<str>,
+    ) -> Result<String> {
+        let space_id = space_id.as_ref();
         let object_id = object_id.as_ref();
+        self.config.limits.validate_id(space_id, "space_id")?;
         self.config.limits.validate_id(object_id, "object_id")?;
-
-        let grpc = self.grpc_client().await?;
-        let mut commands = grpc.client_commands();
-        let request = share_by_link::Request {
-            object_id: object_id.to_string(),
-        };
-        let request = with_token_request(Request::new(request), grpc.token())?;
-        let response = commands
-            .object_share_by_link(request)
-            .await
-            .map_err(grpc_status)?
-            .into_inner();
-
-        if let Some(error) = response.error
-            && error.code != 0
-        {
-            return Err(AnytypeError::Other {
-                message: format!(
-                    "grpc share by link failed: {} (code {})",
-                    error.description, error.code
-                ),
-            });
-        }
-
-        Ok(response.link)
+        Ok(object_link(space_id, object_id))
     }
 }
 
@@ -1537,6 +1520,29 @@ mod tests {
         let client = AnytypeClient::with_config(config).expect("create scripted objects client");
         client.set_api_key(HttpCredentials::new("fixture-token"));
         (client, fixture)
+    }
+
+    #[test]
+    fn share_link_is_constructed_locally_with_typed_validation() {
+        let mut config = ClientConfig::default().app_name("object-share-link");
+        config.keystore = Some("env".to_owned());
+        let client = AnytypeClient::with_config(config).expect("create share-link client");
+        let object_id = "bafyreifp4ycq5htv6x6c3vpx3xgmek5jxpz7o4qjmslvrk6jhnly3jx5he";
+
+        assert_eq!(
+            client
+                .get_share_link(SPACE_ID, object_id)
+                .expect("construct validated share link"),
+            format!("https://object.any.coop/{object_id}?spaceId={SPACE_ID}")
+        );
+        assert!(matches!(
+            client.get_share_link("", object_id),
+            Err(AnytypeError::Validation { .. })
+        ));
+        assert!(matches!(
+            client.get_share_link(SPACE_ID, ""),
+            Err(AnytypeError::Validation { .. })
+        ));
     }
 
     #[tokio::test]

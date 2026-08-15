@@ -544,6 +544,15 @@ hash and skips the mutation when the replacement is already canonical.
 A staged source for that no-op is consumed under the same idempotency
 operation, so replay does not require a new mutation candidate.
 
+An import whose multipart body has started remains a dispatched mutation while
+the retained source is revalidated. If the live Anytype server does not settle
+after a mid-body source race, the request ends at the configured request
+deadline with fixed mutation-indeterminate guidance and is never retried.
+Callers must reread inventory before choosing a new idempotency key. The
+streaming client has a scripted-peer regression that proves a paused reader
+resumes promptly after release; the live-server deadline remains the supported
+containment for an upstream peer that does not settle.
+
 Remote staging binds only a configured loopback address. An external deployment
 terminates HTTPS in a separately managed reverse proxy and points
 `public_base_url` at that proxy. Bearers remain in the `Authorization` header

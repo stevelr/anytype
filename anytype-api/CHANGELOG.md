@@ -8,6 +8,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Construct universal object share links locally from validated space and object
+  IDs. This replaces the retired `ObjectShareByLink` Heart RPC, whose retained
+  compatibility stub terminates the server when called.
+- Serialize first-use gRPC client initialization behind the client cache,
+  prefer a nonempty session token over an account key, and classify missing
+  credentials and connection failures without exposing their values. Local
+  endpoint discovery now checks `lsof` exit status and has deterministic
+  coverage for candidate filtering and responsive-port selection.
 - Send the `spaceUxType` chat detail as well as the legacy `withChat` flag when
   creating chat spaces over gRPC. Heart 0.50.10 selects chat UX from the detail
   while its REST space readback reports the immutable regular-space type, so
