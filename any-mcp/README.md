@@ -2231,6 +2231,12 @@ diagnostics never echo configured values, tokens, session IDs, or bodies.
 These authentication, listener, proxy, and admission requirements are part
 of the supported operator contract.
 
+`SIGINT` and, on Unix, `SIGTERM` stop HTTP admission, drain within the selected
+shutdown deadline, and exit successfully. Spawned-process conformance checks
+both signals across stable and preview listeners after proving that the real
+loopback endpoint is responding; the same signal pair is covered for
+initialized stdio servers.
+
 ## License
 
 Apache License, Version 2.0

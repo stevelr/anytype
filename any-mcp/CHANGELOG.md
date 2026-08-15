@@ -19,6 +19,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   protocol initialization and while serving either stable or preview traffic.
   Shutdown rejects new work, cancels in-flight requests, drains owned artifact
   settlement and staging work, and returns a successful process status.
+  Spawned-process regressions now apply the same `SIGINT`/`SIGTERM` matrix to
+  ready stable and preview Streamable HTTP listeners and require a bounded
+  successful exit with fixed, redacted diagnostics.
 - Derive a separate content-free reviewed event stream from disposable
   Anytype's raw server log. Live failure evidence and body-log assertions use
   only fixed severity/component/category records, while descriptor-based

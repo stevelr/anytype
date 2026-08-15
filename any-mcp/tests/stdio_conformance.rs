@@ -6,6 +6,9 @@
 //! End-to-end stdio protocol regression and acceptance tests for the
 //! production binary.
 //!
+//! The Unix signal cases also start the production Streamable HTTP listener
+//! so both process transports share one bounded shutdown contract.
+//!
 //! The harness deliberately uses only portable Rust process, TCP, thread, and
 //! channel APIs. It starts a bounded local Anytype HTTP fixture, drives the
 //! private process-test wrapper for the real `anyr mcp` entrypoint one JSON-RPC
@@ -44,6 +47,8 @@ const DEADLINE: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 const HTTP_TOKEN: &str = "conformance-http-token-must-never-be-logged";
+#[cfg(unix)]
+const HTTP_LISTENER_TOKEN: &str = "conformance-listener-token-must-never-be-logged";
 const INPUT_SECRET: &str = "conformance-input-secret-must-never-be-logged";
 const DOCUMENT_BODY: &str = "# conformance document body must stay off stderr";
 const SPACE_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y.2tq5w93cr6oe7";
@@ -382,32 +387,7 @@ impl ConformanceProcessExt for ProtocolProcess {
         read_only: bool,
         protocol: Option<&str>,
     ) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
-        command
-            .env("ANYTYPE_URL", &fixture.address)
-            .env("ANYTYPE_KEYSTORE", "env")
-            .env("ANYTYPE_KEYSTORE_SERVICE", "any-mcp-conformance")
-            .env("ANYTYPE_KEY_HTTP_TOKEN", HTTP_TOKEN)
-            .env("ANY_MCP_READ_ONLY", if read_only { "1" } else { "0" })
-            .env("ANY_MCP_MAX_CONCURRENCY", "1")
-            .env("ANY_MCP_STARTUP_TIMEOUT_SECS", "5")
-            .env("ANY_MCP_REQUEST_TIMEOUT_SECS", "5")
-            .env("RUST_LOG", "any_mcp=info")
-            .env_remove("ANYTYPE_GRPC_ENDPOINT")
-            .env_remove("ANYTYPE_KEY_ACCOUNT_ID")
-            .env_remove("ANYTYPE_KEY_ACCOUNT_KEY")
-            .env_remove("ANYTYPE_KEY_SESSION_TOKEN");
-        if let Some(profile) = profile {
-            command.env("ANY_MCP_PROFILE", profile);
-        } else {
-            command.env_remove("ANY_MCP_PROFILE");
-        }
-        if let Some(protocol) = protocol {
-            command.env("ANY_MCP_PROTOCOL", protocol);
-        } else {
-            command.env_remove("ANY_MCP_PROTOCOL");
-        }
-        ProtocolProcess::spawn(command)
+        ProtocolProcess::spawn(conformance_command(fixture, profile, read_only, protocol))
     }
 
     fn modern_request(&mut self, id: u64, method: &str, params: Value) -> Value {
@@ -439,6 +419,40 @@ impl ConformanceProcessExt for ProtocolProcess {
         self.record_response(&response);
         response
     }
+}
+
+fn conformance_command(
+    fixture: &HttpFixture,
+    profile: Option<&str>,
+    read_only: bool,
+    protocol: Option<&str>,
+) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
+    command
+        .env("ANYTYPE_URL", &fixture.address)
+        .env("ANYTYPE_KEYSTORE", "env")
+        .env("ANYTYPE_KEYSTORE_SERVICE", "any-mcp-conformance")
+        .env("ANYTYPE_KEY_HTTP_TOKEN", HTTP_TOKEN)
+        .env("ANY_MCP_READ_ONLY", if read_only { "1" } else { "0" })
+        .env("ANY_MCP_MAX_CONCURRENCY", "1")
+        .env("ANY_MCP_STARTUP_TIMEOUT_SECS", "5")
+        .env("ANY_MCP_REQUEST_TIMEOUT_SECS", "5")
+        .env("RUST_LOG", "any_mcp=info")
+        .env_remove("ANYTYPE_GRPC_ENDPOINT")
+        .env_remove("ANYTYPE_KEY_ACCOUNT_ID")
+        .env_remove("ANYTYPE_KEY_ACCOUNT_KEY")
+        .env_remove("ANYTYPE_KEY_SESSION_TOKEN");
+    if let Some(profile) = profile {
+        command.env("ANY_MCP_PROFILE", profile);
+    } else {
+        command.env_remove("ANY_MCP_PROFILE");
+    }
+    if let Some(protocol) = protocol {
+        command.env("ANY_MCP_PROTOCOL", protocol);
+    } else {
+        command.env_remove("ANY_MCP_PROTOCOL");
+    }
+    command
 }
 
 #[test]
@@ -1022,6 +1036,125 @@ fn assert_signal_shutdown(output: &process_support::ProcessOutput) {
 }
 
 #[cfg(unix)]
+struct HttpListenerTokenFile {
+    path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl HttpListenerTokenFile {
+    fn create() -> Self {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .join(format!(
+                "any-mcp-http-signal-token-{}-{:016x}",
+                std::process::id(),
+                getrandom::u64().expect("random HTTP signal token suffix")
+            ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .expect("create private HTTP signal token");
+        file.write_all(HTTP_LISTENER_TOKEN.as_bytes())
+            .expect("write HTTP signal token");
+        file.sync_all().expect("sync HTTP signal token");
+        Self { path }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HttpListenerTokenFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn reserve_loopback_address() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve HTTP signal address");
+    listener.local_addr().expect("HTTP signal address")
+}
+
+#[cfg(unix)]
+fn wait_for_http_listener(address: std::net::SocketAddr) {
+    let deadline = std::time::Instant::now() + DEADLINE;
+    let mut last_evidence = "listener did not accept a connection".to_owned();
+    while std::time::Instant::now() < deadline {
+        match TcpStream::connect_timeout(&address, Duration::from_millis(100)) {
+            Ok(mut stream) => {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .expect("set HTTP signal probe read timeout");
+                let request =
+                    format!("GET /mcp HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
+                if let Err(error) = stream.write_all(request.as_bytes()) {
+                    last_evidence = format!("write readiness probe: {error}");
+                } else {
+                    let mut response = [0_u8; 256];
+                    match stream.read(&mut response) {
+                        Ok(read) if response[..read].starts_with(b"HTTP/1.1 401") => return,
+                        Ok(read) => {
+                            last_evidence = format!(
+                                "readiness probe returned unexpected response: {}",
+                                String::from_utf8_lossy(&response[..read])
+                            );
+                        }
+                        Err(error) => last_evidence = format!("read readiness probe: {error}"),
+                    }
+                }
+            }
+            Err(error) => last_evidence = format!("connect readiness probe: {error}"),
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    panic!("HTTP process did not become ready: {last_evidence}");
+}
+
+#[cfg(unix)]
+fn start_http_signal_process(
+    fixture: &HttpFixture,
+    protocol: Option<&str>,
+) -> (ProtocolProcess, HttpListenerTokenFile) {
+    let token_file = HttpListenerTokenFile::create();
+    let address = reserve_loopback_address();
+    let mut command = conformance_command(fixture, Some("compact"), false, protocol);
+    command
+        .env("ANY_MCP_TRANSPORT", "streamable-http")
+        .env("ANY_MCP_HTTP_BIND", address.to_string())
+        .env("ANY_MCP_HTTP_ALLOWED_HOSTS", address.to_string())
+        .env("ANY_MCP_HTTP_AUTH", "static-token")
+        .env("ANY_MCP_HTTP_TOKEN_FILE", &token_file.path)
+        .env("ANY_MCP_HTTP_SHUTDOWN_SECS", "2");
+    let process = ProtocolProcess::spawn(command);
+    wait_for_http_listener(address);
+    (process, token_file)
+}
+
+#[cfg(unix)]
+fn assert_http_signal_shutdown(output: &process_support::ProcessOutput) {
+    assert_eq!(output.exit_category, "success");
+    assert!(
+        output.stdout.is_empty(),
+        "HTTP reserves stdout for protocol output"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("http_transport_stopping"),
+        "HTTP signal shutdown emits its fixed diagnostic"
+    );
+    for secret in [HTTP_TOKEN, HTTP_LISTENER_TOKEN, INPUT_SECRET, DOCUMENT_BODY] {
+        assert!(
+            !stderr.contains(secret),
+            "HTTP signal diagnostic is redacted"
+        );
+    }
+}
+
+#[cfg(unix)]
 #[test]
 fn initialized_stable_stdio_exits_successfully_on_sigint_with_stdin_open() {
     let fixture = HttpFixture::start();
@@ -1048,6 +1181,33 @@ fn initialized_preview_stdio_exits_successfully_on_sigterm_with_stdin_open() {
         .expect("SIGTERM stops production stdio cleanly");
     fixture.finish();
     assert_signal_shutdown(&output);
+}
+
+#[cfg(unix)]
+#[test]
+fn listening_stable_http_exits_successfully_on_sigint() {
+    let fixture = HttpFixture::start();
+    let (process, _token_file) = start_http_signal_process(&fixture, None);
+
+    let output = process
+        .signal_and_finish(libc::SIGINT)
+        .expect("SIGINT stops production HTTP cleanly");
+    fixture.finish();
+    assert_http_signal_shutdown(&output);
+}
+
+#[cfg(unix)]
+#[test]
+fn listening_preview_http_exits_successfully_on_sigterm() {
+    let fixture = HttpFixture::start();
+    let (process, _token_file) =
+        start_http_signal_process(&fixture, Some("experimental-2026-07-28"));
+
+    let output = process
+        .signal_and_finish(libc::SIGTERM)
+        .expect("SIGTERM stops production HTTP cleanly");
+    fixture.finish();
+    assert_http_signal_shutdown(&output);
 }
 
 #[test]
