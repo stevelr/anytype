@@ -68,7 +68,7 @@ subtle = "2.6.1"
 test-log = { version = "0.2.21", features = ["log", "trace"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
-toml = "0.9.12"
+toml = "1.1.4"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tracing = "0.1.44"
