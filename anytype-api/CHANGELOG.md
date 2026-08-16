@@ -10,7 +10,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Construct universal object share links locally from validated space and object
   IDs. This replaces the retired `ObjectShareByLink` Heart RPC, whose retained
-  compatibility stub terminates the server when called.
+  compatibility stub terminates the server when called. The disposable
+  object-link live test is now registered in the protected live manifest,
+  which owns 20 required cases.
 - Serialize first-use gRPC client initialization behind the client cache,
   prefer a nonempty session token over an account key, and classify missing
   credentials and connection failures without exposing their values. Local

@@ -678,7 +678,7 @@ pub async fn find_grpc(program: Option<impl Into<String>>) -> Option<u16> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = program;
-        return None;
+        None
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

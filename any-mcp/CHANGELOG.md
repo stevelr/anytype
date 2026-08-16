@@ -19,6 +19,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   case now serves an application-generated incremental event stream and
   proves generation stalls under backpressure and completes exactly once the
   reader resumes. The README documents the supported reconnect contract.
+- Staging tests now retry a bounded number of freshly probed loopback ports
+  when activation loses the probe-then-bind race to a concurrent test, which
+  removes an intermittent CI failure in the restart reconciliation cases.
 - Define the terminal contract for a live file import that does not settle
   after a mid-body source race. The single dispatched upload remains bounded by
   the request deadline, returns mutation-indeterminate guidance, and is not

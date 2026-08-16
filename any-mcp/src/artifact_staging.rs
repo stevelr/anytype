@@ -3776,22 +3776,51 @@ mod tests {
         std::fs::create_dir(&root).expect("create staging root");
         crate::artifact_roots::prepare_test_private_directory(&root)
             .expect("make staging root owner-private");
-        let config = staging_test_config_with_limits(&root, limits_toml);
-        let roots = RootRegistry::activate(&config).expect("activate empty local roots");
-        let shutdown = CancellationToken::new();
-        let staging = ArtifactStaging::activate(
-            config.staging().expect("staging declaration"),
-            &config.limits,
-            &roots,
-            shutdown.clone(),
-        )
-        .await
-        .expect("activate staging");
+        let (_config, _roots, shutdown, staging) = activate_fresh_staging(&root, limits_toml).await;
         TestStaging {
             staging,
             shutdown,
             root,
         }
+    }
+
+    /// Activates staging on a prepared root with a freshly probed loopback
+    /// port, retrying the bind race a bounded number of times.
+    ///
+    /// The probe port is released before activation binds it, so concurrent
+    /// tests in the same process can occasionally claim it in between; only a
+    /// bind failure (`Upstream` from a fresh root) is retried, with a new
+    /// probe port each attempt.
+    async fn activate_fresh_staging(
+        root: &Path,
+        limits_toml: &str,
+    ) -> (
+        ArtifactConfig,
+        RootRegistry,
+        CancellationToken,
+        ArtifactStaging,
+    ) {
+        const BIND_ATTEMPTS: u32 = 8;
+        for attempt in 1..=BIND_ATTEMPTS {
+            let config = staging_test_config_with_limits(root, limits_toml);
+            let roots = RootRegistry::activate(&config).expect("activate empty local roots");
+            let shutdown = CancellationToken::new();
+            match ArtifactStaging::activate(
+                config.staging().expect("staging declaration"),
+                &config.limits,
+                &roots,
+                shutdown.clone(),
+            )
+            .await
+            {
+                Ok(staging) => return (config, roots, shutdown, staging),
+                Err(StagingError::Upstream) if attempt < BIND_ATTEMPTS => {
+                    shutdown.cancel();
+                }
+                Err(error) => panic!("activate staging: {error:?}"),
+            }
+        }
+        unreachable!("bounded activation loop always returns or panics")
     }
 
     fn space_id() -> SpaceId {
@@ -5515,17 +5544,7 @@ mod tests {
         std::fs::create_dir(&root).expect("create staging root");
         crate::artifact_roots::prepare_test_private_directory(&root)
             .expect("make staging root owner-private");
-        let config = staging_test_config(&root);
-        let roots = RootRegistry::activate(&config).expect("activate empty local roots");
-        let shutdown = CancellationToken::new();
-        let staging = ArtifactStaging::activate(
-            config.staging().expect("staging declaration"),
-            &config.limits,
-            &roots,
-            shutdown.clone(),
-        )
-        .await
-        .expect("activate first generation");
+        let (_config, roots, shutdown, staging) = activate_fresh_staging(&root, "").await;
         let allocation = staging
             .allocate_import(space_id(), 5, Some("text/plain".to_owned()), None)
             .await

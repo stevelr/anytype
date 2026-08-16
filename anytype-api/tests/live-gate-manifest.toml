@@ -101,6 +101,11 @@ target = "test_views"
 test = "test_view_list_objects_collection_and_set"
 serial_group = "disposable_anytype_api"
 
+[[required]]
+target = "test_object_links"
+test = "object_link_is_local_and_preserves_live_server_health_and_cleanup"
+serial_group = "disposable_anytype_api"
+
 [[soak]]
 target = "test_filters"
 test = "test_filter_number_checkbox_condition_matrix"

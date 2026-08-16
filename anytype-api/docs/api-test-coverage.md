@@ -268,7 +268,7 @@ matrices, repaired CLI output contracts, backup-before-delete archive
 selection, exact ignored-test dispositions, and protected serial live gates
 for anytype-api, any-mcp, and anyr.
 
-The anytype-api manifest now owns 19 required cases, three scheduled
+The anytype-api manifest now owns 20 required cases, three scheduled
 characterization cases, and two explicitly excluded probes. Seven superseded
 filter ignores were removed. The former ambient Set/view probes now create
 cleanup-owned source-backed Sets and collections. These cross-crate gates are
