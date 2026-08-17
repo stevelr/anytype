@@ -498,8 +498,8 @@ impl KeyStore {
         debug!(service = &self.service, user = name, "get_key");
         // Read the credential directly by (service, user) via `build`, mirroring
         // how `put_key`/`remove_key` address entries. This avoids `search()`,
-        // which some backends (e.g. keyutils) do not implement — they return
-        // `NotSupportedByStore` and break all reads even though writes succeed.
+        // which some backends (e.g. keyutils) do not implement (they return
+        // `NotSupportedByStore` and break all reads even though writes succeed).
         let entry = self.store.build(&self.service, name, None)?;
         match entry.get_password() {
             Ok(key) => Ok(Some(key)),

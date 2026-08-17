@@ -99,8 +99,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   may have applied the write before rate-limiting the response, so the fixed
   conflict error now directs callers to observe fresh state before retrying.
 - On Windows, staging single-instance exclusion now relies on the exclusively
-  locked `instance.lock` — which Windows refuses to unlink or replace while
-  held — instead of an undocumented directory lock, and directory-entry
+  locked `instance.lock` (which Windows refuses to unlink or replace while
+  held) instead of an undocumented directory lock, and directory-entry
   durability is delegated to the NTFS metadata journal while file contents
   remain explicitly flushed before every publication.
 
@@ -116,14 +116,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   rejection when no bearer token is presented.
 
 - Verified the Streamable HTTP transport against a real headless backend under
-  static-token authentication: the six shared domain scenarios — discovery,
-  documents, views, mutations, markdown no-op, and archive — plus the compact
+  static-token authentication: the six shared domain scenarios (discovery,
+  documents, views, mutations, markdown no-op, and archive), plus the compact
   and read-only catalog sentinels all pass on protocol `2025-11-25`, with
   mutations exercised in a disposable prefix-authorized space.
 
 - Run the artifact data-plane acceptance and adversarial suites on every
   released target of the platform matrix. The portable CI job declares one row
-  per target — Linux x86_64/aarch64, macOS aarch64, Windows x86_64/aarch64 —
+  per target (Linux x86_64/aarch64, macOS aarch64, Windows x86_64/aarch64),
   and each row executes both compiled artifact control planes serially: the
   library plane, which also locks the exact artifact catalog and schema
   snapshots, and the spawned `headless_stdio_e2e` plane, which adds the
@@ -147,8 +147,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Prove the artifact configuration-selection contract end to end. The policy
   scenario family gains a no-selected-file compatibility row: the fixture
-  renders a complete policy that no server selects, and every control plane —
-  scripted, direct, stable, and preview — must advertise the unreduced
+  renders a complete policy that no server selects, and every control plane
+  (scripted, direct, stable, and preview) must advertise the unreduced
   read-write catalog while reporting zero import and export roots, no staging,
   and the fixed roots-required guidance for every root-based call. The same
   family now closes the truth table that the required `spaces.read_only`
@@ -364,8 +364,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   stdout, stderr, exit status, and result-shape validation all succeed. A
   validator that leaves a descendant behind after oversized output or another
   refusal can no longer leak that process beyond the request boundary.
-- Reap staged records whose live payload handle was surrendered — failed
-  transfers, aborted writes, and shutdown racing an active upload — by
+- Reap staged records whose live payload handle was surrendered (failed
+  transfers, aborted writes, and shutdown racing an active upload) by
   reopening the payload through its durable identity, and persist terminal
   pathname-cleanup evidence only once an unlink target is in hand, so routine
   failures can no longer strand startup-blocking reconciliation evidence.
@@ -460,13 +460,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   ignored, so a changed client root needs a new session. A client that
   advertises no roots capability keeps the configured policy unchanged, as do
   preview stdio and the HTTP transport. A snapshot that cannot be frozen
-  securely — transport failure, timeout, more than 64 roots, a duplicate
-  alias, or a URI that is not a canonical local `file:` directory — disables
+  securely (transport failure, timeout, more than 64 roots, a duplicate
+  alias, or a URI that is not a canonical local `file:` directory) disables
   local root operations for the rest of the session instead of falling back to
   the broader configured policy. Staged operations are unaffected, and client
   root URIs and display names never appear in diagnostics or receipts.
-- Add artifact content acceptance scenarios — a representative MIME matrix,
-  document canonicalization, and configured validators — to the multi-transport
+- Add artifact content acceptance scenarios (a representative MIME matrix,
+  document canonicalization, and configured validators) to the multi-transport
   artifact harness. Every scenario runs on the scripted, stable, and preview
   stdio control planes over both the local-roots and staging data planes, and
   all of them must observe identical content evidence. The MIME matrix round
@@ -484,9 +484,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   executable when the host keeps one outside `PATH`. Select the new live
   target with `--features acceptance-harness --test headless_stdio_e2e
   headless_artifact_content_spawned_scenarios`.
-- Add artifact policy and configuration acceptance scenarios — space policy
+- Add artifact policy and configuration acceptance scenarios (space policy
   omitted, empty, and restricted elsewhere, read-only mode, and disabled
-  staging — to the multi-transport artifact harness. Each scenario is a
+  staging) to the multi-transport artifact harness. Each scenario is a
   complete server configuration executed across the direct router and the
   scripted, stable, and preview stdio control planes, and every control plane
   is required to report the same advertised catalog, the same artifact status
@@ -505,8 +505,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   (authorized local roots and the remote HTTP staging service), and an offline
   inventory test proves the direct-router and spawned targets together execute
   all eight transports exactly once. Every transport runs the same
-  content-free smoke scenario — file import and export, document create,
-  export and update, and an explicit staging allocate and release — compares
+  content-free smoke scenario (file import and export, document create,
+  export and update, and an explicit staging allocate and release), compares
   its advertised catalog against the reviewed
   `tests/snapshots/artifact-catalog.snap` fixture, and then compares the
   complete executed matrix for exact byte-length and hash parity. The harness
@@ -1133,7 +1133,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   limitations, hard bounds, cursor binding rules, and the shared-module
   conversion strategy.
 - Define a typed, bounded, fail-closed anytype-api body block model
-  (any-2f0g.18) over ObjectShow and block RPCs —
+  (any-2f0g.18) over ObjectShow and block RPCs:
   BodySnapshot/BodyBlock trees, closed v1 content/style/mark variants, opaque
   unsupported reads, graph validation, context/space ownership, verified
   mutation evidence, limits, and forward compatibility.

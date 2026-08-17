@@ -573,8 +573,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `BodyLimits` clamp to hard ceilings and can only tighten. Malformed,
   duplicate, cyclic, dangling, or oversized graphs fail the whole read with
   the new `AnytypeError::BodyGraph` variant, whose display and `detail` carry
-  only block IDs and structural counts — never block text, URLs, or tokens —
-  and a partial or truncated snapshot is never returned.
+  only block IDs and structural counts.
 - `AnytypeError::is_authentication()` now exposes a secret-safe,
   `anytype-api`-level classification for direct and nested gRPC authentication
   failures without requiring callers to depend on `anytype-rpc` or format
@@ -652,7 +651,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   heartbeat intervals
 - structured gRPC chat message blocks, pin state, unread-reaction state, and
   attachment replacement for rich message publishing and full-fidelity reads
-- new `resolve` module: name and id resolution helpers as `AnytypeClient` methods —
+- new `resolve` module: name and id resolution helpers as `AnytypeClient` methods:
   `resolve_space_id`, `resolve_type`, `resolve_type_id`, `resolve_type_ids`,
   `resolve_type_key`, `resolve_template`, `resolve_view_id`, `resolve_property_id`, `resolve_chat_target`
   (returns the new `ChatTarget` struct), `resolve_chat_ids`, `resolve_chat_name`,

@@ -11,15 +11,15 @@
 //! snapshot can only remove static authority; it never adds any.
 //!
 //! A client that advertises no roots capability keeps the configured static
-//! policy. An unusable snapshot — transport failure, timeout, oversize,
-//! duplicate, or unparsable entry — freezes local root operations as disabled
+//! policy. An unusable snapshot (transport failure, timeout, oversize,
+//! duplicate, or unparsable entry) freezes local root operations as disabled
 //! for the whole session and never falls back to broader static roots.
 //!
 //! Client root URIs and decoded paths never enter diagnostics or receipts.
 //!
 //! rmcp marks the whole roots wire model deprecated ahead of SEP-2577, but it
 //! is the only released mechanism for client-supplied filesystem roots, so
-//! this module — and only this module — opts out of that deprecation. The
+//! this module opts out of that deprecation. The
 //! opt-out is item-scoped to the declarations that name the deprecated wire
 //! types, so unrelated deprecations in this file still warn.
 

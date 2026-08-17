@@ -27,12 +27,12 @@ after 2026-08-10 07:12 UTC.
 
 Coverage classes:
 
-- **unit** — offline tests inside `src/` modules, backed by scripted HTTP
+- **unit**: offline tests inside `src/` modules, backed by scripted HTTP
   fixture servers or constructed transport-independent values. Run in tier 1
   (`cargo test -p anytype --lib`). The custom semantic gRPC mock has been
   removed; gRPC behavior is covered by constructed reducer values plus
   real-server tests.
-- **live** — `tests/` integration tests requiring a running Anytype server
+- **live**: `tests/` integration tests requiring a running Anytype server
   (`.test-env`, default `127.0.0.1:31012`). Tier 2, serial only. Shared
   contexts now REQUIRE `ANYTYPE_TEST_SPACE_PREFIX`, create a fresh uniquely
   named space per test, and delete it on the way out; ambient space-ID
@@ -353,7 +353,7 @@ the remaining archived-object builder belongs to `any-vjj`.
 
 ## Known fixture constraints
 
-- Space deletion: RESOLVED — production `delete_space` plus the test-only
+- Space deletion: RESOLVED production `delete_space` plus the test-only
   disposable-space lifecycle now exist; disposable contexts create and delete a
   fresh space per test. The former "no space delete API" blocker no longer
   applies.

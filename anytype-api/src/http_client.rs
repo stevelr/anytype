@@ -1483,7 +1483,7 @@ impl HttpClient {
     /// The JSON [`delete_request`](Self::delete_request) helper deserializes a
     /// response entity; this variant is for non-file endpoints that return
     /// `204` with no body (currently chat message deletion). REST file
-    /// deletion — including permanent deletion — routes through
+    /// deletion routes through
     /// [`file_request`](Self::file_request) instead, which applies the long
     /// timeout profile that the observed ~154-second permanent delete
     /// requires. Do not route file deletes back through this

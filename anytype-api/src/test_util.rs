@@ -3759,9 +3759,7 @@ fn test_keystore_spec_from(configured: std::result::Result<String, VarError>) ->
 /// Describes the endpoint and keystore an integration test run resolved to.
 ///
 /// A setup failure is almost always a misconfigured environment rather than a
-/// defect in the test, and [`AnytypeError`] redacts its own `Display`, so the
-/// harness names the inputs it actually used. Only the resolved endpoint and
-/// keystore *spec* are shown — never a stored credential.
+/// defect in the test. [`AnytypeError`] redacts `Display` to prevent credential display.
 #[doc(hidden)]
 pub fn test_environment_summary() -> String {
     let base_url = std::env::var(crate::config::ANYTYPE_TEST_URL_ENV)

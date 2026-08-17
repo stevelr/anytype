@@ -21,15 +21,15 @@ Recommended, by environment:
    default resolution prefers the D-Bus Secret Service (gnome-keyring or
    KWallet) whenever a session bus is present. The OS keyring needs no path
    or key management, encrypts secrets at rest under your login password,
-   mediates access with OS prompts, and — because the keyring daemon
-   serializes concurrent clients — has no file-locking concerns when a
+   mediates access with OS prompts, and, because the keyring daemon
+   serializes concurrent clients, has no file-locking concerns when a
    long-running service and CLI invocations share credentials.
 2. **Headless servers, containers, CI: use an explicit `file:` spec** (or
    `env` for CI runners with injected secrets). A Secret Service needs a
    session bus and an unlocked keyring daemon, which on a machine with no
    interactive login means extra setup (user lingering, a scripted unlock
    with a fixed passphrase, and in containers the `CAP_IPC_LOCK` capability
-   for gnome-keyring's mlock wrapper) — and an unlock passphrase stored next
+   for gnome-keyring's mlock wrapper), and an unlock passphrase stored next
    to the keyring protects little more than a `0600` file does. The file
    keystore is one artifact that works everywhere, is easy to back up, and
    supports optional at-rest encryption.
@@ -42,7 +42,7 @@ Recommended, by environment:
 **Set the spec explicitly in service deployments.** When no keystore is
 selected, Linux default resolution probes the Secret Service and silently
 falls back to the file store at the default path if the bus or daemon is
-unreachable — so a service can come up "successfully" reading an empty file
+unreachable, so a service can come up "successfully" reading an empty file
 store and report missing credentials. An explicit `ANYTYPE_KEYSTORE`
 (`secret-service` or `file:path=...`) makes that failure loud instead.
 

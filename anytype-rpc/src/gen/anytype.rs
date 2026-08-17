@@ -2173,13 +2173,11 @@ pub mod event {
         /// archive on its own (e.g. the memory-growth detector), so clients can
         /// surface it or queue the archive for upload without polling the
         /// profiles directory. Archives produced as a result of a client RPC
-        /// (DebugRunProfiler) are NOT re-announced via this event — the RPC
-        /// response already carries the path.
+        /// (DebugRunProfiler) are NOT re-announced via this event.
         #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
         pub struct ProfileCreated {
             /// reason is a short, stable, UPPER_SNAKE_CASE label describing why the
-            /// middleware produced this report. It is NOT the DebugRunProfiler
-            /// Reason enum — values come from the internal call sites:
+            /// middleware produced this report. values come from the internal call sites:
             ///
             /// * "MEMORY_GROWTH"  : the desktop memory-growth detector tripped
             /// * "LONG_RPC"       : an RPC exceeded the long-execution threshold

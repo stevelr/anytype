@@ -388,8 +388,8 @@ client root needs a new session.
 
 A client that advertises no roots capability keeps the configured policy
 unchanged, as do preview stdio and the HTTP transport. A snapshot that cannot be
-frozen securely — transport failure, timeout, more than 64 roots, a duplicate
-alias, or a URI that is not a canonical local `file:` directory — disables local
+frozen securely (transport failure, timeout, more than 64 roots, a duplicate
+alias, or a URI that is not a canonical local `file:` directory) disables local
 root operations for the rest of the session rather than falling back to the
 broader configured policy. Staged operations are unaffected. Client root URIs
 and display names never appear in diagnostics or receipts.
@@ -428,9 +428,9 @@ verification without granting a second readable source lease.
 The staging root is a closed durable layout owned exclusively by one server
 instance: `instance.lock` plus the `records/`, `payloads/`, `tmp/`, and
 `tombstones/` directories. Every staging state transition is flushed to disk
-before it becomes visible, and startup reconciles the layout — resuming
+before it becomes visible, and startup reconciles the layout (resuming
 interrupted deletions, truncating uncommitted upload bytes, and reviving
-retained import-reconciliation evidence — before the listener binds. Roots
+retained import-reconciliation evidence) before the listener binds. Roots
 written by releases before this layout are migrated automatically on first
 activation. Activation fails with the fixed `artifact state reconciliation
 failed` category when the root holds unknown entries or evidence that a prior
@@ -893,8 +893,8 @@ restrictions, and presentation remain exact, as do every non-root block except
 the one explicitly updated field.
 
 The finite `anytype-api` body lifecycle caps decoded Show at
-4,194,304 bytes and every non-Show body gRPC response—including foreground and
-fallback ObjectClose—at 65,536 bytes, owns cancellation-resilient bounded
+4,194,304 bytes and every non-Show body gRPC response, including foreground and
+fallback ObjectClose, at 65,536 bytes, owns cancellation-resilient bounded
 cleanup, shares one absolute deadline, and exposes the exact first-write-poll
 boundary. MCP body editors preserve the configured verification timeout and
 delays while capping inherited attempts at three; configured one- or
@@ -1314,9 +1314,9 @@ immediately before one non-replayed DELETE under the shared runtime controls
 and document-response ceiling.
 
 The DELETE response is dispatch evidence only and can never establish success.
-After every non-definitively-rejected dispatch—including a matching,
+After every non-definitively-rejected dispatch, including a matching,
 false, malformed, mismatched, oversized, transport, timeout-status, redirect,
-or other uncertain response—the handler performs finite independent
+or other uncertain response, the handler performs finite independent
 read-after-write confirmation instead of another DELETE. Within hard attempt,
 time, page, and item caps, confirmation must prove the exact id absent from the
 active HTTP object surface and present in the original-type-scoped archived
@@ -1452,8 +1452,7 @@ object type. The immediate POST response and final verification GET are both
 revalidated. A success requires safe matching object, space, and type id/key
 plus semantic agreement for each caller-supplied name, Markdown body, icon,
 and typed property in both representations. The MCP result contains only a
-bounded object summary and canonical resource link—not the body or an implicit
-property projection.
+bounded object summary and canonical resource link.
 
 All optional fields reject explicit JSON `null`; omission means that the field
 is absent from the create payload. Names are nonempty, while an explicitly
@@ -1649,69 +1648,69 @@ runtime and advertises their static capability alongside the tool catalog.
 - `src/artifact_roots.rs`: retained root capabilities and client narrowing.
 - `src/artifact_client_roots.rs`: session-scoped `roots/list` snapshot decision.
 - `src/space_policy.rs`: frozen canonical Anytype-space authorization.
-- `src/config.rs` — validated environment and operational limits.
-- `src/logging.rs` — stderr-only tracing setup.
-- `src/runtime.rs` — authenticated client, controls, and stdio lifecycle.
-- `src/main.rs` — non-interactive startup and binary exit behavior.
-- `src/lib.rs` — shared crate surface for the binary and tests.
-- `src/domain.rs` — bounded values, object summaries, and resource URIs.
-- `src/discovery.rs` — typed status and schema-discovery contracts and
+- `src/config.rs`: validated environment and operational limits.
+- `src/logging.rs`: stderr-only tracing setup.
+- `src/runtime.rs`: authenticated client, controls, and stdio lifecycle.
+- `src/main.rs`: non-interactive startup and binary exit behavior.
+- `src/lib.rs`: shared crate surface for the binary and tests.
+- `src/domain.rs`: bounded values, object summaries, and resource URIs.
+- `src/discovery.rs`: typed status and schema-discovery contracts and
   transport-neutral handlers.
-- `src/discussion_toolset.rs` — exact read-only attached-discussion discovery
+- `src/discussion_toolset.rs`: exact read-only attached-discussion discovery
   and its production-unlinked optional-registry descriptor.
-- `src/schema.rs` — strict input/output schema generation.
-- `src/schema_toolset.rs` — complete production schema descriptor and
+- `src/schema.rs`: strict input/output schema generation.
+- `src/schema_toolset.rs`: complete production schema descriptor and
   composition/token gates.
 - `src/schema_space_toolset.rs`, `src/schema_type_toolset.rs`,
-  `src/schema_property_toolset.rs`, and `src/schema_tag_toolset.rs` — bounded
+  `src/schema_property_toolset.rs`, and `src/schema_tag_toolset.rs`: bounded
   schema workflow contracts, handlers, and real-server acceptance.
-- `src/protocol.rs` — tool contracts and annotation profiles.
-- `src/resources.rs` — exact document template, empty instance listing, and
+- `src/protocol.rs`: tool contracts and annotation profiles.
+- `src/resources.rs`: exact document template, empty instance listing, and
   bounded resource reads.
-- `src/result.rs` — structured results with compact JSON text fallbacks.
-- `src/error.rs` — stable, redacted tool execution errors.
-- `src/filters.rs` — shared bounded filter DTOs and exact `anytype-api`
+- `src/result.rs`: structured results with compact JSON text fallbacks.
+- `src/error.rs`: stable, redacted tool execution errors.
+- `src/filters.rs`: shared bounded filter DTOs and exact `anytype-api`
   conversion.
-- `src/handler_support.rs` — controlled handler execution and checked page
+- `src/handler_support.rs`: controlled handler execution and checked page
   continuation helpers.
-- `src/object_output.rs` — validated summaries and bounded property projection.
-- `src/object_read.rs` — typed one-page object search and chunked object-get
+- `src/object_output.rs`: validated summaries and bounded property projection.
+- `src/object_read.rs`: typed one-page object search and chunked object-get
   handlers.
-- `src/object_archive.rs` — single-object soft archive contract and handler.
-- `src/object_update.rs` — conflict-aware whole-field update contract and
+- `src/object_archive.rs`: single-object soft archive contract and handler.
+- `src/object_update.rs`: conflict-aware whole-field update contract and
   read-after-write verifier.
-- `src/object_edit.rs` — conflict-safe ordered exact-match edit contract and
+- `src/object_edit.rs`: conflict-safe ordered exact-match edit contract and
   verified single-PATCH handler.
-- `src/object_create.rs` — verified create contract, closed write inputs, and
+- `src/object_create.rs`: verified create contract, closed write inputs, and
   bounded process-lifetime idempotency coordination.
-- `src/validation.rs` — reusable collection, filter, and body chunk bounds.
-- `src/pagination.rs` — bounded pagination inputs and result pages.
-- `src/cursor.rs` — opaque process-lifetime, query-bound cursor registry.
-- `src/view_handlers.rs` — bounded view discovery and selected-view object
+- `src/validation.rs`: reusable collection, filter, and body chunk bounds.
+- `src/pagination.rs`: bounded pagination inputs and result pages.
+- `src/cursor.rs`: opaque process-lifetime, query-bound cursor registry.
+- `src/view_handlers.rs`: bounded view discovery and selected-view object
   listing workflows.
-- `src/server.rs` — server identity, capabilities, and stable protocol
+- `src/server.rs`: server identity, capabilities, and stable protocol
   declaration.
-- `src/stdio.rs` — bounded stable lifecycle and explicitly gated stateless
+- `src/stdio.rs`: bounded stable lifecycle and explicitly gated stateless
   2026-07-28 adapter.
-- `src/server/headless_integration.rs` — ignored cleanup-safe production-router
+- `src/server/headless_integration.rs`: ignored cleanup-safe production-router
   tests against an authenticated headless Anytype server.
-- `tests/snapshots/` — reviewed deterministic compact/standard and
+- `tests/snapshots/`: reviewed deterministic compact/standard and
   read-write/read-only tool catalogs,
   including every schema and annotation.
-- `tests/stdio_conformance.rs` — portable production-process protocol
+- `tests/stdio_conformance.rs`: portable production-process protocol
   regression and preview/stable acceptance harness.
-- `tests/support/` — shared bounded process driver, transport-neutral live
+- `tests/support/`: shared bounded process driver, transport-neutral live
   scenario, and catalog-to-live-ownership audit.
-- `tests/headless_stdio_e2e.rs` — ignored production stdio-to-real-Anytype
+- `tests/headless_stdio_e2e.rs`: ignored production stdio-to-real-Anytype
   workflow with independent `anytype-api` readback, disposable lifecycle and
   panic sentinels, and cleanup.
 - `tests/discussions_stdio_acceptance.rs`: ignored stable and preview process
   acceptance for cleanup-owned attached discussions.
 - `tests/live_gate_manifest.rs`: offline closed-inventory and workflow-filter
   checks for every ignored live target.
-- `tests/schema/mcp-2026-07-28.json` — official draft schema used only as a
+- `tests/schema/mcp-2026-07-28.json`: official draft schema used only as a
   test oracle for actual preview requests and results.
-- `docs/STDIO_CONFORMANCE.md` — reproducible test, Inspector, and client
+- `docs/STDIO_CONFORMANCE.md`: reproducible test, Inspector, and client
   discovery evidence with current compatibility limits.
 
 ## Testing
@@ -1751,10 +1750,10 @@ cargo test -p any-mcp
 The `.github/workflows/any-mcp.yml` matrix runs the library schema, catalog,
 budget, and unit tests plus the real-process stdio suites on one row per
 released target: Linux x86_64/aarch64, macOS aarch64, and Windows
-x86_64/aarch64. Every row also runs both compiled artifact control planes —
-the library plane, which locks the exact artifact catalog and schema
+x86_64/aarch64. Every row also runs both compiled artifact control planes
+serially: the library plane, which locks the exact artifact catalog and schema
 snapshots, and the spawned `headless_stdio_e2e` plane, which adds the
-adversarial case matrix — serially. The process harness uses only portable
+adversarial case matrix. The process harness uses only portable
 Rust process, TCP, path, environment, thread, and channel APIs; it does not
 depend on Unix signals, `/tmp`, executable suffixes, or shell scripts. Each
 protocol response has a finite two-minute hang bound for debug binaries on
@@ -1878,8 +1877,8 @@ the remote HTTP staging service). An offline inventory test proves that the
 direct-router and spawned targets together execute all eight transports exactly
 once, so a transport cannot silently lose coverage.
 
-Every transport runs the same smoke scenario — file import/export, document
-create/export/update, and an explicit staging allocate/release — and returns
+Every transport runs the same smoke scenario (file import/export, document
+create/export/update, and an explicit staging allocate/release) and returns
 content-free evidence: the exact advertised artifact catalog snapshot, verified
 byte lengths, and SHA-256 hashes. Each run compares the advertised catalog with
 the reviewed `tests/snapshots/artifact-catalog.snap` fixture and then compares
@@ -1899,11 +1898,9 @@ projection, because narrowing is a per-session authority decision that must not
 be observable in the advertised surface.
 
 Two further scenario families reuse the same harness. The policy family
-executes a complete server configuration — no selected file, space policy
-omitted, empty, or restricted elsewhere, read-only mode, and disabled staging
-— across the scripted, direct, stable, and preview control planes, and every
-one of them must report the same advertised catalog, the same
-`artifact_status` projection, and the same refusal code and guidance. The
+executes a complete server configuration across the scripted, direct, stable,
+and preview control planes, and each must report the same advertised catalog,
+`artifact_status` projection, and refusal code and guidance. The
 no-selected-file row is the compatibility mode: the fixture still owns a
 complete policy on disk, no child selects it, and the server must advertise
 the unreduced read-write catalog while reporting zero roots and no staging and
@@ -1914,7 +1911,7 @@ required `spaces.read_only` declaration defines. A started server proves the
 two accepted rows (no selected file, and a selected file declaring
 `read_only = false`); the two refused rows start a bounded production child on
 both spawned stdio profiles, and each must die before its first protocol frame
-with an empty stdout and exactly one error diagnostic — `required field is
+with an empty stdout and exactly one error diagnostic: `required field is
 missing` at the located schema path for an absent declaration, and
 `selected any-mcp configuration must declare spaces.read_only = false` for
 `read_only = true`. Neither diagnostic may contain a fixture path or a
@@ -1974,8 +1971,8 @@ commit, then requires byte-uniform `not_found` for every previous-generation
 handle, at most one dispatched candidate object, an absent or hash-correct
 export destination, startup rejection of a second process on an owned staging
 root, and a complete happy-path import after recovery. Every executed
-failure-robustness row must additionally state its checkable evidence — an
-offline unit owner or a recorded live-owner run — and the inventory test
+failure-robustness row must additionally state its checkable evidence (an
+offline unit owner or a recorded live-owner run) and the inventory test
 rejects a promotion without evidence or an offline claim on a live-only
 owner.
 Flood owners measure aggregate status at maximum staged-record occupancy and
@@ -2100,8 +2097,7 @@ The preview case uses stateless discovery and drives representative read and
 mutation behavior through the real stdio process. Failure records contain the
 scenario and generated fixture IDs, protocol metadata, bounded
 request/outcome-category counts, structural stderr byte/line/category metrics,
-and cleanup outcome—never raw diagnostic lines, unknown fields, arguments,
-bodies, edit fragments, upstream errors, or credentials.
+and cleanup outcome.
 Direct cases additionally report `anytype-api` HTTP metric deltas; the spawned
 production child intentionally has no test-only metrics interface.
 
@@ -2179,7 +2175,7 @@ compatibility claim and reproducible client commands.
 Stdio is the default. `ANY_MCP_TRANSPORT=streamable-http` selects an
 authenticated loopback Streamable HTTP listener instead; one process never
 serves both. The HTTP transport exposes the same tools, schemas, structured
-results, profiles, read-only rules, and optional toolsets as stdio — the
+results, profiles, read-only rules, and optional toolsets as stdio. The
 domain handlers are shared, and handlers never observe raw headers or bearer
 values.
 
@@ -2191,10 +2187,10 @@ version, and `Last-Event-ID` headers, disables SSE buffering, and never logs
 credentials. Forwarded-identity headers (`X-Forwarded-*`, `Forwarded`) are
 ignored and stripped.
 
-Every request passes fixed gates in order — exact `Host` allowlist, exact
+Every request passes fixed gates in order (exact `Host` allowlist, exact
 `Origin` allowlist with fail-closed CORS, a process-global request-rate
 window, bearer authentication, a 64-request concurrency bound, and 2 MiB
-bounded body collection — before any JSON decoding or handler work.
+bounded body collection) before any JSON decoding or handler work.
 Authentication is required on every request and is separate from the Anytype
 keystore:
 
@@ -2217,9 +2213,9 @@ ACL entry to name the process user, LocalSystem, or Built-in Administrators.
 
 Stable mode accepts protocol revisions `2025-03-26`, `2025-06-18`, and
 `2025-11-25` over stateful sessions with optional SSE; revision `2024-11-05`
-remains stdio-only. Sessions are bound to the authenticated principal —
-another principal presenting a stolen session ID observes exactly an unknown
-session — and the process admits at most `ANY_MCP_HTTP_MAX_SESSIONS`
+remains stdio-only. Sessions are bound to the authenticated principal.
+Another principal presenting a stolen session ID observes exactly an unknown
+session, and the process admits at most `ANY_MCP_HTTP_MAX_SESSIONS`
 (default 32) concurrent sessions. Mutation idempotency is process-lifetime
 and partitioned by principal, so a client that loses its session can safely
 retry an uncertain create after re-initializing. With
@@ -2242,8 +2238,8 @@ is then delivered once on the resumed stream, which ends afterwards, and the
 upstream call is never redispatched. The standalone stream resumes as a live
 keep-alive stream; any-mcp emits no server-initiated messages, so it has
 nothing to replay. Once a response has been emitted its request-scoped stream
-is gone, and reconnecting after that point — like reconnecting with an unknown
-or malformed ID — returns an empty successful stream rather than an error, so
+is gone, and reconnecting after that point, like reconnecting with an unknown
+or malformed ID, returns an empty successful stream rather than an error, so
 a client that never read a delivered response must repeat the request
 (mutations remain safe through the process-lifetime idempotency described
 above). Deleting the session ends every stream bound to it. Recurring

@@ -62,7 +62,7 @@ const ACCEPTED_VERSIONS: [&str; 3] = ["2025-03-26", "2025-06-18", "2025-11-25"];
 /// HTTP clients in the wild (e.g. zeroclaw) still propose the launch
 /// revision while speaking the newer transport perfectly well, and the spec
 /// requires a server to answer an unsupported proposal with a version it
-/// does support — not reject the handshake. rmcp echoes any known proposed
+/// does support. rmcp echoes any known proposed
 /// version, so the session proceeds on the client's revision; the rest of
 /// this module is revision-agnostic.
 const INITIALIZE_ACCEPTED_VERSIONS: [&str; 4] =

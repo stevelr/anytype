@@ -321,9 +321,7 @@ pub enum AnytypeError {
     /// dangling, shared, cyclic, orphaned, oversized, or malformed. The read
     /// fails whole; a partial tree is never returned.
     ///
-    /// `detail` contains only block IDs and structural counts — never block
-    /// text, URLs, or tokens — and standard formatting omits it along with
-    /// the object identity.
+    /// `detail` contains only block IDs and structural counts.
     #[snafu(display("Body graph validation failed: {kind} (identity redacted)"))]
     BodyGraph {
         /// Object whose body failed validation.

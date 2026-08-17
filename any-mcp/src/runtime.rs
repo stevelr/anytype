@@ -354,8 +354,8 @@ impl RuntimeContext {
         &self.identity
     }
 
-    /// Returns a clone sharing every process-global resource — client,
-    /// operation permits, shutdown, correlation — under a fresh handler-state
+    /// Returns a clone sharing every process-global resource (client,
+    /// operation permits, shutdown, correlation) under a fresh handler-state
     /// identity.
     ///
     /// Identity-keyed handler state (idempotency registries, metrics) built

@@ -1329,8 +1329,8 @@ fn read_content_source(value: &str) -> Result<String> {
 ///
 /// Message ids are passed through unchanged. Anything else is treated as a
 /// (possibly hex-encoded) chat `order_id`: the hex form the CLI prints and
-/// accepts on the command line is decoded here — a CLI-only textual
-/// convenience — before the order-id-to-message-id lookup is delegated to the
+/// accepts on the command line is decoded here before the
+/// order-id-to-message-id lookup is delegated to the
 /// shared [`AnytypeClient::resolve_message_id`] resolver.
 async fn resolve_message_id_for_order(
     ctx: &AppContext,
@@ -1652,8 +1652,8 @@ mod tests {
         );
     }
 
-    // These tests cover `resolve_transport`'s policy mapping — the backend it
-    // returns for a given `--transport`/operation pair. The handlers now
+    // These tests cover `resolve_transport`'s policy mapping (the backend it
+    // returns for a given `--transport`/operation pair). The handlers
     // dispatch on that resolved backend (REST builders vs gRPC), so the mapping
     // is what selects the executed transport.
     #[test]

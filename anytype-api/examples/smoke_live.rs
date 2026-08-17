@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = AnytypeClient::with_config(config)?;
     client.set_api_key(HttpCredentials::new(key));
 
-    // (1) spaces list — exercises SpaceModel deserialization of "anytype.*" objects.
+    // (1) spaces list exercises SpaceModel deserialization of "anytype.*" objects.
     let spaces = client.spaces().list().await?;
     println!("spaces: {}", spaces.items.len());
     let space = spaces.items.first().expect("need at least one space");

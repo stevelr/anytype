@@ -629,8 +629,8 @@ impl AnytypeClient {
 
     /// Resolves a message reference into its message id.
     ///
-    /// Accepts either a message id — returned unchanged when it already looks
-    /// like an object id ([`looks_like_object_id`]) — or a chat `order_id`. An
+    /// Accepts either a message id (returned unchanged when it already looks
+    /// like an object id ([`looks_like_object_id`])) or a chat `order_id`. An
     /// order id is looked up in `chat_id` with a single bounded page that
     /// includes the boundary, and the matching message's id is returned.
     ///

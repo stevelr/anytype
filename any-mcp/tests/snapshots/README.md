@@ -12,7 +12,7 @@ The four catalog fixtures use the `.snap` extension (JSON content) because the
 tests compare them byte-for-byte against `serde_json::to_string_pretty` output;
 a `.json` extension would let repo-wide auto-formatting (`gate fmt`/dprint)
 rewrite them and break that exact comparison. Never rename them back to `.json`
-and never hand-format them — only the regeneration test below may write them.
+and never hand-format them. Only the regeneration test below may write them.
 
 After intentionally changing a tool contract, regenerate all four fixtures with:
 

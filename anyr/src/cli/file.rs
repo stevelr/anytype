@@ -596,7 +596,7 @@ fn validate_rest_only_upload_options(mime: bool, stdin: bool, uses_grpc: bool) -
 ///
 /// The file name is recorded only for a `--stdin` byte upload; a `--file` or
 /// `--url` upload derives its name elsewhere and would silently ignore `--name`.
-/// (clap enforces the reverse — `--stdin` requires `--name` — but cannot require
+/// (clap enforces the reverse: `--stdin` requires `--name`, but cannot require
 /// a bare boolean flag, so this direction is validated here.)
 fn validate_upload_name(name: bool, stdin: bool) -> Result<()> {
     if name && !stdin {

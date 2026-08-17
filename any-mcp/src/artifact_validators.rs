@@ -415,8 +415,8 @@ async fn wait_for_validator(
     child_id: Option<u32>,
     timeout: std::time::Duration,
 ) -> Result<std::process::ExitStatus, ValidatorExecutionError> {
-    // Observe leader exit without reaping so its pid — and therefore the
-    // private process-group id — stays reserved while descendants are
+    // Observe leader exit without reaping so its pid (and therefore the
+    // private process-group id) stays reserved while descendants are
     // signalled. Signalling after the reap could hit a recycled pid.
     let exited = wait_for_leader_exit_without_reap(child_id, timeout).await;
     terminate_process_group(child_id);

@@ -2927,10 +2927,9 @@ impl ArtifactStaging {
                 _ => return false,
             };
             // Identity validation and unlink are separate pathname
-            // operations. Permanently close pathname authority — durably,
-            // then in memory, both before releasing this lock — so a failed,
-            // cancelled, or panicked attempt retains its record rather than
-            // retrying by name.
+            // operations. Permanently close pathname authority, durably,
+            // then in memory, both before releasing this lock, so a failed,
+            // cancelled, or panicked attempt retains its record
             if self
                 .persist_transition(record, |document| {
                     document.cleanup_evidence = Some("pathname_authority_closed".to_owned());
@@ -5276,8 +5275,8 @@ mod tests {
     }
 
     /// W6/W7/W10/W13: deterministic crash footprints at every deletion
-    /// barrier — cleanup-pending without its tombstone, cleanup-pending with
-    /// its tombstone, and an orphan tombstone — all resume through one
+    /// barrier (cleanup-pending without its tombstone, cleanup-pending with
+    /// its tombstone, and an orphan tombstone) all resume through one
     /// reconciliation pass.
     #[cfg(unix)]
     #[tokio::test]
@@ -5403,7 +5402,7 @@ mod tests {
     }
 
     /// F6: a stepped wall clock keeps runtime publication working, and makes
-    /// out-of-recency records reapable — never activation-fatal.
+    /// out-of-recency records reapable.
     #[tokio::test]
     async fn clock_steps_never_close_authority_or_refuse_restart() {
         let test = test_staging().await;
@@ -5533,7 +5532,7 @@ mod tests {
 
     /// Recovery construction through the real activation path: a dirty root
     /// with retained dispatched evidence revives the record, recharges its
-    /// quota, and preserves its identity — with no bearer authority.
+    /// quota, and preserves its identity without bearer authority.
     #[tokio::test]
     async fn full_activation_recovers_retained_dispatched_evidence() {
         let suffix = getrandom::u64().expect("test randomness");

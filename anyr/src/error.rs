@@ -9,11 +9,10 @@
 //!
 //! [`AnytypeError`] deliberately redacts its `Display` output: the same error
 //! type is returned to the MCP server, where free-form upstream text and
-//! request content must never reach a shared transcript. Every redacted value
-//! is still retained in the variant's fields for callers that need it, and the
-//! CLI is such a caller — it runs interactively, on the user's own machine,
-//! against the user's own data, and prints to their terminal. [`render`]
-//! therefore re-expands those fields into a message that names what failed.
+//! request content must never reach a shared transcript. Redacted data
+//! is retained in the variant's fields and returned to callers.
+//! Callers in a trusted environment, such as the CLI, can use [`render`]
+//! to expand the fields into a message with more helpful diagnostic info.
 
 use std::fmt::Write as _;
 

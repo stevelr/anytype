@@ -75,13 +75,8 @@ pub const MAX_COLOR_TOKEN_BYTES: usize = 32;
 /// Hard ceiling on relation keys shown by one link-card block.
 pub const MAX_LINK_RELATIONS: usize = 64;
 
-/// Per-request bounds for a body read.
-///
-/// Every field defaults to its hard ceiling. Callers may lower any bound;
-/// values above a ceiling clamp back down to it — limits can only tighten,
-/// never widen (following the [`ValidationLimits`](crate::validation::ValidationLimits)
-/// precedent). A read that exceeds any effective bound fails whole with
-/// [`BodyGraphErrorKind::Oversized`]; it is never truncated.
+/// Per-request bounds for a body read. Reads that would exceed the bounds
+/// fail with [`BodyGraphErrorKind::Oversized`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BodyLimits {
     /// Maximum number of blocks in the returned view.
