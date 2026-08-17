@@ -485,6 +485,27 @@ irm https://github.com/stevelr/anytype/releases/latest/download/anyr-installer.p
 cargo install -p anyr
 ```
 
+### Shell completions
+
+Generate and load completions for your current shell session:
+
+```sh
+# Bash
+source <(anyr completions bash)
+
+# Zsh, after compinit
+source <(anyr completions zsh)
+
+# Fish
+anyr completions fish | source
+
+# PowerShell
+anyr completions powershell | Out-String | Invoke-Expression
+```
+
+Add the command for your shell to its startup file to load completions in future
+sessions.
+
 ## Build from source
 
 **Cargo**

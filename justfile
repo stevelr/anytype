@@ -7,3 +7,6 @@ test:
 
 check:
     gate check
+
+rustdoc:
+    cargo docs --workspace --no-deps

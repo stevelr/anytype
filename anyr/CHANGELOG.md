@@ -8,6 +8,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add `anyr completions` script generation for Bash, Fish, PowerShell, and Zsh.
+  Generation does not require server credentials.
 - Add Streamable HTTP conformance across the shipped `anyr mcp` command
   boundary: a portable test spawns the real binary in `streamable-http` mode
   with a private static-token file and a bounded scripted Anytype upstream,
