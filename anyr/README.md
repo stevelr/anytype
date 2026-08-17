@@ -8,7 +8,7 @@ List, search, and manipulate anytype objects from the command-line
 Homepage: https://github.com/stevelr/anytype
 
 ```sh
-# show options
+# show alphabetically sorted commands and global options
 anyr --help
 
 # check authentication status; reports HTTP and gRPC credentials

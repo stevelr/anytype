@@ -19,7 +19,7 @@ anyr auth login
 # Check authentication status
 anyr auth status
 
-# View commands and options
+# View alphabetically sorted commands and options
 anyr md --help
 
 # Export a page (or other object type) with markdown

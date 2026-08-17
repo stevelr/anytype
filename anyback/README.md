@@ -6,6 +6,7 @@
 
 `anyback` provides the backup and restore library used by the consolidated
 `anyr backup` command.
+Run `anyr backup --help` to view its alphabetically sorted archive operations.
 
 See `anyback.1.md` for detailed CLI documentation.
 

@@ -156,6 +156,7 @@ pub struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum Commands {
     /// Create a backup archive
     Create(BackupCreateArgs),
