@@ -6,22 +6,20 @@
 
 The gRPC api isn't officially supported (by Anytype) for third party clients. However, it's used heavily by Anytype applications, including the desktop app and headless cli, and it's the only way for applications to access certain functionality that is not available over the HTTP api, such as Files, Chats, Blocks, and Relations.
 
-## Status and plan
+Before using this crate, check whether [anytype](https://crates.io/crates/anytype) and its `AnytypeClient` interface meets your needs.
 
-- This crate is a dependency of [anytype](https://crates.io/crates/anytype), which requires that this crate is maintained and kept up to date.
+`AnytypeClient`'s api:
 
-- We will try to follow semver versioning policy, but if you plan to use this crate directly for a production release, we recommend you pin the version of this crate in Cargo.toml and check for updates periodically with `cargo outdated`.
-
-- This crate includes the `admin` example for source-built administrative
-  operations such as space management and object import/export. It is not a
-  distributed binary; run it with `cargo run -p anytype-rpc --example admin --
-  --help`.
+- has a more ergonomic, hand-designed api surface.
+- uses HTTP/REST for most (>90%) apis, as recommended by the Anytype team, only using gRPC backend (through this crate) to fill gaps.
+- will be more stable across releases. This crate's api is automatically generated from the anytype-heart protobuf definitions.
 
 ## Compatibility
 
 | anytype-rpc version | anytype-heart version |
 | ------------------- | --------------------- |
-| 0.4.0-pre.1         | 0.50.15               |
+| 0.5.0-pre.X         | 0.50.??               |
+| 0.4.0-pre.X         | 0.50.10               |
 | 0.3.0 – 0.3.1       | 0.48.0                |
 | 0.2.1               | 0.44                  |
 

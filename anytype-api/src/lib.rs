@@ -46,15 +46,6 @@
 //! The current transport mapping is recorded in `docs/http-grpc-overlap.md` in
 //! the crate source tree.
 //!
-//! ## Cargo features
-//!
-//! The crate has no default features (`default = []`), and there is no `grpc`
-//! feature: `anytype-rpc` is an unconditional dependency, so gRPC-backed
-//! methods are always compiled and are gated only by run-time credentials. The
-//! single optional feature, `test-fixtures`, exposes narrow typed snapshot
-//! constructors for downstream contract tests and must not be enabled by
-//! production dependents.
-//!
 //!
 //! ## Quick Start
 //!
@@ -142,6 +133,11 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Cargo features
+//!
+//! The `anytype` crate has no default features.
+//! The non-default features are used only for testing.
 //!
 //! ### Notes on API Design
 //!

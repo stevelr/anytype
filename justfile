@@ -9,4 +9,5 @@ check:
     gate check
 
 rustdoc:
-    cargo docs --workspace --no-deps
+    cargo doc --workspace --no-deps --open
+    dufs --port 8085 target/doc

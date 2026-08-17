@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
  
+# The functionality of this script is now available in the cli: `anyr init-cli`.
+# This script is retained for documentation purposes.
+# 
+# ---
+# 
 # This script initializes the headless cli, generates grpc and http credentials,
 # and stores the credentials in the keystore.
 #
