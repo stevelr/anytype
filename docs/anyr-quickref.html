@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>anyr quick reference</title>
+    <style>
+    :root {
+      color-scheme: light dark;
+      --accent: #3f7652;
+      --border: color-mix(in srgb, currentColor 22%, transparent);
+      --muted: color-mix(in srgb, currentColor 70%, transparent);
+      --panel: color-mix(in srgb, canvas 92%, var(--accent));
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      line-height: 1.35;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      max-width: 76rem;
+      margin: 0 auto;
+      padding: 1.25rem;
+    }
+    h1 {
+      margin: 0;
+      font-size: 2rem;
+    }
+    h2 {
+      margin: 0;
+      font-size: 1.35rem;
+    }
+    h3 {
+      margin: 1rem 0 0.25rem;
+      font-size: 1rem;
+    }
+    p {
+      margin: 0.35rem 0 0.75rem;
+    }
+    a {
+      color: var(--accent);
+    }
+    code,
+    pre {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    }
+    code {
+      font-size: 0.92em;
+    }
+    pre {
+      margin: 0.25rem 0 0.65rem;
+      padding: 0.55rem 0.7rem;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 0.35rem;
+      background: var(--panel);
+      font-size: 0.86rem;
+      line-height: 1.35;
+    }
+    header > p {
+      color: var(--muted);
+    }
+    .warning {
+      margin: 1rem 0;
+      padding: 0.65rem 0.8rem;
+      border-left: 0.3rem solid #b86724;
+      background: color-mix(in srgb, canvas 92%, #b86724);
+    }
+    nav {
+      margin: 1rem 0 1.25rem;
+      padding: 0.8rem;
+      border: 1px solid var(--border);
+      border-radius: 0.4rem;
+    }
+    nav h2 {
+      margin-bottom: 0.45rem;
+      font-size: 1rem;
+    }
+    nav ul {
+      columns: 4 11rem;
+      margin: 0;
+      padding-left: 1.25rem;
+    }
+    nav li {
+      break-inside: avoid;
+      margin: 0.15rem 0;
+    }
+    section {
+      margin: 0 0 0.85rem;
+      border: 1px solid var(--border);
+      border-radius: 0.45rem;
+      overflow: clip;
+    }
+    section > h2 {
+      padding: 0.7rem 0.85rem 0;
+    }
+    details > summary {
+      padding: 0.35rem 0.85rem 0.7rem;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.84rem;
+    }
+    details > .commands {
+      padding: 0 0.85rem 0.65rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+      gap: 0 1rem;
+    }
+    .entry {
+      min-width: 0;
+      break-inside: avoid;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    th,
+    td {
+      padding: 0.35rem 0.5rem;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+    }
+    footer {
+      margin-top: 1.25rem;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    @media (max-width: 35rem) {
+      body {
+        padding: 0.75rem;
+      }
+      details > .commands {
+        grid-template-columns: 1fr;
+      }
+    }
+    @media print {
+      :root {
+        color-scheme: light;
+        font-size: 9pt;
+      }
+      body {
+        max-width: none;
+        padding: 0;
+      }
+      nav ul {
+        columns: 6;
+      }
+      details > summary {
+        display: none;
+      }
+      details > .commands {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+      }
+      section {
+        break-inside: avoid-page;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow: visible;
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+    }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1><code>anyr</code> quick reference</h1>
+      <p>
+        Recall common Anytype automation commands. Quoted words such as
+        <code>"Work"</code>
+        are resolver-backed names; shell variables ending in
+        <code>_ID</code>
+        are exact IDs returned by <code>anyr</code>. Every
+        <code>SPACE</code>
+        operand shown accepts a space name or ID, and chat operands paired with a space accept
+        a chat name, title, or ID. Type examples use lowercase keys.
+      </p>
+    </header>
+
+    <aside class="warning">
+      <strong>High-impact commands:</strong> <code>space delete</code> removes a space
+      permanently after confirmation. Its interactive flow offers a backup; automation must
+      pass <code>--archive</code> or
+      <code>--skip-archive</code>.
+      <code>space delete-archived</code>
+      permanently removes every archived object in the selected space.
+      <code>space enable-sharing</code>
+      exposes a space through its public sharing controls.
+    </aside>
+
+    <nav aria-label="Quick-reference contents">
+      <h2>Contents</h2>
+      <ul>
+        <li><a href="#output">Output and help</a></li>
+        <li><a href="#authentication">Authentication</a></li>
+        <li><a href="#spaces">Spaces</a></li>
+        <li><a href="#tasks">Tasks</a></li>
+        <li><a href="#objects">Objects and search</a></li>
+        <li><a href="#markdown">Markdown editing</a></li>
+        <li><a href="#chats">Chats</a></li>
+        <li><a href="#files">Files</a></li>
+        <li><a href="#schema">Types, properties, tags, templates</a></li>
+        <li><a href="#lists">Lists and views</a></li>
+        <li><a href="#members">Members and sharing</a></li>
+        <li><a href="#backup">Backup and restore</a></li>
+        <li><a href="#mcp">MCP and completions</a></li>
+      </ul>
+    </nav>
+
+    <main>
+      <section id="output">
+        <h2>Output and help</h2>
+        <details open>
+          <summary>Hide or show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>Choose an output format</h3>
+              <pre><code>anyr space list --table
+anyr space list --pretty
+anyr space list --json</code></pre>
+              <p>Compact JSON is the default. Diagnostics go to stderr.</p>
+            </div>
+            <div class="entry">
+              <h3>Write the result document to a file</h3>
+              <pre><code>anyr space list --pretty --output spaces.json</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Collect every result page</h3>
+              <pre><code>anyr object list "Work" --all --json</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Show context-specific help</h3>
+              <pre><code>anyr --help
+anyr chat messages send --help</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Inspect JSON with <code>jq</code></h3>
+              <pre><code>anyr space list | jq '.items[] | {id, name}'</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Select endpoints and key storage</h3>
+              <pre><code>anyr --url http://127.0.0.1:31012 \
+  --grpc http://127.0.0.1:31010 \
+  --keystore file space list</code></pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="authentication">
+        <h2>Authentication</h2>
+        <details open>
+          <summary>Hide or show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>Check HTTP and gRPC access</h3>
+              <pre><code>anyr auth status --pretty</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Authenticate with the desktop app</h3>
+              <pre><code>anyr auth login</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Initialize from a headless server</h3>
+              <pre><code>anyr init-cli</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Save sourceable environment credentials</h3>
+              <pre><code>ANYTYPE_KEYSTORE=env anyr init-cli --save-env ./anytype.env
+source ./anytype.env</code></pre>
+              <p>
+                The file contains plaintext credentials and is created with owner-only
+                permissions on Unix.
+              </p>
+            </div>
+            <div class="entry">
+              <h3>Initialize and join a space</h3>
+              <pre><code>anyr init-cli --join "$INVITE_LINK"</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Clear stored credentials</h3>
+              <pre><code>anyr auth logout</code></pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="spaces">
+        <h2>Spaces</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>List or inspect spaces</h3>
+              <pre><code>anyr space list --table
+anyr space get "Work" --pretty</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Create a regular or chat space</h3>
+              <pre><code>anyr space create "Work" --description "Team documents"
+anyr space create "Team Chat" --chat</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Rename a space</h3>
+              <pre><code>anyr space update "Work" --name "Projects"</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Count or remove archived objects</h3>
+              <pre><code>anyr space count-archived "Work"
+anyr space delete-archived "Work" --confirm</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Delete with an exact pre-delete archive</h3>
+              <pre><code>anyr space delete "Old Work" \
+  --archive ./old-work.zip --confirm</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Delete interactively</h3>
+              <pre><code>anyr space delete "Old Work"</code></pre>
+              <p>
+                The prompt offers a backup, then requires the exact space name.
+              </p>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="tasks">
+        <h2>Tasks</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>List tasks in a space</h3>
+              <pre><code>anyr search --space "Work" --type task --all --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Find tasks by text</h3>
+              <pre><code>anyr search --space "Work" --type task \
+  --text "customer" --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Create a task with properties</h3>
+              <pre><code>anyr object create "Work" task \
+  --name "Review proposal" status=Open</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Change task status</h3>
+              <pre><code>anyr object update "Work" "$TASK_ID" status=Done</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Sort tasks by modification date</h3>
+              <pre><code>anyr search --space "Work" --type task \
+  --sort last_modified_date --desc --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Extract task IDs for a shell workflow</h3>
+              <pre><code>anyr search --space "Work" --type task --all \
+  | jq -r '.items[].id'</code></pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="objects">
+        <h2>Objects and search</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>List objects by type</h3>
+              <pre><code>anyr object list "Work" --type page --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Get one object</h3>
+              <pre><code>anyr object get "Work" "$OBJECT_ID" --pretty</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Create a page</h3>
+              <pre><code>anyr object create "Work" page \
+  --name "Meeting notes" --body-file notes.md</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Update fields and properties</h3>
+              <pre><code>anyr object update "Work" "$OBJECT_ID" \
+  --name "New title" priority=2</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Search globally or within a space</h3>
+              <pre><code>anyr search --text "meeting notes" --table
+anyr search --space "Work" --text "meeting notes" --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Build an Anytype object link</h3>
+              <pre><code>anyr object link "Work" "$OBJECT_ID"</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Archive an object</h3>
+              <pre><code>anyr object delete "Work" "$OBJECT_ID"</code></pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="markdown">
+        <h2>Markdown editing</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>Export a document</h3>
+              <pre><code>anyr md get "Work" "$OBJECT_ID" --output page.md</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Edit in <code>$EDITOR</code></h3>
+              <pre><code>anyr md edit "Work" "$OBJECT_ID"</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Edit from an Anytype link</h3>
+              <pre><code>anyr md edit --doc "$ANYTYPE_LINK"</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Apply a saved Markdown file</h3>
+              <pre><code>anyr md update --input page.md</code></pre>
+              <p>
+                The exported file carries the object coordinates used by
+                <code>update</code>.
+              </p>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="chats">
+        <h2>Chats</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>List or create chats</h3>
+              <pre><code>anyr chat list --space "Work" --table
+anyr chat create "Work" "Ops"</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Send a plain message</h3>
+              <pre><code>anyr chat messages send "Work" "Ops" \
+  --text "Deployment complete"</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Send rich text</h3>
+              <pre><code>anyr chat messages send "Work" "Ops" \
+  --text "Release ready" --style header2 --mark bold:0:13</code></pre>
+              <p>The mark range selects the complete 13-byte ASCII message.</p>
+            </div>
+            <div class="entry">
+              <h3>List recent messages</h3>
+              <pre><code>anyr chat messages list "Work" "Ops" \
+  --limit 50 --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Filter a message window since a date</h3>
+              <pre><code>anyr chat messages list "Work" "Ops" --limit 1000 --json \
+  | jq '.messages[] | select(.created_at &gt;= "2026-08-01T00:00:00Z")'</code></pre>
+              <p>
+                This filters one bounded window. Use order-ID continuation to inspect older
+                windows.
+              </p>
+            </div>
+            <div class="entry">
+              <h3>Search message text</h3>
+              <pre><code>anyr chat messages search "Work" "Ops" \
+  "deployment" --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Edit or react to a message</h3>
+              <pre><code>anyr chat messages edit "Work" "Ops" "$MESSAGE_ID" \
+  --text "Updated status"
+anyr chat messages react "Work" "Ops" "$MESSAGE_ID" "👍"</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Listen for one chat</h3>
+              <pre><code>anyr chat listen --space "Work" --chat "Ops" \
+  --initial-limit 20 --heartbeat 15</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Mark a chat read</h3>
+              <pre><code>anyr chat read-all "Work" "Ops"</code></pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="files">
+        <h2>Files</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>List matching files</h3>
+              <pre><code>anyr file list "Personal" --file-type image \
+  --size-gte 1048576 --name-contains report --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Upload a local file</h3>
+              <pre><code>anyr file upload "Personal" --file ./report.pdf \
+  --mime application/pdf</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Upload standard input</h3>
+              <pre><code>anyr file upload "Personal" --stdin --name report.pdf \
+  &lt; ./report.pdf</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Upload from a URL with rich placement</h3>
+              <pre><code>anyr file upload "Personal" --url https://example.com/logo.png \
+  --file-type image --style embed</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Download file bytes</h3>
+              <pre><code>anyr file download "Personal" "$FILE_ID" --dir /tmp</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Inspect REST headers without downloading</h3>
+              <pre><code>anyr file metadata "Personal" "$FILE_ID" --width 128</code></pre>
+              <p>
+                <code>--width</code>
+                selects the image variant whose headers are returned.
+              </p>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="schema">
+        <h2>Types, properties, tags, and templates</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>List types and properties</h3>
+              <pre><code>anyr type list "Work" --table
+anyr property list "Work" --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Create a type</h3>
+              <pre><code>anyr type create "Work" decision "Decision" \
+  --plural "Decisions" --layout basic</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Create a property</h3>
+              <pre><code>anyr property create "Work" "Priority" number \
+  --key priority</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Create a select property with tags</h3>
+              <pre><code>anyr property create "Work" "Status" select \
+  --key status --tag Open:blue --tag Done:lime</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Add a tag</h3>
+              <pre><code>anyr tag create "Work" "$PROPERTY_ID" Blocked red \
+  --key blocked</code></pre>
+            </div>
+            <div class="entry">
+              <h3>List templates for a type</h3>
+              <pre><code>anyr template list "Work" task --table</code></pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="lists">
+        <h2>Lists and views</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>Find collections and sets</h3>
+              <pre><code>anyr search --space "Work" --type collection --table
+anyr search --space "Work" --type set --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>List views</h3>
+              <pre><code>anyr list views "Work" "$LIST_ID" --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>List objects in a view</h3>
+              <pre><code>anyr view objects "Work" "$TYPE_ID" --view "$VIEW_ID" \
+  --columns name,creator,status --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Add or remove collection members</h3>
+              <pre><code>anyr list add "Work" "$LIST_ID" "$OBJECT_ID"
+anyr list remove "Work" "$LIST_ID" "$OBJECT_ID"</code></pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="members">
+        <h2>Members and sharing</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>List active members</h3>
+              <pre><code>anyr member list "Work" --status active --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Create a writer invitation</h3>
+              <pre><code>anyr space invite create "Work" --writer</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Show or revoke invitations</h3>
+              <pre><code>anyr space invite show "Work"
+anyr space invite revoke "Work"</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Enable or disable public sharing</h3>
+              <pre><code>anyr space enable-sharing "Work"
+anyr space disable-sharing "Work"</code></pre>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="backup">
+        <h2>Backup and restore</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>Back up every object in a space</h3>
+              <pre><code>anyr backup create --space "Work" --dir ./backups</code></pre>
+              <p>
+                Add <code>--include-files</code> to embed file objects and binaries.
+              </p>
+            </div>
+            <div class="entry">
+              <h3>Create an exact archive path</h3>
+              <pre><code>anyr backup create --space "Work" \
+  --dest ./backups/work.zip --include-files</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Inspect archive contents</h3>
+              <pre><code>anyr backup list ./backups/work.zip --files --table
+anyr backup manifest ./backups/work.zip --pretty</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Validate a restore</h3>
+              <pre><code>anyr backup restore ./backups/work.zip \
+  --space "Restored Work" --dry-run</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Restore into an existing space</h3>
+              <pre><code>anyr backup restore ./backups/work.zip \
+  --space "Restored Work" --log restore.json</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Compare archives</h3>
+              <pre><code>anyr backup diff ./backups/old.zip ./backups/new.zip \
+  --table</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Browse an archive interactively</h3>
+              <pre><code>anyr backup inspect ./backups/work.zip</code></pre>
+              <p>
+                The inspector owns the terminal and rejects output-format flags.
+              </p>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section id="mcp">
+        <h2>MCP and completions</h2>
+        <details open>
+          <summary>Show commands</summary>
+          <div class="commands">
+            <div class="entry">
+              <h3>Run the MCP server</h3>
+              <pre><code>anyr mcp</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Initialize or check MCP configuration</h3>
+              <pre><code>anyr mcp init
+anyr mcp check</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Load shell completions</h3>
+              <pre><code>source &lt;(anyr completions zsh)
+source &lt;(anyr completions bash)
+anyr completions fish | source</code></pre>
+            </div>
+            <div class="entry">
+              <h3>Show the binary version</h3>
+              <pre><code>anyr --version</code></pre>
+            </div>
+          </div>
+        </details>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        <strong>anyr</strong>
+        0.5.0-pre.5 ·
+        <a href="https://github.com/stevelr/anytype">Homepage and source</a>
+        · Last updated: 2026-08-17
+      </p>
+    </footer>
+  </body>
+</html>
