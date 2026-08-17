@@ -2,7 +2,6 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::OnceLock,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,6 +13,8 @@ use serde_json::Value;
 use tokio::{sync::Mutex as AsyncMutex, time::sleep};
 
 mod support;
+
+use support::anyr::{assert_non_tty_output_clean, parse_archive_path};
 
 struct P1CleanupGuard {
     scopes: Vec<P1CleanupScope>,
@@ -136,12 +137,11 @@ async fn p1_restore_non_archived_image_between_spaces_preserves_fields() -> Resu
         file_list_ids_by_token(&source_space, &lookup_token, Some("image"))?;
     assert!(
         source_file_search_ids.iter().any(|id| id == &source_id),
-        "source file search did not find uploaded image id by token: source_id={} token={} ids={:?}",
-        source_id,
-        lookup_token,
-        source_file_search_ids
+        "source file search did not find uploaded image id; match_count={}",
+        source_file_search_ids.len()
     );
-    let source_object_matches = list_object_names_containing(&source_space, &lookup_token)?;
+    let source_object_match_count =
+        list_object_names_containing(&source_space, &lookup_token)?.len();
 
     let archive_path = backup_selected(
         &source_space,
@@ -154,9 +154,10 @@ async fn p1_restore_non_archived_image_between_spaces_preserves_fields() -> Resu
         selected.contains(&source_id),
         "backup manifest missing selected file id"
     );
-    let source_manifest_entry = backup_manifest_object(&archive_path, &source_id)
+    let source_manifest_entry_present = backup_manifest_object(&archive_path, &source_id)
         .ok()
-        .flatten();
+        .flatten()
+        .is_some();
     let dest_before_ids = list_object_ids(&dest_space).unwrap_or_default();
 
     let restore_debug = restore_archive(&dest_space, &archive_path)?;
@@ -179,7 +180,6 @@ async fn p1_restore_non_archived_image_between_spaces_preserves_fields() -> Resu
                         .filter(|id| !dest_before_ids.contains(*id))
                         .cloned()
                         .collect();
-                    let new_obj_summaries = summarize_object_ids(&dest_space, &new_ids);
                     let file_search = run_anyr([
                         "file",
                         "list",
@@ -190,9 +190,12 @@ async fn p1_restore_non_archived_image_between_spaces_preserves_fields() -> Resu
                         "--file-type",
                         "image",
                     ])
-                    .unwrap_or_else(|e| format!("file search failed: {e:#}"));
-                    let object_matches = list_object_names_containing(&dest_space, &lookup_token)
-                        .unwrap_or_else(|e| vec![format!("object list failed: {e:#}")]);
+                    .map(|output| support::anyr::stream_metadata(output.as_bytes()))
+                    .unwrap_or_else(|_| "failed".to_string());
+                    let object_match_count =
+                        list_object_names_containing(&dest_space, &lookup_token)
+                            .map(|matches| matches.len())
+                            .unwrap_or(0);
                     let file_search_after_wait = run_anyr([
                         "file",
                         "list",
@@ -203,36 +206,33 @@ async fn p1_restore_non_archived_image_between_spaces_preserves_fields() -> Resu
                         "--file-type",
                         "image",
                     ])
-                    .unwrap_or_else(|e| format!("file search failed: {e:#}"));
-                    let object_matches_after_wait =
+                    .map(|output| support::anyr::stream_metadata(output.as_bytes()))
+                    .unwrap_or_else(|_| "failed".to_string());
+                    let object_match_count_after_wait =
                         list_object_names_containing(&dest_space, &lookup_token)
-                            .unwrap_or_else(|e| vec![format!("object list failed: {e:#}")]);
+                            .map(|matches| matches.len())
+                            .unwrap_or(0);
                     let src_file_get = run_anyr_raw(&["file", "get", &dest_space, &source_id])?;
                     let src_obj_get = run_anyr_raw(&["object", "get", &dest_space, &source_id])?;
                     bail!(
-                        "file token '{}' not found in space {} after retry: initial_err={}\nsource_file_id={}\nsource_file_search_ids={:?}\nsource_object_name_matches={:?}\nbackup_selected_ids={:?}\nsource_manifest_entry={}\nrestore_debug={}\nfile_search_initial={}\nobject_name_matches_initial={:?}\nfile_search_after_wait_2s={}\nobject_name_matches_after_wait_2s={:?}\nnew_object_ids_after_restore={:?}\nnew_object_summaries={:?}\nsource_id_file_get_status={:?}\nsource_id_file_get_stderr={}\nsource_id_object_get_status={:?}\nsource_id_object_get_stderr={}",
+                        "file token '{}' not found in space {} after retry: initial_err={}\nsource_file_search_count={}\nsource_object_name_match_count={}\nbackup_selected_count={}\nsource_manifest_entry_present={}\nrestore_debug={}\nfile_search_initial={}\nobject_name_match_count_initial={}\nfile_search_after_wait_2s={}\nobject_name_match_count_after_wait_2s={}\nnew_object_count_after_restore={}\nsource_id_file_get_status={:?}\nsource_id_file_get_stderr={}\nsource_id_object_get_status={:?}\nsource_id_object_get_stderr={}",
                         lookup_token,
                         dest_space,
                         first_err,
-                        source_id,
-                        source_file_search_ids,
-                        source_object_matches,
-                        selected,
-                        source_manifest_entry
-                            .as_ref()
-                            .map(Value::to_string)
-                            .unwrap_or_else(|| "null".to_string()),
+                        source_file_search_ids.len(),
+                        source_object_match_count,
+                        selected.len(),
+                        source_manifest_entry_present,
                         restore_debug,
                         file_search,
-                        object_matches,
+                        object_match_count,
                         file_search_after_wait,
-                        object_matches_after_wait,
-                        new_ids,
-                        new_obj_summaries,
+                        object_match_count_after_wait,
+                        new_ids.len(),
                         src_file_get.status.code(),
-                        String::from_utf8_lossy(&src_file_get.stderr),
+                        support::anyr::stream_metadata(&src_file_get.stderr),
                         src_obj_get.status.code(),
-                        String::from_utf8_lossy(&src_obj_get.stderr),
+                        support::anyr::stream_metadata(&src_obj_get.stderr),
                     );
                 }
             } else {
@@ -242,7 +242,6 @@ async fn p1_restore_non_archived_image_between_spaces_preserves_fields() -> Resu
                     .filter(|id| !dest_before_ids.contains(*id))
                     .cloned()
                     .collect();
-                let new_obj_summaries = summarize_object_ids(&dest_space, &new_ids);
                 let file_search = run_anyr([
                     "file",
                     "list",
@@ -253,33 +252,30 @@ async fn p1_restore_non_archived_image_between_spaces_preserves_fields() -> Resu
                     "--file-type",
                     "image",
                 ])
-                .unwrap_or_else(|e| format!("file search failed: {e:#}"));
-                let object_matches = list_object_names_containing(&dest_space, &lookup_token)
-                    .unwrap_or_else(|e| vec![format!("object list failed: {e:#}")]);
+                .map(|output| support::anyr::stream_metadata(output.as_bytes()))
+                .unwrap_or_else(|_| "failed".to_string());
+                let object_match_count = list_object_names_containing(&dest_space, &lookup_token)
+                    .map(|matches| matches.len())
+                    .unwrap_or(0);
                 let src_file_get = run_anyr_raw(&["file", "get", &dest_space, &source_id])?;
                 let src_obj_get = run_anyr_raw(&["object", "get", &dest_space, &source_id])?;
                 bail!(
-                    "file token '{}' not found in space {} after retry; retry file search command failed: initial_err={}\nsource_file_id={}\nsource_file_search_ids={:?}\nsource_object_name_matches={:?}\nbackup_selected_ids={:?}\nsource_manifest_entry={}\nrestore_debug={}\nfile_search_initial={}\nobject_name_matches_initial={:?}\nnew_object_ids_after_restore={:?}\nnew_object_summaries={:?}\nsource_id_file_get_status={:?}\nsource_id_file_get_stderr={}\nsource_id_object_get_status={:?}\nsource_id_object_get_stderr={}",
+                    "file token '{}' not found in space {} after retry; retry file search command failed: initial_err={}\nsource_file_search_count={}\nsource_object_name_match_count={}\nbackup_selected_count={}\nsource_manifest_entry_present={}\nrestore_debug={}\nfile_search_initial={}\nobject_name_match_count_initial={}\nnew_object_count_after_restore={}\nsource_id_file_get_status={:?}\nsource_id_file_get_stderr={}\nsource_id_object_get_status={:?}\nsource_id_object_get_stderr={}",
                     lookup_token,
                     dest_space,
                     first_err,
-                    source_id,
-                    source_file_search_ids,
-                    source_object_matches,
-                    selected,
-                    source_manifest_entry
-                        .as_ref()
-                        .map(Value::to_string)
-                        .unwrap_or_else(|| "null".to_string()),
+                    source_file_search_ids.len(),
+                    source_object_match_count,
+                    selected.len(),
+                    source_manifest_entry_present,
                     restore_debug,
                     file_search,
-                    object_matches,
-                    new_ids,
-                    new_obj_summaries,
+                    object_match_count,
+                    new_ids.len(),
                     src_file_get.status.code(),
-                    String::from_utf8_lossy(&src_file_get.stderr),
+                    support::anyr::stream_metadata(&src_file_get.stderr),
                     src_obj_get.status.code(),
-                    String::from_utf8_lossy(&src_obj_get.stderr),
+                    support::anyr::stream_metadata(&src_obj_get.stderr),
                 );
             }
         }
@@ -337,12 +333,11 @@ async fn p1_restore_non_archived_pdf_between_spaces_preserves_fields() -> Result
     let source_file_search_ids = file_list_ids_by_token(&source_space, &lookup_token, Some("pdf"))?;
     assert!(
         source_file_search_ids.iter().any(|id| id == &source_id),
-        "source file search did not find uploaded pdf id by token: source_id={} token={} ids={:?}",
-        source_id,
-        lookup_token,
-        source_file_search_ids
+        "source file search did not find uploaded PDF id; match_count={}",
+        source_file_search_ids.len()
     );
-    let source_object_matches = list_object_names_containing(&source_space, &lookup_token)?;
+    let source_object_match_count =
+        list_object_names_containing(&source_space, &lookup_token)?.len();
 
     let archive_path = backup_selected(
         &source_space,
@@ -355,9 +350,10 @@ async fn p1_restore_non_archived_pdf_between_spaces_preserves_fields() -> Result
         selected.contains(&source_id),
         "backup manifest missing selected file id"
     );
-    let source_manifest_entry = backup_manifest_object(&archive_path, &source_id)
+    let source_manifest_entry_present = backup_manifest_object(&archive_path, &source_id)
         .ok()
-        .flatten();
+        .flatten()
+        .is_some();
     let dest_before_ids = list_object_ids(&dest_space).unwrap_or_default();
 
     let restore_debug = restore_archive(&dest_space, &archive_path)?;
@@ -380,7 +376,6 @@ async fn p1_restore_non_archived_pdf_between_spaces_preserves_fields() -> Result
                         .filter(|id| !dest_before_ids.contains(*id))
                         .cloned()
                         .collect();
-                    let new_obj_summaries = summarize_object_ids(&dest_space, &new_ids);
                     let file_search = run_anyr([
                         "file",
                         "list",
@@ -391,9 +386,12 @@ async fn p1_restore_non_archived_pdf_between_spaces_preserves_fields() -> Result
                         "--file-type",
                         "pdf",
                     ])
-                    .unwrap_or_else(|e| format!("file search failed: {e:#}"));
-                    let object_matches = list_object_names_containing(&dest_space, &lookup_token)
-                        .unwrap_or_else(|e| vec![format!("object list failed: {e:#}")]);
+                    .map(|output| support::anyr::stream_metadata(output.as_bytes()))
+                    .unwrap_or_else(|_| "failed".to_string());
+                    let object_match_count =
+                        list_object_names_containing(&dest_space, &lookup_token)
+                            .map(|matches| matches.len())
+                            .unwrap_or(0);
                     let file_search_after_wait = run_anyr([
                         "file",
                         "list",
@@ -404,36 +402,33 @@ async fn p1_restore_non_archived_pdf_between_spaces_preserves_fields() -> Result
                         "--file-type",
                         "pdf",
                     ])
-                    .unwrap_or_else(|e| format!("file search failed: {e:#}"));
-                    let object_matches_after_wait =
+                    .map(|output| support::anyr::stream_metadata(output.as_bytes()))
+                    .unwrap_or_else(|_| "failed".to_string());
+                    let object_match_count_after_wait =
                         list_object_names_containing(&dest_space, &lookup_token)
-                            .unwrap_or_else(|e| vec![format!("object list failed: {e:#}")]);
+                            .map(|matches| matches.len())
+                            .unwrap_or(0);
                     let src_file_get = run_anyr_raw(&["file", "get", &dest_space, &source_id])?;
                     let src_obj_get = run_anyr_raw(&["object", "get", &dest_space, &source_id])?;
                     bail!(
-                        "file token '{}' not found in space {} after retry: initial_err={}\nsource_file_id={}\nsource_file_search_ids={:?}\nsource_object_name_matches={:?}\nbackup_selected_ids={:?}\nsource_manifest_entry={}\nrestore_debug={}\nfile_search_initial={}\nobject_name_matches_initial={:?}\nfile_search_after_wait_2s={}\nobject_name_matches_after_wait_2s={:?}\nnew_object_ids_after_restore={:?}\nnew_object_summaries={:?}\nsource_id_file_get_status={:?}\nsource_id_file_get_stderr={}\nsource_id_object_get_status={:?}\nsource_id_object_get_stderr={}",
+                        "file token '{}' not found in space {} after retry: initial_err={}\nsource_file_search_count={}\nsource_object_name_match_count={}\nbackup_selected_count={}\nsource_manifest_entry_present={}\nrestore_debug={}\nfile_search_initial={}\nobject_name_match_count_initial={}\nfile_search_after_wait_2s={}\nobject_name_match_count_after_wait_2s={}\nnew_object_count_after_restore={}\nsource_id_file_get_status={:?}\nsource_id_file_get_stderr={}\nsource_id_object_get_status={:?}\nsource_id_object_get_stderr={}",
                         lookup_token,
                         dest_space,
                         first_err,
-                        source_id,
-                        source_file_search_ids,
-                        source_object_matches,
-                        selected,
-                        source_manifest_entry
-                            .as_ref()
-                            .map(Value::to_string)
-                            .unwrap_or_else(|| "null".to_string()),
+                        source_file_search_ids.len(),
+                        source_object_match_count,
+                        selected.len(),
+                        source_manifest_entry_present,
                         restore_debug,
                         file_search,
-                        object_matches,
+                        object_match_count,
                         file_search_after_wait,
-                        object_matches_after_wait,
-                        new_ids,
-                        new_obj_summaries,
+                        object_match_count_after_wait,
+                        new_ids.len(),
                         src_file_get.status.code(),
-                        String::from_utf8_lossy(&src_file_get.stderr),
+                        support::anyr::stream_metadata(&src_file_get.stderr),
                         src_obj_get.status.code(),
-                        String::from_utf8_lossy(&src_obj_get.stderr),
+                        support::anyr::stream_metadata(&src_obj_get.stderr),
                     );
                 }
             } else {
@@ -443,7 +438,6 @@ async fn p1_restore_non_archived_pdf_between_spaces_preserves_fields() -> Result
                     .filter(|id| !dest_before_ids.contains(*id))
                     .cloned()
                     .collect();
-                let new_obj_summaries = summarize_object_ids(&dest_space, &new_ids);
                 let file_search = run_anyr([
                     "file",
                     "list",
@@ -454,33 +448,30 @@ async fn p1_restore_non_archived_pdf_between_spaces_preserves_fields() -> Result
                     "--file-type",
                     "pdf",
                 ])
-                .unwrap_or_else(|e| format!("file search failed: {e:#}"));
-                let object_matches = list_object_names_containing(&dest_space, &lookup_token)
-                    .unwrap_or_else(|e| vec![format!("object list failed: {e:#}")]);
+                .map(|output| support::anyr::stream_metadata(output.as_bytes()))
+                .unwrap_or_else(|_| "failed".to_string());
+                let object_match_count = list_object_names_containing(&dest_space, &lookup_token)
+                    .map(|matches| matches.len())
+                    .unwrap_or(0);
                 let src_file_get = run_anyr_raw(&["file", "get", &dest_space, &source_id])?;
                 let src_obj_get = run_anyr_raw(&["object", "get", &dest_space, &source_id])?;
                 bail!(
-                    "file token '{}' not found in space {} after retry; retry file search command failed: initial_err={}\nsource_file_id={}\nsource_file_search_ids={:?}\nsource_object_name_matches={:?}\nbackup_selected_ids={:?}\nsource_manifest_entry={}\nrestore_debug={}\nfile_search_initial={}\nobject_name_matches_initial={:?}\nnew_object_ids_after_restore={:?}\nnew_object_summaries={:?}\nsource_id_file_get_status={:?}\nsource_id_file_get_stderr={}\nsource_id_object_get_status={:?}\nsource_id_object_get_stderr={}",
+                    "file token '{}' not found in space {} after retry; retry file search command failed: initial_err={}\nsource_file_search_count={}\nsource_object_name_match_count={}\nbackup_selected_count={}\nsource_manifest_entry_present={}\nrestore_debug={}\nfile_search_initial={}\nobject_name_match_count_initial={}\nnew_object_count_after_restore={}\nsource_id_file_get_status={:?}\nsource_id_file_get_stderr={}\nsource_id_object_get_status={:?}\nsource_id_object_get_stderr={}",
                     lookup_token,
                     dest_space,
                     first_err,
-                    source_id,
-                    source_file_search_ids,
-                    source_object_matches,
-                    selected,
-                    source_manifest_entry
-                        .as_ref()
-                        .map(Value::to_string)
-                        .unwrap_or_else(|| "null".to_string()),
+                    source_file_search_ids.len(),
+                    source_object_match_count,
+                    selected.len(),
+                    source_manifest_entry_present,
                     restore_debug,
                     file_search,
-                    object_matches,
-                    new_ids,
-                    new_obj_summaries,
+                    object_match_count,
+                    new_ids.len(),
                     src_file_get.status.code(),
-                    String::from_utf8_lossy(&src_file_get.stderr),
+                    support::anyr::stream_metadata(&src_file_get.stderr),
                     src_obj_get.status.code(),
-                    String::from_utf8_lossy(&src_obj_get.stderr),
+                    support::anyr::stream_metadata(&src_obj_get.stderr),
                 );
             }
         }
@@ -836,18 +827,17 @@ async fn p1_restore_custom_type_object_between_spaces_preserves_fields() -> Resu
     let restored_obj = wait_object_has_type_name_like(&dest_space, &restored_obj_id, &type_name)
         .await
         .unwrap_or_else(|_| get_object_json(&dest_space, &restored_obj_id).unwrap_or(Value::Null));
-    let restored_type_by_name = wait_find_type_by_name(&dest_space, &type_name).await.ok();
+    let restored_type_by_name_present = wait_find_type_by_name(&dest_space, &type_name)
+        .await
+        .is_ok();
     let restored_type = restored_obj
         .get("type")
         .and_then(Value::as_object)
         .ok_or_else(|| {
             anyhow!(
-                "restored object missing type relation (restore_debug={}, type_by_name={})",
+                "restored object missing type relation (restore_debug={}, type_by_name_present={})",
                 restore_debug,
-                restored_type_by_name
-                    .as_ref()
-                    .map(Value::to_string)
-                    .unwrap_or_else(|| "<none>".to_string())
+                restored_type_by_name_present
             )
         })?;
     if restored_type.get("name").and_then(Value::as_str) == Some(type_name.as_str()) {
@@ -966,7 +956,6 @@ fn backup_selected(
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = run_anyback_dyn(&arg_refs)?;
     parse_archive_path(&output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {output}"))
 }
 
 fn restore_archive(space: &str, archive: &Path) -> Result<String> {
@@ -988,11 +977,13 @@ fn restore_archive(space: &str, archive: &Path) -> Result<String> {
         archive_s,
     ];
     let stdout = run_anyback_dyn(&args)?;
-    let log_json = fs::read_to_string(&log_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .unwrap_or(Value::Null);
-    Ok(format!("cli={} log={}", stdout, log_json))
+    let log_metadata = fs::read(&log_path)
+        .map(|log| support::anyr::stream_metadata(&log))
+        .unwrap_or_else(|_| "unavailable".to_string());
+    Ok(format!(
+        "cli={} log={log_metadata}",
+        support::anyr::stream_metadata(stdout.as_bytes())
+    ))
 }
 
 fn create_probe_object(space_name: &str, name: &str) -> Result<Option<String>> {
@@ -1313,14 +1304,6 @@ fn write_ids_file(path: &Path, ids: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn parse_archive_path(output: &str) -> Option<PathBuf> {
-    parse_json_output(output)
-        .ok()?
-        .get("archive")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-}
-
 fn backup_selected_ids(archive_path: &Path) -> Result<Vec<String>> {
     let manifest_output = run_anyback([
         "--json",
@@ -1505,13 +1488,9 @@ fn run_anyback_dyn(args: &[&str]) -> Result<String> {
     let mut full = Vec::with_capacity(args.len() + 1);
     full.push("backup");
     full.extend_from_slice(args);
-    run_anyr_dyn(&full)
-}
-
-/// Parses the structured (compact JSON) result document written by `anyr`.
-fn parse_json_output(output: &str) -> Result<Value> {
-    serde_json::from_str(output.trim())
-        .with_context(|| format!("expected structured anyr output, got: {output}"))
+    let (stdout, stderr) = run_anyr_parts(&full)?;
+    assert_non_tty_output_clean(&stderr);
+    Ok(stdout)
 }
 
 fn run_anyr<const N: usize>(args: [&str; N]) -> Result<String> {
@@ -1519,50 +1498,15 @@ fn run_anyr<const N: usize>(args: [&str; N]) -> Result<String> {
 }
 
 fn run_anyr_dyn(args: &[&str]) -> Result<String> {
-    let output = run_anyr_raw(args)?;
-    if !output.status.success() {
-        bail!(
-            "anyr command failed (status={}):\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(run_anyr_parts(args)?.0)
 }
 
-/// Resolves the `anyr` executable under test.
-///
-/// `ANYR_BIN` wins when set; otherwise the binary built alongside this test
-/// harness is required. The harness never falls back to `PATH`.
-fn anyr_binary() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("ANYR_BIN") {
-        let path = PathBuf::from(path);
-        if !path.is_file() {
-            return Err(anyhow!("ANYR_BIN is not a file: {}", path.display()));
-        }
-        return Ok(path);
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(target_dir) = exe.parent().and_then(Path::parent)
-    {
-        let candidate = target_dir.join(format!("anyr{}", std::env::consts::EXE_SUFFIX));
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(anyhow!(
-        "anyr test binary not found; run `cargo build -p anyr` first or set ANYR_BIN"
-    ))
+fn run_anyr_parts(args: &[&str]) -> Result<(String, String)> {
+    support::anyr::run_anyr_parts(args, run_anyr_raw)
 }
 
 fn run_anyr_raw(args: &[&str]) -> Result<std::process::Output> {
-    run_with_lock_retry(|| {
-        let mut command = Command::new(anyr_binary()?);
-        command.args(args);
-        let _keystore = support::keystore::configure_test_keystore(&mut command)?;
-        command.output().context("failed to execute anyr command")
-    })
+    run_with_lock_retry(|| support::anyr::run_once_checked(args))
 }
 
 fn list_object_names_containing(space_name: &str, token: &str) -> Result<Vec<String>> {
@@ -1722,26 +1666,6 @@ fn list_protobuf_import_collection_ids(space_name: &str) -> Result<HashSet<Strin
                 .map(ToString::to_string)
         })
         .collect())
-}
-
-fn summarize_object_ids(space_name: &str, ids: &[String]) -> Vec<String> {
-    ids.iter()
-        .take(10)
-        .map(|id| match get_object_json(space_name, id) {
-            Ok(v) => {
-                let name = v.get("name").and_then(Value::as_str).unwrap_or("<none>");
-                let layout = v.get("layout").and_then(Value::as_str).unwrap_or("<none>");
-                let type_key = v
-                    .get("type")
-                    .and_then(Value::as_object)
-                    .and_then(|t| t.get("key"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("<none>");
-                format!("{id}: name='{name}' layout='{layout}' type='{type_key}'")
-            }
-            Err(e) => format!("{id}: get failed: {e:#}"),
-        })
-        .collect()
 }
 
 fn run_with_lock_retry<F>(mut run: F) -> Result<std::process::Output>

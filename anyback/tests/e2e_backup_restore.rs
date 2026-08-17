@@ -3,7 +3,6 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     thread,
     time::Duration,
     time::SystemTime,
@@ -17,6 +16,10 @@ use tokio::time::sleep;
 
 mod object_generator;
 mod support;
+
+use support::anyr::{
+    assert_non_tty_output_clean, parse_archive_path, parse_json_output, stream_metadata,
+};
 
 struct PrefixCleanupGuard {
     scopes: Vec<CleanupScope>,
@@ -217,15 +220,14 @@ async fn e2e_backup_create_full_then_restore_apply_subset() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let manifest_json = read_manifest_json(&archive_path)?;
     assert!(
         manifest_json["object_count"]
             .as_u64()
             .is_some_and(|count| count >= 1),
-        "manifest object_count should be >= 1: {manifest_json}"
+        "manifest object_count should be at least one"
     );
 
     let import_ids_file = temp_dir.path().join("restore_ids.txt");
@@ -274,15 +276,14 @@ async fn e2e_backup_create_full_then_restore_into_new_space_path() -> Result<()>
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let manifest_json = read_manifest_json(&archive_path)?;
     assert!(
         manifest_json["object_count"]
             .as_u64()
             .is_some_and(|count| count >= 1),
-        "manifest object_count should be >= 1: {manifest_json}"
+        "manifest object_count should be at least one"
     );
 
     let restore_output = run_anyback([
@@ -332,8 +333,7 @@ async fn e2e_backup_create_full_then_restore_apply_same_space() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let restore_output = run_anyback([
         "restore",
@@ -375,19 +375,18 @@ async fn e2e_backup_create_json_output_is_parseable() -> Result<()> {
         &temp_dir.path().display().to_string(),
     ])?;
     assert_non_tty_output_clean(&output);
-    let payload: Value = serde_json::from_str(&output)
-        .with_context(|| format!("expected valid JSON output, got: {output}"))?;
+    let payload = parse_json_output(&output)?;
     assert!(
         payload.get("archive").is_some(),
-        "missing archive field in json output: {payload}"
+        "JSON output missing archive field"
     );
     assert!(
         payload.get("exported").is_some(),
-        "missing exported field in json output: {payload}"
+        "JSON output missing exported field"
     );
     assert!(
         payload.get("requested").is_some(),
-        "missing requested field in json output: {payload}"
+        "JSON output missing requested field"
     );
 
     let _ = delete_object(&source_space.name, &source_id);
@@ -414,8 +413,7 @@ async fn e2e_backup_create_pb_json_then_restore_same_space() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let manifest_json = read_manifest_json(&archive_path)?;
     assert_eq!(manifest_json["format"].as_str(), Some("pb-json"));
@@ -439,14 +437,13 @@ async fn e2e_backup_create_pb_json_then_restore_same_space() -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    let list_json: Value = serde_json::from_str(&list_output)
-        .with_context(|| format!("expected valid list JSON output, got: {list_output}"))?;
+    let list_json = parse_json_output(&list_output)?;
     assert!(
         list_json
             .get("expanded")
             .and_then(Value::as_array)
             .is_some_and(|items| !items.is_empty()),
-        "expected non-empty expanded entries in list output: {list_json}"
+        "list output missing expanded entries"
     );
 
     let _ = delete_object(&source_space.name, &source_id);
@@ -480,8 +477,7 @@ async fn e2e_archive_inspect_supports_pb_and_pb_json_archives() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let pb_archive = parse_archive_path(&pb_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {pb_output}"))?;
+    let pb_archive = parse_archive_path(&pb_output)?;
 
     let pb_json_output = run_anyback([
         "create",
@@ -494,8 +490,7 @@ async fn e2e_archive_inspect_supports_pb_and_pb_json_archives() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let pb_json_archive = parse_archive_path(&pb_json_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {pb_json_output}"))?;
+    let pb_json_archive = parse_archive_path(&pb_json_output)?;
 
     for archive in [pb_archive, pb_json_archive] {
         let list_output = run_anyback([
@@ -506,8 +501,7 @@ async fn e2e_archive_inspect_supports_pb_and_pb_json_archives() -> Result<()> {
                 .to_str()
                 .ok_or_else(|| anyhow!("bad archive path"))?,
         ])?;
-        let list_json: Value = serde_json::from_str(&list_output)
-            .with_context(|| format!("expected valid list JSON output, got: {list_output}"))?;
+        let list_json = parse_json_output(&list_output)?;
         assert!(
             list_json
                 .get("expanded")
@@ -548,8 +542,7 @@ async fn e2e_backup_restore_chat_space_messages() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     delete_chat_message(&chat_space.name, &chat_id, &message_id)?;
     wait_chat_message_absent(&chat_space.name, &chat_id, &token).await?;
@@ -607,8 +600,7 @@ async fn e2e_backup_restore_regular_space_chat_messages() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     if source_space.id == dest_space.id {
         delete_chat_message(&source_space.name, &source_chat_id, &source_message_id)?;
@@ -986,7 +978,9 @@ async fn exercise_schema_restore_fidelity(
         .collect::<BTreeMap<_, _>>();
     ensure!(
         restored_formats == expected_formats,
-        "restored custom property keys or formats changed: {restored_formats:?}"
+        "restored custom property keys or formats changed; restored_count={} expected_count={}",
+        restored_formats.len(),
+        expected_formats.len()
     );
     for property in &restored_classification.recommended {
         if expected_formats.contains_key(&property.key) {
@@ -1360,15 +1354,9 @@ async fn wait_for_typed_value_semantics(
             Ok(host) => match assert_typed_value_semantics(&host.properties, expected) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
-                    let observed_keys = host
-                        .properties
-                        .iter()
-                        .map(|property| property.key.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",");
                     last_evidence = format!(
-                        "semantic mismatch: {error:#}; observed property keys: {observed_keys}; observed properties: {:#?}",
-                        host.properties
+                        "semantic mismatch: {error:#}; observed_property_count={}",
+                        host.properties.len()
                     );
                 }
             },
@@ -1498,9 +1486,7 @@ async fn e2e_export_then_import_subset_between_spaces() -> Result<()> {
         &temp_dir.path().display().to_string(),
     ])?;
 
-    let archive_path = parse_archive_path(&export_output).ok_or_else(|| {
-        anyhow!("could not parse archive path from export output: {export_output}")
-    })?;
+    let archive_path = parse_archive_path(&export_output)?;
 
     let manifest_json = read_manifest_json(&archive_path)?;
     assert_eq!(manifest_json["object_count"].as_u64(), Some(6));
@@ -1595,8 +1581,7 @@ async fn e2e_restore_apply_json_output_is_parseable() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let restore_output = run_anyback([
         "--json",
@@ -1610,8 +1595,7 @@ async fn e2e_restore_apply_json_output_is_parseable() -> Result<()> {
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
     assert_non_tty_output_clean(&restore_output);
-    let payload: Value = serde_json::from_str(&restore_output)
-        .with_context(|| format!("expected valid JSON output, got: {restore_output}"))?;
+    let payload = parse_json_output(&restore_output)?;
     assert_eq!(payload.get("attempted").and_then(Value::as_u64), Some(1));
     assert_eq!(payload.get("failed").and_then(Value::as_u64), Some(0));
     assert_eq!(payload.get("imported").and_then(Value::as_u64), Some(1));
@@ -1652,8 +1636,7 @@ async fn e2e_backup_create_incremental_with_types_filter() -> Result<()> {
         &temp_dir.path().display().to_string(),
     ])?;
 
-    let archive_path = parse_archive_path(&output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {output}"))?;
+    let archive_path = parse_archive_path(&output)?;
     let manifest_json = read_manifest_json(&archive_path)?;
 
     assert_eq!(
@@ -1706,8 +1689,7 @@ async fn e2e_restore_dry_run_preflight_for_incremental_archive() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let _full_archive = parse_archive_path(&full_output)
-        .ok_or_else(|| anyhow!("could not parse full archive path from output: {full_output}"))?;
+    let _full_archive = parse_archive_path(&full_output)?;
 
     sleep(Duration::from_secs(2)).await;
     let since = Utc::now().to_rfc3339();
@@ -1725,9 +1707,7 @@ async fn e2e_restore_dry_run_preflight_for_incremental_archive() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let inc_archive = parse_archive_path(&inc_output).ok_or_else(|| {
-        anyhow!("could not parse incremental archive path from output: {inc_output}")
-    })?;
+    let inc_archive = parse_archive_path(&inc_output)?;
 
     let preflight_output = run_anyback([
         "restore",
@@ -1743,7 +1723,7 @@ async fn e2e_restore_dry_run_preflight_for_incremental_archive() -> Result<()> {
             .get("dry_run")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        "unexpected restore dry-run output: {preflight_output}"
+        "restore dry-run output missing true dry_run field"
     );
 
     let _ = delete_object(&source_space.name, &base_id);
@@ -1780,8 +1760,7 @@ async fn e2e_backup_include_files_controls_binary_payloads() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let no_files_archive = parse_archive_path(&no_files_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {no_files_output}"))?;
+    let no_files_archive = parse_archive_path(&no_files_output)?;
 
     let with_files_output = run_anyback([
         "create",
@@ -1795,14 +1774,14 @@ async fn e2e_backup_include_files_controls_binary_payloads() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let with_files_archive = parse_archive_path(&with_files_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {with_files_output}"))?;
+    let with_files_archive = parse_archive_path(&with_files_output)?;
 
     let payload_without = archive_payload_file_paths(&no_files_archive)?;
     let payload_with = archive_payload_file_paths(&with_files_archive)?;
     assert!(
         payload_without.is_empty(),
-        "expected no binary payload files without --include-files, got: {payload_without:?}"
+        "expected no binary payload files without --include-files, got {} entries",
+        payload_without.len()
     );
     assert!(
         !payload_with.is_empty(),
@@ -1844,8 +1823,7 @@ async fn e2e_backup_include_archived_controls_archived_objects() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let no_arch_archive = parse_archive_path(&no_arch_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {no_arch_output}"))?;
+    let no_arch_archive = parse_archive_path(&no_arch_output)?;
     let no_arch_ids = archive_object_ids(&no_arch_archive)?;
 
     let with_arch_output = run_anyback([
@@ -1860,8 +1838,7 @@ async fn e2e_backup_include_archived_controls_archived_objects() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let with_arch_archive = parse_archive_path(&with_arch_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {with_arch_output}"))?;
+    let with_arch_archive = parse_archive_path(&with_arch_output)?;
     let with_arch_ids = archive_object_ids(&with_arch_archive)?;
 
     assert!(
@@ -1917,8 +1894,7 @@ async fn e2e_backup_include_nested_includes_linked_objects() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let no_nested_archive = parse_archive_path(&no_nested_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {no_nested_output}"))?;
+    let no_nested_archive = parse_archive_path(&no_nested_output)?;
     let no_nested_ids = archive_object_ids(&no_nested_archive)?;
 
     let with_nested_output = run_anyback([
@@ -1933,8 +1909,7 @@ async fn e2e_backup_include_nested_includes_linked_objects() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let with_nested_archive = parse_archive_path(&with_nested_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {with_nested_output}"))?;
+    let with_nested_archive = parse_archive_path(&with_nested_output)?;
     let with_nested_ids = archive_object_ids(&with_nested_archive)?;
 
     assert!(
@@ -1997,9 +1972,7 @@ async fn e2e_backup_include_backlinks_includes_referencing_objects() -> Result<(
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let no_backlinks_archive = parse_archive_path(&no_backlinks_output).ok_or_else(|| {
-        anyhow!("could not parse archive path from output: {no_backlinks_output}")
-    })?;
+    let no_backlinks_archive = parse_archive_path(&no_backlinks_output)?;
     let no_backlinks_ids = archive_object_ids(&no_backlinks_archive)?;
 
     let with_backlinks_output = run_anyback([
@@ -2014,9 +1987,7 @@ async fn e2e_backup_include_backlinks_includes_referencing_objects() -> Result<(
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let with_backlinks_archive = parse_archive_path(&with_backlinks_output).ok_or_else(|| {
-        anyhow!("could not parse archive path from output: {with_backlinks_output}")
-    })?;
+    let with_backlinks_archive = parse_archive_path(&with_backlinks_output)?;
     let with_backlinks_ids = archive_object_ids(&with_backlinks_archive)?;
 
     assert!(
@@ -2070,8 +2041,7 @@ async fn e2e_backup_markdown_include_properties_changes_output() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let no_props_archive = parse_archive_path(&no_props_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {no_props_output}"))?;
+    let no_props_archive = parse_archive_path(&no_props_output)?;
 
     let with_props_output = run_anyback([
         "create",
@@ -2087,13 +2057,12 @@ async fn e2e_backup_markdown_include_properties_changes_output() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let with_props_archive = parse_archive_path(&with_props_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {with_props_output}"))?;
+    let with_props_archive = parse_archive_path(&with_props_output)?;
 
     let no_props_text = archive_markdown_blob(&no_props_archive)?;
     let with_props_text = archive_markdown_blob(&with_props_archive)?;
-    assert_ne!(
-        no_props_text, with_props_text,
+    assert!(
+        no_props_text != with_props_text,
         "expected markdown output to differ when --include-properties is enabled"
     );
     assert!(
@@ -2134,8 +2103,7 @@ async fn e2e_backup_incremental_since_mode_boundary_exact_timestamp() -> Result<
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let exclusive_archive = parse_archive_path(&exclusive_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {exclusive_output}"))?;
+    let exclusive_archive = parse_archive_path(&exclusive_output)?;
     let exclusive_ids = backup_selected_ids(&exclusive_archive)?;
 
     let inclusive_output = run_anyback([
@@ -2155,8 +2123,7 @@ async fn e2e_backup_incremental_since_mode_boundary_exact_timestamp() -> Result<
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let inclusive_archive = parse_archive_path(&inclusive_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {inclusive_output}"))?;
+    let inclusive_archive = parse_archive_path(&inclusive_output)?;
     let inclusive_ids = backup_selected_ids(&inclusive_archive)?;
 
     assert!(
@@ -2214,9 +2181,7 @@ async fn e2e_import_preserves_created_and_last_modified_dates() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&export_output).ok_or_else(|| {
-        anyhow!("could not parse archive path from export output: {export_output}")
-    })?;
+    let archive_path = parse_archive_path(&export_output)?;
 
     let import_output = run_anyback([
         "import",
@@ -2282,8 +2247,7 @@ async fn e2e_restore_reverts_modified_object_to_backup_state() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     // Modify object to v2
     let v2_name = format!("anyback-revert-modified-{unique}");
@@ -2369,8 +2333,7 @@ async fn e2e_restore_replace_restores_property_fields() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let _ = run_anyr([
         "object",
@@ -2447,8 +2410,7 @@ async fn e2e_restore_replace_file_object_reverts_name() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let _ = run_anyr([
         "file",
@@ -2516,8 +2478,7 @@ async fn e2e_restore_replace_type_object_reverts_fields() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let _ = run_anyr([
         "type",
@@ -2587,8 +2548,7 @@ async fn e2e_restore_replace_property_object_reverts_fields() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let _ = run_anyr([
         "property",
@@ -2664,8 +2624,7 @@ async fn e2e_restore_replace_collection_with_items_reverts_membership() -> Resul
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     remove_from_list(&source_space.name, &collection_id, &item_a_id)?;
     let item_c_id = create_object(&source_space.name, &item_c_name, "item c body")?;
@@ -2694,9 +2653,7 @@ async fn e2e_restore_replace_collection_with_items_reverts_membership() -> Resul
             .and_then(|t| t.get("key"))
             .and_then(Value::as_str)
             .is_some_and(|k| k.eq_ignore_ascii_case("collection")),
-        "restored object '{}' is not a collection: {}",
-        collection_name,
-        restored_collection
+        "restored object is not a collection"
     );
     let restored_item_a_id = find_exact_object_id_by_name(&source_space.name, &item_a_name)?;
     let restored_item_b_id = find_exact_object_id_by_name(&source_space.name, &item_b_name)?;
@@ -2792,8 +2749,7 @@ async fn e2e_restore_replace_custom_type_object_reverts_type_and_fields() -> Res
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let _ = run_anyr([
         "object",
@@ -2887,8 +2843,7 @@ async fn e2e_restore_replace_complex_nested_object_reverts_graph() -> Result<()>
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     remove_from_list(&source_space.name, &parent_id, &leaf_a_id)?;
     remove_from_list(&source_space.name, &child_id, &leaf_b_id)?;
@@ -2915,10 +2870,7 @@ async fn e2e_restore_replace_complex_nested_object_reverts_graph() -> Result<()>
     let restored_child_id = find_exact_object_id_by_name(&source_space.name, &child_name_v1)?;
     let restored_leaf_a_id = find_exact_object_id_by_name(&source_space.name, &leaf_a_name)?;
     let restored_leaf_b_id = find_exact_object_id_by_name(&source_space.name, &leaf_b_name_v1)?;
-    for (name, id) in [
-        (&parent_name, &restored_parent_id),
-        (&child_name_v1, &restored_child_id),
-    ] {
+    for id in [&restored_parent_id, &restored_child_id] {
         let obj = get_object_json(&source_space.name, id)?;
         assert!(
             obj.get("type")
@@ -2926,9 +2878,7 @@ async fn e2e_restore_replace_complex_nested_object_reverts_graph() -> Result<()>
                 .and_then(|t| t.get("key"))
                 .and_then(Value::as_str)
                 .is_some_and(|k| k.eq_ignore_ascii_case("collection")),
-            "restored object '{}' is not a collection: {}",
-            name,
-            obj
+            "restored object is not a collection"
         );
     }
     wait_object_body_contains(&source_space.name, &restored_leaf_b_id, "leaf b body v1").await?;
@@ -2998,8 +2948,7 @@ async fn e2e_restore_replace_after_object_type_changed_since_backup() -> Result<
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let _ = run_anyr([
         "object",
@@ -3075,8 +3024,7 @@ async fn e2e_restore_recovers_deleted_object() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     // Delete the object
     delete_object(&source_space.name, &object_id)?;
@@ -3166,8 +3114,7 @@ async fn e2e_restore_recovers_permanently_deleted_object() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     // Archive the object (soft delete)
     delete_object(&source_space.name, &object_id)?;
@@ -3268,8 +3215,7 @@ async fn e2e_restore_recovers_permanently_deleted_file_same_space() -> Result<()
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     delete_object(&source_space.name, &file_id)?;
     sleep(Duration::from_millis(600)).await;
@@ -3334,8 +3280,7 @@ async fn e2e_restore_recovers_permanently_deleted_type_same_space() -> Result<()
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     delete_type(&source_space.name, &type_id)?;
     sleep(Duration::from_millis(600)).await;
@@ -3400,8 +3345,7 @@ async fn e2e_restore_recovers_permanently_deleted_property_same_space() -> Resul
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     delete_property(&source_space.name, &prop_id)?;
     sleep(Duration::from_millis(600)).await;
@@ -3475,8 +3419,7 @@ async fn e2e_restore_recovers_permanently_deleted_collection_with_items_same_spa
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     for id in &selected {
         delete_object(&source_space.name, id)?;
@@ -3536,8 +3479,7 @@ async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let full_archive = parse_archive_path(&full_output)
-        .ok_or_else(|| anyhow!("could not parse full archive path: {full_output}"))?;
+    let full_archive = parse_archive_path(&full_output)?;
 
     // Wait, then record since1 timestamp, then wait again to ensure separation
     sleep(Duration::from_secs(2)).await;
@@ -3565,8 +3507,7 @@ async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let inc1_archive = parse_archive_path(&inc1_output)
-        .ok_or_else(|| anyhow!("could not parse inc1 archive path: {inc1_output}"))?;
+    let inc1_archive = parse_archive_path(&inc1_output)?;
 
     // Wait, then record since2, then wait again
     sleep(Duration::from_secs(2)).await;
@@ -3594,8 +3535,7 @@ async fn e2e_incremental_restore_chain_applies_sequential_changes() -> Result<()
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let inc2_archive = parse_archive_path(&inc2_output)
-        .ok_or_else(|| anyhow!("could not parse inc2 archive path: {inc2_output}"))?;
+    let inc2_archive = parse_archive_path(&inc2_output)?;
 
     // Inspect both incrementals to confirm the object is present
     let inc1_ids = archive_object_ids(&inc1_archive)?;
@@ -3941,8 +3881,7 @@ fn create_full_backup(space: &str, directory: &Path, include_files: bool) -> Res
     }
     args.extend(["--dir", directory]);
     let output = run_anyback_dyn(&args)?;
-    let archive = parse_archive_path(&output)
-        .ok_or_else(|| anyhow!("backup create output missing archive path: {output}"))?;
+    let archive = parse_archive_path(&output)?;
     ensure!(
         archive.is_file() && fs::metadata(&archive)?.len() > 0,
         "backup archive is missing or empty: {}",
@@ -4152,14 +4091,6 @@ fn run_anyback_dyn(args: &[&str]) -> Result<String> {
     Ok(stdout)
 }
 
-fn parse_archive_path(output: &str) -> Option<PathBuf> {
-    parse_json_output(output)
-        .ok()?
-        .get("archive")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-}
-
 fn manifest_sidecar_path(archive_path: &Path) -> PathBuf {
     let base_name = archive_path
         .file_name()
@@ -4225,8 +4156,7 @@ fn backup_selected_ids(archive_path: &Path) -> Result<Vec<String>> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    let manifest: Value = serde_json::from_str(&manifest_output)
-        .with_context(|| format!("expected valid manifest JSON, got: {manifest_output}"))?;
+    let manifest = parse_json_output(&manifest_output)?;
     let objects = manifest
         .get("objects")
         .and_then(Value::as_array)
@@ -4250,8 +4180,7 @@ fn archive_file_paths(archive_path: &Path) -> Result<Vec<String>> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    let list_json: Value = serde_json::from_str(&list_output)
-        .with_context(|| format!("expected valid list JSON output, got: {list_output}"))?;
+    let list_json = parse_json_output(&list_output)?;
     let files = list_json
         .get("files")
         .and_then(Value::as_array)
@@ -4360,44 +4289,16 @@ fn delete_property(space_name: &str, property_id: &str) -> Result<()> {
 fn count_archived_objects(space_name: &str) -> Result<u64> {
     let output = run_anyr(["space", "count-archived", space_name])?;
     let trimmed = output.trim();
-    trimmed
-        .parse::<u64>()
-        .with_context(|| format!("invalid count-archived output: {trimmed}"))
+    trimmed.parse::<u64>().with_context(|| {
+        format!(
+            "invalid count-archived output ({})",
+            stream_metadata(output.as_bytes())
+        )
+    })
 }
 
 fn run_anyr<const N: usize>(args: [&str; N]) -> Result<String> {
     run_anyr_dyn(&args)
-}
-
-/// Resolves the `anyr` executable under test.
-///
-/// `ANYR_BIN` wins when set; otherwise the binary built alongside this test
-/// harness is required. The harness never falls back to `PATH`.
-fn anyr_binary() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("ANYR_BIN") {
-        let path = PathBuf::from(path);
-        if !path.is_file() {
-            return Err(anyhow!("ANYR_BIN is not a file: {}", path.display()));
-        }
-        return Ok(path);
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(target_dir) = exe.parent().and_then(Path::parent)
-    {
-        let candidate = target_dir.join(format!("anyr{}", std::env::consts::EXE_SUFFIX));
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(anyhow!(
-        "anyr test binary not found; run `cargo build -p anyr` first or set ANYR_BIN"
-    ))
-}
-
-/// Parses the structured (compact JSON) result document written by `anyr`.
-fn parse_json_output(output: &str) -> Result<Value> {
-    serde_json::from_str(output.trim())
-        .with_context(|| format!("expected structured anyr output, got: {output}"))
 }
 
 /// Counts reported by `anyr backup restore`.
@@ -4412,10 +4313,12 @@ struct ImportSummary {
 fn parse_import_report(output: &str) -> Result<ImportSummary> {
     let value = parse_json_output(output)?;
     let field = |name: &str| -> Result<u64> {
-        value
-            .get(name)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| anyhow!("import report missing `{name}`: {output}"))
+        value.get(name).and_then(Value::as_u64).ok_or_else(|| {
+            anyhow!(
+                "import report missing `{name}` ({})",
+                stream_metadata(output.as_bytes())
+            )
+        })
     };
     let summary = ImportSummary {
         attempted: field("attempted")?,
@@ -4451,26 +4354,9 @@ fn run_anyr_dyn(args: &[&str]) -> Result<String> {
 /// Keeping the two apart matters for backup commands: stdout carries the
 /// structured result document, and stderr carries progress and diagnostics.
 fn run_anyr_parts(args: &[&str]) -> Result<(String, String)> {
-    let output = run_with_lock_retry(|| {
-        let mut command = Command::new(anyr_binary()?);
-        command.args(args);
-        let _keystore = support::keystore::configure_test_keystore(&mut command)?;
-        command.output().context("failed to execute anyr command")
-    })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() {
-        bail!(
-            "anyr command failed (status={}):\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            stdout,
-            stderr
-        );
-    }
-
-    Ok((stdout.trim().to_string(), stderr))
+    support::anyr::run_anyr_parts(args, |args| {
+        run_with_lock_retry(|| support::anyr::run_once_checked(args))
+    })
 }
 
 fn run_with_lock_retry<F>(mut run: F) -> Result<std::process::Output>
@@ -4530,17 +4416,6 @@ fn looks_like_transient_anytype_error(output: &std::process::Output) -> bool {
         // Under concurrent test activity, anytype-heart can intermittently fail chat writes
         // with sqlite step I/O errors; these generally succeed on retry.
         || haystack.contains("sqlite: step: disk I/O error")
-}
-
-fn assert_non_tty_output_clean(output: &str) {
-    assert!(
-        !output.contains('\u{1b}'),
-        "unexpected ANSI escape sequence in non-TTY output: {output:?}"
-    );
-    assert!(
-        !output.contains('\r'),
-        "unexpected carriage return animation in non-TTY output: {output:?}"
-    );
 }
 
 fn create_probe_object(space_name: &str, name: &str) -> Result<Option<String>> {
@@ -5095,14 +4970,13 @@ async fn wait_object_name_eq(space_name: &str, object_id: &str, expected: &str) 
         }
         sleep(Duration::from_millis(750)).await;
     }
-    let actual = get_object_json(space_name, object_id)
+    let actual_metadata = get_object_json(space_name, object_id)
         .ok()
         .and_then(|v| v.get("name").and_then(Value::as_str).map(String::from))
-        .unwrap_or_else(|| "<unavailable>".to_string());
+        .map(|actual| stream_metadata(actual.as_bytes()))
+        .unwrap_or_else(|| "unavailable".to_string());
     bail!(
-        "object {object_id} name expected '{}' but got '{}' in space {space_name}",
-        expected,
-        actual
+        "object {object_id} did not reach expected name in space {space_name}; actual={actual_metadata}"
     )
 }
 
@@ -5118,14 +4992,13 @@ async fn wait_object_body_contains(space_name: &str, object_id: &str, token: &st
         }
         sleep(Duration::from_millis(750)).await;
     }
-    let actual = get_object_json(space_name, object_id)
+    let actual_metadata = get_object_json(space_name, object_id)
         .ok()
         .and_then(|v| v.get("markdown").and_then(Value::as_str).map(String::from))
-        .unwrap_or_else(|| "<unavailable>".to_string());
+        .map(|actual| stream_metadata(actual.as_bytes()))
+        .unwrap_or_else(|| "unavailable".to_string());
     bail!(
-        "object {object_id} body does not contain '{}' (actual: '{}') in space {space_name}",
-        token,
-        actual
+        "object {object_id} body did not contain expected token in space {space_name}; actual={actual_metadata}"
     )
 }
 

@@ -2,7 +2,6 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     thread,
     time::{Duration, Instant},
 };
@@ -15,6 +14,8 @@ use serde_json::Value;
 use tokio::time::sleep;
 
 mod support;
+
+use support::anyr::{assert_non_tty_output_clean, parse_archive_path, parse_json_output};
 
 struct PrefixCleanupGuard {
     spaces: Vec<String>,
@@ -529,8 +530,7 @@ fn run_backup_restore_batch(
     }
     let backup_args_ref: Vec<&str> = backup_args.iter().map(String::as_str).collect();
     let backup_output = run_anyback_dyn(&backup_args_ref)?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
     wait_for_archive_ready(&archive_path)?;
     let manifest_count = read_manifest_object_count(&archive_path)?;
     let min_expected = batch.len();
@@ -581,17 +581,16 @@ fn run_backup_restore_batch(
             });
         }
     };
-    let parsed: Value = serde_json::from_str(&restore_output)
-        .with_context(|| format!("restore output was not valid json: {restore_output}"))?;
+    let parsed = parse_json_output(&restore_output)?;
     ensure!(
         parsed.get("failed").and_then(Value::as_u64) == Some(0),
-        "restore had failures for integrity batch: {parsed}"
+        "restore reported failures for integrity batch"
     );
 
     let expected = u64::try_from(batch.len()).unwrap_or(0);
     ensure!(
         parsed.get("attempted").and_then(Value::as_u64) == Some(expected),
-        "unexpected attempted count for integrity batch: {parsed}"
+        "restore reported an unexpected attempted count for integrity batch"
     );
     let expected_file_names: Vec<&str> = batch
         .iter()
@@ -602,7 +601,7 @@ fn run_backup_restore_batch(
         let success_rows = parsed
             .get("success")
             .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("restore report missing success array: {parsed}"))?;
+            .ok_or_else(|| anyhow!("restore report missing success array"))?;
         for file_name in expected_file_names {
             let found = success_rows.iter().any(|row| {
                 row.get("type").and_then(Value::as_str) == Some("file")
@@ -610,7 +609,7 @@ fn run_backup_restore_batch(
             });
             ensure!(
                 found,
-                "restore report missing file success row for attachment '{file_name}': {parsed}"
+                "restore report missing file success row for attachment '{file_name}'"
             );
         }
     }
@@ -655,8 +654,7 @@ fn run_full_space_backup_restore(
         "--prefix",
         prefix,
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
     wait_for_archive_ready(&archive_path)?;
 
     let restore_output = run_anyback([
@@ -670,11 +668,10 @@ fn run_full_space_backup_restore(
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    let parsed: Value = serde_json::from_str(&restore_output)
-        .with_context(|| format!("restore output was not valid json: {restore_output}"))?;
+    let parsed = parse_json_output(&restore_output)?;
     ensure!(
         parsed.get("failed").and_then(Value::as_u64) == Some(0),
-        "restore had failures for full-space chat roundtrip: {parsed}"
+        "restore reported failures for full-space chat roundtrip"
     );
     Ok(())
 }
@@ -711,8 +708,7 @@ fn run_markdown_export_probe(
     }
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = run_anyback_dyn(&args_ref)?;
-    let archive = parse_archive_path(&output)
-        .ok_or_else(|| anyhow!("could not parse markdown archive path from output: {output}"))?;
+    let archive = parse_archive_path(&output)?;
     wait_for_archive_ready(&archive)?;
 
     let files = list_archive_files(&archive)?;
@@ -751,8 +747,7 @@ fn list_archive_files(archive: &Path) -> Result<Vec<String>> {
             .to_str()
             .ok_or_else(|| anyhow!("bad archive path"))?,
     ])?;
-    let payload: Value =
-        serde_json::from_str(&output).with_context(|| format!("invalid list json: {output}"))?;
+    let payload = parse_json_output(&output)?;
     let files = payload
         .get("files")
         .and_then(Value::as_array)
@@ -1316,38 +1311,9 @@ fn run_anyback_dyn(args: &[&str]) -> Result<String> {
     let mut full = Vec::with_capacity(args.len() + 1);
     full.push("backup");
     full.extend_from_slice(args);
-    run_anyr_dyn(&full)
-}
-
-/// Parses the structured (compact JSON) result document written by `anyr`.
-fn parse_json_output(output: &str) -> Result<Value> {
-    serde_json::from_str(output.trim())
-        .with_context(|| format!("expected structured anyr output, got: {output}"))
-}
-
-/// Resolves the `anyr` executable under test.
-///
-/// `ANYR_BIN` wins when set; otherwise the binary built alongside this test
-/// harness is required. The harness never falls back to `PATH`.
-fn anyr_binary() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("ANYR_BIN") {
-        let path = PathBuf::from(path);
-        if !path.is_file() {
-            return Err(anyhow!("ANYR_BIN is not a file: {}", path.display()));
-        }
-        return Ok(path);
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(target_dir) = exe.parent().and_then(Path::parent)
-    {
-        let candidate = target_dir.join(format!("anyr{}", std::env::consts::EXE_SUFFIX));
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(anyhow!(
-        "anyr test binary not found; run `cargo build -p anyr` first or set ANYR_BIN"
-    ))
+    let (stdout, stderr) = run_anyr_parts(&full)?;
+    assert_non_tty_output_clean(&stderr);
+    Ok(stdout)
 }
 
 fn run_anyr<const N: usize>(args: [&str; N]) -> Result<String> {
@@ -1355,25 +1321,13 @@ fn run_anyr<const N: usize>(args: [&str; N]) -> Result<String> {
 }
 
 fn run_anyr_dyn(args: &[&str]) -> Result<String> {
-    let output = run_with_lock_retry(|| {
-        let mut command = Command::new(anyr_binary()?);
-        command.args(args);
-        let _keystore = support::keystore::configure_test_keystore(&mut command)?;
-        command.output().context("failed to execute anyr command")
-    })?;
+    Ok(run_anyr_parts(args)?.0)
+}
 
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "anyr command failed (status={}):\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            stdout,
-            stderr
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+fn run_anyr_parts(args: &[&str]) -> Result<(String, String)> {
+    support::anyr::run_anyr_parts(args, |args| {
+        run_with_lock_retry(|| support::anyr::run_once_checked(args))
+    })
 }
 
 fn delete_objects_by_prefix_sync(space_name: &str, prefix: &str) -> Result<()> {
@@ -1439,14 +1393,6 @@ fn looks_like_keyring_lock_error(output: &std::process::Output) -> bool {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     stderr.contains("Failed locking file") || stdout.contains("Failed locking file")
-}
-
-fn parse_archive_path(output: &str) -> Option<PathBuf> {
-    parse_json_output(output)
-        .ok()?
-        .get("archive")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
 }
 
 fn persist_failure_artifacts(
