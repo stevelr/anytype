@@ -1,173 +1,7 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>anyr quick reference</title>
-    <style>
-    :root {
-      color-scheme: light dark;
-      --accent: #3f7652;
-      --border: color-mix(in srgb, currentColor 22%, transparent);
-      --muted: color-mix(in srgb, currentColor 70%, transparent);
-      --panel: color-mix(in srgb, canvas 92%, var(--accent));
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      line-height: 1.35;
-    }
-    * {
-      box-sizing: border-box;
-    }
-    body {
-      max-width: 76rem;
-      margin: 0 auto;
-      padding: 1.25rem;
-    }
-    h1 {
-      margin: 0;
-      font-size: 2rem;
-    }
-    h2 {
-      margin: 0;
-      font-size: 1.35rem;
-    }
-    h3 {
-      margin: 1rem 0 0.25rem;
-      font-size: 1rem;
-    }
-    p {
-      margin: 0.35rem 0 0.75rem;
-    }
-    a {
-      color: var(--accent);
-    }
-    code,
-    pre {
-      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    }
-    code {
-      font-size: 0.92em;
-    }
-    pre {
-      margin: 0.25rem 0 0.65rem;
-      padding: 0.55rem 0.7rem;
-      overflow-x: auto;
-      border: 1px solid var(--border);
-      border-radius: 0.35rem;
-      background: var(--panel);
-      font-size: 0.86rem;
-      line-height: 1.35;
-    }
-    header > p {
-      color: var(--muted);
-    }
-    .warning {
-      margin: 1rem 0;
-      padding: 0.65rem 0.8rem;
-      border-left: 0.3rem solid #b86724;
-      background: color-mix(in srgb, canvas 92%, #b86724);
-    }
-    nav {
-      margin: 1rem 0 1.25rem;
-      padding: 0.8rem;
-      border: 1px solid var(--border);
-      border-radius: 0.4rem;
-    }
-    nav h2 {
-      margin-bottom: 0.45rem;
-      font-size: 1rem;
-    }
-    nav ul {
-      columns: 4 11rem;
-      margin: 0;
-      padding-left: 1.25rem;
-    }
-    nav li {
-      break-inside: avoid;
-      margin: 0.15rem 0;
-    }
-    section {
-      margin: 0 0 0.85rem;
-      border: 1px solid var(--border);
-      border-radius: 0.45rem;
-      overflow: clip;
-    }
-    section > h2 {
-      padding: 0.7rem 0.85rem 0;
-    }
-    details > summary {
-      padding: 0.35rem 0.85rem 0.7rem;
-      color: var(--muted);
-      cursor: pointer;
-      font-size: 0.84rem;
-    }
-    details > .commands {
-      padding: 0 0.85rem 0.65rem;
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
-      gap: 0 1rem;
-    }
-    .entry {
-      min-width: 0;
-      break-inside: avoid;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.9rem;
-    }
-    th,
-    td {
-      padding: 0.35rem 0.5rem;
-      border-bottom: 1px solid var(--border);
-      text-align: left;
-    }
-    footer {
-      margin-top: 1.25rem;
-      color: var(--muted);
-      font-size: 0.85rem;
-    }
-    @media (max-width: 35rem) {
-      body {
-        padding: 0.75rem;
-      }
-      details > .commands {
-        grid-template-columns: 1fr;
-      }
-    }
-    @media print {
-      :root {
-        color-scheme: light;
-        font-size: 9pt;
-      }
-      body {
-        max-width: none;
-        padding: 0;
-      }
-      nav ul {
-        columns: 6;
-      }
-      details > summary {
-        display: none;
-      }
-      details > .commands {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-      }
-      section {
-        break-inside: avoid-page;
-      }
-      pre {
-        white-space: pre-wrap;
-        overflow: visible;
-      }
-      a {
-        color: inherit;
-        text-decoration: none;
-      }
-    }
-    </style>
-  </head>
-  <body>
+{% extends "index.html" %}
+{% block title %}{{ config.title }} | anyr quick reference{% endblock title %}
+{% block content %}
+<div class="quickref">
     <header>
       <h1><code>anyr</code> quick reference</h1>
       <p>
@@ -193,7 +27,7 @@
       exposes a space through its public sharing controls.
     </aside>
 
-    <nav aria-label="Quick-reference contents">
+    <div class="quickref-nav" aria-label="Quick-reference contents">
       <h2>Contents</h2>
       <ul>
         <li><a href="#output">Output and help</a></li>
@@ -210,9 +44,9 @@
         <li><a href="#backup">Backup and restore</a></li>
         <li><a href="#mcp">MCP and completions</a></li>
       </ul>
-    </nav>
+    </div>
 
-    <main>
+    <div class="quickref-sections">
       <section id="output">
         <h2>Output and help</h2>
         <details open>
@@ -361,7 +195,7 @@ anyr space delete-archived "Work" --confirm</code></pre>
             <div class="entry">
               <h3>Extract task IDs for a shell workflow</h3>
               <pre><code>anyr search --space "Work" --type task --all \
-  | jq -r '.items[].id'</code></pre>
+  | jq -r '.[] | .id'</code></pre>
             </div>
           </div>
         </details>
@@ -704,15 +538,7 @@ anyr completions fish | source</code></pre>
           </div>
         </details>
       </section>
-    </main>
+    </div>
 
-    <footer>
-      <p>
-        <strong>anyr</strong>
-        0.5.0-pre.5 ·
-        <a href="https://github.com/stevelr/anytype">Homepage and source</a>
-        · Last updated: 2026-08-17
-      </p>
-    </footer>
-  </body>
-</html>
+</div>
+{% endblock content %}

@@ -1,0 +1,24 @@
+# Anytype Toolbox documentation site.
+base_url = "https://docs.anytype-toolbox.org"
+title = "Anytype Toolbox"
+description = "Command-line tools and Rust libraries for automating, editing, backing up, and integrating with Anytype."
+
+compile_sass = true
+build_search_index = true
+generate_feeds = false
+
+theme = "easydocs"
+
+taxonomies = []
+
+[markdown]
+bottom_footnotes = true
+insert_anchor_links = "right"
+
+[markdown.highlighting]
+theme = "catppuccin-latte"
+
+[extra]
+favicon = "/favicon.svg"
+easydocs_logo_always_clickable = true
+easydocs_heading_threshold = 3

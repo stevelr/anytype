@@ -1,86 +1,120 @@
-# Anytype Rust Tools and Clients
+# Anytype Toolbox
 
-This repository is a rust workspace for Anytype automation, with client libraries and cli tools.
+Automate your Anytype workspace from the terminal, scripts, an external editor,
+or an AI client.
 
-## Projects
+Anytype Toolbox is a community project built around one command: `anyr`. It can
+manage spaces and objects, work with files and chats, edit documents as
+Markdown, export and restore spaces, and run a workflow-oriented MCP server.
+Rust applications can use the supported API surface through the workspace's
+client libraries.
 
-<table>
-<tr>
-<td width="50%" valign="top">
-<h3><a href="./anytype-api/">📦 anytype-api</a></h3>
-<p>An ergonomic Anytype API client in Rust</p>
-</td>
-<td width="50%" valign="top">
-<h3><a href="./anyr/">⌨️ anyr</a></h3>
-<p>List, search, and manipulate Anytype objects from the command line</p>
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-<h3><a href="./any-edit/">✏️ any-edit</a></h3>
-<p>Edit Anytype documents in an external editor</p>
-</td>
-<td width="50%" valign="top">
-<h3><a href="./anytype-rpc/">🔌 anytype-rpc</a></h3>
-<p>Experimental Rust gRPC client for Anytype</p>
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-<h3><a href="./any-mcp/">🔗 any-mcp</a></h3>
-<p>Bounded, workflow-oriented MCP server for Anytype</p>
-</td>
-<td width="50%" valign="top">
-<h3><a href="./anyback/">💾 anyback</a></h3>
-<p>Backup, restore, and inspect Anytype spaces</p>
-</td>
-</tr>
-</table>
+[![release](https://img.shields.io/github/v/tag/stevelr/anytype?sort=semver&filter=anyr-v*&label=release)](https://github.com/stevelr/anytype/releases?q=anyr-v&expanded=true)
+[![crates.io](https://img.shields.io/crates/v/anyr.svg)](https://crates.io/crates/anyr)
 
-## Build and run
+**[Documentation](https://docs.anytype-toolbox.org) ·
+[Releases](https://github.com/stevelr/anytype/releases) ·
+[Rust API](https://docs.rs/anytype)**
 
-The workspace keeps private test executables alongside its libraries, but
-selects `anyr` for Cargo commands that do not name a package. Run the
-user-facing CLI from the repository root:
+## Start with `anyr`
+
+[Install `anyr`](./anyr/README.md#install), then choose the connection that
+matches your Anytype installation.
+
+With the Anytype desktop app running, authenticate interactively:
 
 ```sh
-cargo run -- -h
+anyr auth login
+anyr auth status --pretty
 ```
 
-Use `--workspace` or `-p PACKAGE` when you need to build or test other
-workspace members.
+Desktop login provisions HTTP access. `auth status` reports HTTP and gRPC
+credentials separately because some file, chat, invitation, backup, and MCP
+operations require gRPC credentials. The [credential guide](./anyr/README.md#generating-and-saving-credentials) covers both.
 
-The Nix development shell supplies the Rust version pinned by
-`rust-toolchain.toml`, protobuf, `just`, `jq`, a C compiler, `gate`, and Python
-3.14:
+For a running Anytype headless server, initialize and verify both credential
+families together:
+
+```sh
+anyr init-cli
+```
+
+Confirm the connection and discover the command surface:
+
+```sh
+anyr space list --table
+anyr --help
+```
+
+The [CLI guide](./anyr/README.md) covers endpoints, credential storage, output
+formats, shell completions, and every command group.
+
+## What you can do
+
+| Goal                                                              | Entry point                                                                       |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Manage spaces, objects, types, properties, files, and chats       | [`anyr` quick reference](https://docs.anytype-toolbox.org/cli/quick-reference/)   |
+| Search and automate Anytype with JSON or table output             | [`anyr` CLI guide](./anyr/README.md)                                              |
+| Edit Anytype documents in an external Markdown editor             | [`anyr md`](./any-edit/README.md)                                                 |
+| Export a space, collection, type, or tagged selection as Markdown | [Markdown export guide](https://docs.anytype-toolbox.org/guides/export-markdown/) |
+| Create, inspect, compare, and restore backups                     | [`anyr backup`](./anyback/README.md)                                              |
+| Connect an AI client through the Model Context Protocol           | [`anyr mcp`](./any-mcp/README.md)                                                 |
+| Build an Anytype integration in Rust                              | [`anytype` client library](./anytype-api/README.md)                               |
+
+For example:
+
+```sh
+# List pages in a space.
+anyr object list "Work" --type page --table
+
+# Edit a document after configuring EDITOR or EDITOR_COMMAND.
+anyr md edit "Work" OBJECT_ID
+
+# Export a space as Markdown with files and property metadata.
+anyr backup export \
+  --space "Work" \
+  --format markdown \
+  --include-files \
+  --include-properties \
+  --dest ./work-markdown.zip
+```
+
+Commands write compact JSON to stdout by default, which keeps pipelines
+predictable. Use `--pretty` for readable JSON or `--table` for terminal output.
+Diagnostics and progress remain on stderr.
+
+## Rust libraries and components
+
+CLI users install `anyr`. The other workspace packages provide its libraries
+and specialized integration surfaces:
+
+| Package                                         | Purpose                                                                          |
+| ----------------------------------------------- | -------------------------------------------------------------------------------- |
+| [`anytype` Rust crate](./anytype-api/README.md) | High-level client spanning the supported REST API and selected gRPC capabilities |
+| [`anytype-rpc`](./anytype-rpc/README.md)        | Generated low-level client for Anytype's gRPC interface                          |
+| [`any-edit`](./any-edit/README.md)              | Markdown conversion and external-editor workflows used by `anyr md`              |
+| [`anyback`](./anyback/README.md)                | Backup, restore, archive inspection, and Markdown export used by `anyr backup`   |
+| [`any-mcp`](./any-mcp/README.md)                | Workflow-oriented MCP server used by `anyr mcp`                                  |
+
+The `anytype` Rust crate is the recommended starting point for applications. It
+prefers the supported REST API when REST provides equivalent behavior and uses
+`anytype-rpc` for capabilities that require the gRPC interface.
+
+## Build the workspace
+
+The Nix development shell provides the pinned Rust toolchain and native build
+dependencies:
 
 ```sh
 nix develop
+cargo build
+cargo run -- --help
 ```
 
-GitHub Actions runs five smoke checks on pull requests and pushes to `main`.
-Pushes to `main` and nightly schedules also run the six-platform offline matrix
-and the required disposable live gates. A weekly schedule runs characterization
-and artifact canaries. Every workflow retains a manual dispatch with its
-applicable platform or tier selector.
+Cargo commands that do not select a package build `anyr`, the workspace's
+default member. Use `--workspace` or `-p PACKAGE` to work with every package or
+one library.
 
-The CI and build matrices cover Linux x86_64 and arm64, macOS arm64, and
-Windows x86_64 and arm64; CI also has a native Arch Linux lane. Nix drives
-Linux and macOS builds, Windows builds run natively, and Linux builds can
-produce loadable x86_64 or arm64 OCI image archives. Linux live workflows
-select the headless server through `ANYTYPE_CLI_BIN`, defaulting to `anytype`
-on `PATH`.
+## License
 
-Pushing a version tag whose commit is reachable from `main` creates a GitHub
-Release after cargo-dist builds and validates its archives, checksums, shell
-and PowerShell installers, and Homebrew formulae. Accepted tags are `X.Y.Z`,
-an optional hyphenated prerelease such as `0.5.1-pre.2`, and the equivalent
-`anyr-vX.Y.Z` form. The version must match the package version. Hyphenated
-versions create GitHub prereleases and do not update the Homebrew tap. Manual
-and weekly release-artifact runs build the same downloads without publishing.
-
-## Compatibility notes
-
-- [Numeric and checkbox filter status](FILTER_STATUS.md) records the
-  supported condition, value-encoding, and endpoint matrix plus the disposition
-  of the historical upstream parsing bug.
+Apache License 2.0. See [LICENSE-APACHE](./LICENSE-APACHE).

@@ -3,6 +3,10 @@
 [![release](https://img.shields.io/github/v/tag/stevelr/anytype?sort=semver&filter=anyr-v*&label=release)](https://github.com/stevelr/anytype/releases?q=anyr-v&expanded=true)
 [![crates.io](https://img.shields.io/crates/v/anyr.svg)](https://crates.io/crates/anyr)
 
+**[Documentation](https://docs.anytype-toolbox.org) ·
+[Quick reference](https://docs.anytype-toolbox.org/cli/quick-reference/) ·
+[Markdown export](https://docs.anytype-toolbox.org/guides/export-markdown/)**
+
 List, search, and manipulate anytype objects from the command-line
 
 Homepage: https://github.com/stevelr/anytype
@@ -469,15 +473,17 @@ brew install stevelr/tap/anyr
 
 **Linux (arm64/x86_64)**
 
-```sh
-curl -fsSL https://github.com/stevelr/anytype/releases/latest/download/anyr-installer.sh | sh
-```
+Download the archive for your architecture and its checksum from the
+[releases page](https://github.com/stevelr/anytype/releases). Verify the
+download against the published checksum, then extract `anyr` to a directory on
+`PATH`.
 
 **Windows Powershell**
 
-```sh
-irm https://github.com/stevelr/anytype/releases/latest/download/anyr-installer.ps1 | iex
-```
+Download the Windows archive and its checksum from the
+[releases page](https://github.com/stevelr/anytype/releases). Verify the
+download against the published checksum, then place `anyr.exe` in a directory
+on `PATH`.
 
 **Cargo**
 

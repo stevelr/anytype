@@ -8,6 +8,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add the Anytype Toolbox Zola documentation site, with task-oriented `anyr`
+  installation, quick-reference, Markdown export, and Rust-library guides.
 - Publish cargo-dist archives, checksums, shell and PowerShell installers, and
   Homebrew formulae to a GitHub Release when a supported version tag points at
   `main`. Prerelease tags create GitHub prereleases without updating the
