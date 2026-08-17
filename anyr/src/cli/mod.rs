@@ -10,16 +10,14 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "mcp")]
 use std::ffi::OsString;
 
-use anyhow::{Context, Result, bail};
-use anytype::prelude::*;
-use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum};
-use clap_complete::Generator;
-use tracing::warn;
-
 use crate::{
     cli::chat::{ChatReadTypeArg, MessageStyleArg, TransportArg},
     output::{Output, OutputFormat},
 };
+use anyhow::{Context, Result, bail};
+use anytype::prelude::*;
+use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Generator;
 
 pub mod auth;
 pub mod chat;
@@ -1763,6 +1761,7 @@ pub struct AppContext {
 }
 
 pub async fn run(mut cli: Cli) -> Result<()> {
+    validate_output_flags(&cli)?;
     apply_init_cli_endpoint_defaults(&mut cli);
 
     if let Commands::Completions { shell } = &cli.command {
@@ -1905,6 +1904,52 @@ mod completion_tests {
     }
 }
 
+#[cfg(test)]
+mod output_flag_tests {
+    use clap::Parser;
+
+    use super::{Cli, validate_output_flags};
+
+    fn validation_error(args: &[&str]) -> String {
+        let cli = Cli::try_parse_from(args).expect("arguments should parse");
+        validate_output_flags(&cli)
+            .expect_err("conflicting output options must be rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn conflicting_format_flags_are_rejected() {
+        for (first, second) in [
+            ("--json", "--pretty"),
+            ("--json", "--table"),
+            ("--json", "--quiet"),
+            ("--pretty", "--table"),
+            ("--pretty", "--quiet"),
+            ("--table", "--quiet"),
+        ] {
+            let message = validation_error(&["anyr", first, "completions", "bash", second]);
+            assert!(message.contains("conflicting output formats"), "{message}");
+            assert!(message.contains(first), "{message}");
+            assert!(message.contains(second), "{message}");
+        }
+    }
+
+    #[test]
+    fn quiet_with_output_file_is_rejected() {
+        let message = validation_error(&[
+            "anyr",
+            "--quiet",
+            "completions",
+            "bash",
+            "--output",
+            "result.json",
+        ]);
+        assert!(message.contains("conflicting output options"), "{message}");
+        assert!(message.contains("--quiet"), "{message}");
+        assert!(message.contains("--output"), "{message}");
+    }
+}
+
 /// Dispatch the embedded MCP process before any standard Tokio runtime starts.
 #[cfg(feature = "mcp")]
 pub fn run_mcp(args: &McpArgs, keystore: Option<String>) -> std::process::ExitCode {
@@ -1972,18 +2017,38 @@ fn apply_init_cli_endpoint_defaults(cli: &mut Cli) {
     }
 }
 
+/// Rejects ambiguous or self-cancelling global output requests.
+pub fn validate_output_flags(cli: &Cli) -> Result<()> {
+    let requested: Vec<&str> = [
+        (cli.json, "--json"),
+        (cli.pretty, "--pretty"),
+        (cli.table, "--table"),
+        (cli.quiet, "--quiet"),
+    ]
+    .into_iter()
+    .filter_map(|(is_set, flag)| is_set.then_some(flag))
+    .collect();
+
+    if requested.len() > 1 {
+        bail!(
+            "conflicting output formats: {}; choose one",
+            requested.join(", ")
+        );
+    }
+    if cli.quiet && cli.output.is_some() {
+        bail!(
+            "conflicting output options: --quiet suppresses the output that --output would write"
+        );
+    }
+    Ok(())
+}
+
 fn resolve_output_format(cli: &Cli) -> OutputFormat {
     if cli.quiet {
         OutputFormat::Quiet
     } else if cli.pretty {
-        if cli.table {
-            warn!("--pretty conflicts with --table. Using json pretty format");
-        }
         OutputFormat::Pretty
     } else if cli.json {
-        if cli.table {
-            warn!("--json conflicts with --table. Using json format");
-        }
         OutputFormat::Json
     } else if cli.table {
         OutputFormat::Table
@@ -2009,46 +2074,27 @@ fn backup_output(output: &Output) -> anyback_reader::cli::CommandOutput {
     CommandOutput::new(mode, output.path().map(Path::to_path_buf))
 }
 
-/// Rejects global output flag combinations that a backup command cannot honor.
+/// Validates output requests against the selected backup command.
 ///
-/// Anyr warns and picks a winner for conflicting format flags on most
-/// commands. Backup commands produce archives and import reports whose
-/// presentation is load-bearing for scripts, so an ambiguous or impossible
-/// request is an error instead of a silently downgraded run.
+/// Global output conflicts are rejected before dispatch. Backup commands add
+/// restrictions for interactive output and paths that alias command inputs.
 #[cfg(feature = "backup")]
 fn validate_backup_output_flags(cli: &Cli, command: &anyback_reader::cli::Commands) -> Result<()> {
     use anyback_reader::cli::{command_is_interactive, command_name};
 
     let name = command_name(command);
 
-    let mut requested: Vec<&str> = Vec::new();
-    if cli.json {
-        requested.push("--json");
-    }
-    if cli.pretty {
-        requested.push("--pretty");
-    }
-    if cli.table {
-        requested.push("--table");
-    }
-    if cli.quiet {
-        requested.push("--quiet");
-    }
-    if requested.len() > 1 {
-        bail!(
-            "conflicting output formats for `backup {name}`: {} - choose one",
-            requested.join(", ")
-        );
-    }
-
-    if cli.quiet && cli.output.is_some() {
-        bail!(
-            "conflicting output options for `backup {name}`: --quiet suppresses the output that --output would write"
-        );
-    }
+    let requested = [
+        (cli.json, "--json"),
+        (cli.pretty, "--pretty"),
+        (cli.table, "--table"),
+        (cli.quiet, "--quiet"),
+    ]
+    .into_iter()
+    .find_map(|(is_set, flag)| is_set.then_some(flag));
 
     if command_is_interactive(command) {
-        if let Some(flag) = requested.first() {
+        if let Some(flag) = requested {
             bail!("`backup {name}` renders an interactive terminal UI and does not support {flag}");
         }
         if cli.output.is_some() {
@@ -2424,34 +2470,6 @@ mod backup_output_tests {
             let message = format!("{err:#}");
             assert!(message.contains("aliases"), "{message}");
         }
-    }
-
-    #[test]
-    fn conflicting_format_flags_are_rejected() {
-        let err = validate(&["anyr", "--json", "--table", "backup", "list", "archive-dir"])
-            .expect_err("conflicting formats must fail");
-        let message = err.to_string();
-        assert!(message.contains("conflicting output formats"), "{message}");
-        assert!(message.contains("--json"), "{message}");
-        assert!(message.contains("--table"), "{message}");
-    }
-
-    #[test]
-    fn quiet_with_output_file_is_rejected() {
-        let err = validate(&[
-            "anyr",
-            "--quiet",
-            "backup",
-            "list",
-            "archive-dir",
-            "--output",
-            "report.json",
-        ])
-        .expect_err("quiet plus output file must fail");
-        assert!(
-            err.to_string().contains("--quiet suppresses the output"),
-            "{err}"
-        );
     }
 
     #[test]
