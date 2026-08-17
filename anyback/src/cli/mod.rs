@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
     fs,
     io::IsTerminal,
     io::{self, Read},
@@ -31,7 +30,7 @@ use anytype_rpc::{
 use chrono::{
     DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc,
 };
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 #[cfg(feature = "snapshot-import")]
 use prost::Message;
@@ -55,7 +54,6 @@ use decode::{
     read_manifest_from_sidecar, read_manifest_prefer_sidecar,
 };
 
-const DEFAULT_KEYRING_SERVICE: &str = "anyback";
 const TMP_BACKUP_PREFIX: &str = "anyback_tmp";
 #[cfg(feature = "snapshot-import")]
 const DEFAULT_IMPORT_MAX_SINGLE_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
@@ -117,42 +115,6 @@ fn spawn_import_cancel_signal_forwarder(
 
         let _ = sender.send(ImportCancelToken::Requested);
     })
-}
-
-#[derive(Parser, Debug)]
-#[command(name = "anyback")]
-#[command(author, version, about = "Anytype backup and restore tool", long_about = None)]
-pub struct Cli {
-    /// API endpoint URL. Default: environment `ANYTYPE_URL` or <http://127.0.0.1:31009>
-    #[arg(short = 'u', long, env = "ANYTYPE_URL", global = true)]
-    pub url: Option<String>,
-
-    /// gRPC endpoint URL
-    #[arg(long, env = "ANYTYPE_GRPC_ENDPOINT", global = true)]
-    pub grpc: Option<String>,
-
-    /// keystore type or config
-    #[arg(long, env = "ANYTYPE_KEYSTORE", global = true)]
-    pub keystore: Option<String>,
-
-    /// Override service name (default "anyback")
-    #[arg(long, env = "ANYTYPE_KEYSTORE_SERVICE", global = true)]
-    pub keystore_service: Option<String>,
-
-    /// Print machine-readable output where applicable
-    #[arg(long, global = true)]
-    pub json: bool,
-
-    /// Verbose mode (repeat for more)
-    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
-    pub verbose: u8,
-
-    /// Color mode for CLI and log output
-    #[arg(long, value_enum, default_value_t = ColorArg::Auto, global = true)]
-    pub color: ColorArg,
-
-    #[command(subcommand)]
-    pub command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
@@ -386,13 +348,6 @@ pub enum SinceModeArg {
     Inclusive,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
-pub enum ColorArg {
-    Auto,
-    Always,
-    Never,
-}
-
 impl ImportModeArg {
     fn to_rpc_mode(self) -> i32 {
         match self {
@@ -428,87 +383,6 @@ impl ExportFormatArg {
 pub struct AppContext {
     pub client: AnytypeClient,
     pub output: CommandOutput,
-}
-
-pub fn parse_cli_from_env() -> Result<Cli> {
-    let raw: Vec<OsString> = std::env::args_os().collect();
-    validate_no_legacy_commands(&raw)?;
-    match Cli::try_parse_from(&raw) {
-        Ok(cli) => Ok(cli),
-        Err(primary) => {
-            let normalized = normalize_command_shortcuts(&raw);
-            Cli::try_parse_from(&normalized).map_or_else(|_| Err(anyhow!(primary.to_string())), Ok)
-        }
-    }
-}
-
-fn validate_no_legacy_commands(args: &[OsString]) -> Result<()> {
-    let command_index = find_top_level_command_index(args);
-    let Some(idx) = command_index else {
-        return Ok(());
-    };
-    let command = args[idx].to_string_lossy().to_string();
-    let next = args.get(idx + 1).map(|v| v.to_string_lossy().to_string());
-    if command == "restore" && next.as_deref() == Some("apply") {
-        bail!("legacy command removed: use `anyback restore ...` (without `apply`)");
-    }
-    if command == "archive" {
-        match next.as_deref() {
-            Some("inspect") => {
-                bail!("command removed: use `anyback list` instead of `anyback archive inspect`")
-            }
-            Some("cmp") => {
-                bail!("command removed: use `anyback diff` instead of `anyback archive cmp`")
-            }
-            Some("cp") => {
-                bail!("command removed: use `anyback extract` instead of `anyback archive cp`")
-            }
-            _ => bail!(
-                "command removed: `archive` subcommands replaced with `list`, `manifest`, `diff`, `extract`"
-            ),
-        }
-    }
-    if command == "info" {
-        bail!(
-            "command removed: use `anyback list` or `anyback manifest` instead of `anyback info`"
-        );
-    }
-    Ok(())
-}
-
-fn find_top_level_command_index(args: &[OsString]) -> Option<usize> {
-    let mut skip_value = false;
-    for (idx, value) in args.iter().enumerate().skip(1) {
-        if skip_value {
-            skip_value = false;
-            continue;
-        }
-        if let Some(s) = value.to_str() {
-            if matches!(
-                s,
-                "-u" | "--url" | "--grpc" | "--keystore" | "--keystore-service" | "--color"
-            ) {
-                skip_value = true;
-                continue;
-            }
-            if s.starts_with("--url=")
-                || s.starts_with("--grpc=")
-                || s.starts_with("--keystore=")
-                || s.starts_with("--keystore-service=")
-                || s.starts_with("--color=")
-            {
-                continue;
-            }
-            if !s.starts_with('-') {
-                return Some(idx);
-            }
-        }
-    }
-    None
-}
-
-fn normalize_command_shortcuts(args: &[OsString]) -> Vec<OsString> {
-    args.to_vec()
 }
 
 /// Commands that render an interactive terminal UI and therefore cannot be
@@ -644,28 +518,6 @@ struct ArchiveCmpReport {
     changed: Vec<ArchiveCmpChanged>,
 }
 
-pub async fn run(cli: Cli) -> Result<()> {
-    let output = if cli.json {
-        CommandOutput::json()
-    } else {
-        CommandOutput::human()
-    };
-
-    match &cli.command {
-        Commands::List(args) => return handle_list(&output, args),
-        Commands::Manifest(args) => return handle_manifest(&output, args),
-        Commands::Diff(args) => return handle_diff(&output, args),
-        Commands::Extract(args) => return handle_extract(&output, args),
-        #[cfg(feature = "tui")]
-        Commands::Inspect(args) => return inspector::run_inspector(&args.archive, args.max_cache),
-        _ => {}
-    }
-
-    let client = build_client(&cli)?;
-    let command = cli.command;
-    run_command(command, client, output).await
-}
-
 /// Execute a backup command with a client and output contract configured by
 /// the parent application.
 ///
@@ -689,23 +541,6 @@ pub async fn run_command(
         #[cfg(feature = "tui")]
         Commands::Inspect(args) => inspector::run_inspector(&args.archive, args.max_cache),
     }
-}
-
-fn build_client(cli: &Cli) -> Result<AnytypeClient> {
-    let config = ClientConfig {
-        base_url: cli.url.clone(),
-        keystore: cli.keystore.clone(),
-        keystore_service: Some(
-            cli.keystore_service
-                .as_deref()
-                .unwrap_or(DEFAULT_KEYRING_SERVICE)
-                .into(),
-        ),
-        grpc_endpoint: cli.grpc.clone(),
-        app_name: "anyback".into(),
-        ..Default::default()
-    };
-    Ok(AnytypeClient::with_config(config)?)
 }
 
 async fn handle_backup_create(ctx: &AppContext, args: BackupCreateArgs) -> Result<()> {
@@ -2602,12 +2437,19 @@ fn sanitize_path_component(input: &str) -> String {
 mod tests {
     use std::io::Write;
 
+    use clap::Parser;
+
     use super::*;
 
+    #[derive(Debug, Parser)]
+    #[command(name = "anyback")]
+    struct Cli {
+        #[command(subcommand)]
+        command: Commands,
+    }
+
     fn parse_user_cli(args: &[&str]) -> Cli {
-        let raw: Vec<OsString> = args.iter().map(OsString::from).collect();
-        let normalized = normalize_command_shortcuts(&raw);
-        Cli::try_parse_from(normalized).unwrap()
+        Cli::try_parse_from(args).unwrap()
     }
 
     #[test]
@@ -2925,29 +2767,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn validate_legacy_archive_rejected() {
-        let args: Vec<OsString> = ["anyback", "archive", "inspect", "foo"]
-            .iter()
-            .map(OsString::from)
-            .collect();
-        let err = validate_no_legacy_commands(&args).unwrap_err();
-        assert!(err.to_string().contains("anyback list"));
-    }
-
-    #[test]
-    fn validate_legacy_info_rejected() {
-        let args: Vec<OsString> = ["anyback", "info", "foo"]
-            .iter()
-            .map(OsString::from)
-            .collect();
-        let err = validate_no_legacy_commands(&args).unwrap_err();
-        assert!(
-            err.to_string().contains("anyback list")
-                || err.to_string().contains("anyback manifest")
-        );
-    }
-
     #[cfg(feature = "tui")]
     #[test]
     fn parse_inspect_command() {
@@ -2970,34 +2789,6 @@ mod tests {
         } else {
             panic!("expected inspect command");
         }
-    }
-
-    #[test]
-    fn normalize_short_command_is_identity() {
-        let input = vec![
-            OsString::from("anyback"),
-            OsString::from("--url"),
-            OsString::from("http://127.0.0.1:31009"),
-            OsString::from("create"),
-            OsString::from("--space"),
-            OsString::from("x"),
-        ];
-        let normalized = normalize_command_shortcuts(&input);
-        let parts: Vec<String> = normalized
-            .iter()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
-        assert_eq!(
-            parts,
-            vec![
-                "anyback".to_string(),
-                "--url".to_string(),
-                "http://127.0.0.1:31009".to_string(),
-                "create".to_string(),
-                "--space".to_string(),
-                "x".to_string()
-            ]
-        );
     }
 
     #[test]
@@ -3112,41 +2903,6 @@ mod tests {
         assert!(!options.is_json);
         assert!(options.md_include_properties_and_schema);
         assert!(options.include_space);
-    }
-
-    #[test]
-    fn accept_consolidated_create_command() {
-        validate_no_legacy_commands(&[
-            OsString::from("anyback"),
-            OsString::from("create"),
-            OsString::from("create"),
-        ])
-        .expect("consolidated create command should be accepted");
-    }
-
-    #[test]
-    fn reject_legacy_restore_apply() {
-        let err = validate_no_legacy_commands(&[
-            OsString::from("anyback"),
-            OsString::from("restore"),
-            OsString::from("apply"),
-        ])
-        .unwrap_err();
-        assert!(err.to_string().contains("legacy command removed"));
-    }
-
-    #[test]
-    fn parse_global_color_never() {
-        let cli =
-            Cli::try_parse_from(["anyback", "--color", "never", "list", "archive-dir"]).unwrap();
-        assert_eq!(cli.color, ColorArg::Never);
-    }
-
-    #[test]
-    fn parse_global_color_invalid_value() {
-        let err = Cli::try_parse_from(["anyback", "--color", "bad_value", "list", "archive-dir"])
-            .unwrap_err();
-        assert!(err.to_string().contains("invalid value"));
     }
 
     #[test]

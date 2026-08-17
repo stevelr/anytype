@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::path::Path;
 use std::{collections::HashMap, hash::RandomState};
@@ -40,6 +41,38 @@ pub enum SavedObjectKind {
     Markdown,
     Raw,
 }
+
+/// Error returned when a file-layout snapshot has no matching archive payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingRawPayloadError {
+    object_id: String,
+}
+
+impl MissingRawPayloadError {
+    fn new(object_id: &str) -> Self {
+        Self {
+            object_id: object_id.to_string(),
+        }
+    }
+
+    /// Returns the object whose payload could not be resolved.
+    #[must_use]
+    pub fn object_id(&self) -> &str {
+        &self.object_id
+    }
+}
+
+impl fmt::Display for MissingRawPayloadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "could not resolve raw payload for object: {}",
+            self.object_id
+        )
+    }
+}
+
+impl std::error::Error for MissingRawPayloadError {}
 
 #[derive(Debug, Clone, Default)]
 struct RenderState {
@@ -906,7 +939,7 @@ pub fn save_archive_object(
     }
 
     let payload = infer_raw_payload_path(object_id, &details, &files)
-        .ok_or_else(|| anyhow!("could not resolve raw payload for object: {object_id}"))?;
+        .ok_or_else(|| MissingRawPayloadError::new(object_id))?;
     let bytes = reader
         .read_bytes(&payload)
         .with_context(|| format!("failed reading payload from archive: {payload}"))?;
@@ -1449,6 +1482,8 @@ mod tests {
     /// The id is invented for tests; no archive outside this repository is required.
     const DOC_ID: &str = "bafyreifixturedoc000000000000000000000000000000000000000000";
     const DOC_NAME: &str = "Fixture Handbook";
+    const RAW_FILE_NAME: &str = "fixture-manual.pdf";
+    const RAW_PAYLOAD: &[u8] = b"fixture raw payload\n";
 
     fn text_block(id: &str, body: &str, style: TextStyle) -> Block {
         Block {
@@ -1622,6 +1657,30 @@ mod tests {
         write_archive(base, &format!("{DOC_ID}.pb.json"), &bytes)
     }
 
+    fn raw_json_archive(base: &Path, layout: i64, include_payload: bool) -> PathBuf {
+        let bytes = serde_json::to_vec(&json!({
+            "sbType": SmartBlockType::File.as_str_name(),
+            "snapshot": {
+                "data": {
+                    "blocks": [],
+                    "details": {
+                        "id": DOC_ID,
+                        "name": RAW_FILE_NAME,
+                        "fileName": RAW_FILE_NAME,
+                        "layout": layout,
+                    },
+                },
+            },
+        }))
+        .expect("raw fixture snapshot serializes");
+        let root = write_archive(base, &format!("{DOC_ID}.pb.json"), &bytes);
+        if include_payload {
+            fs::create_dir_all(root.join("files")).unwrap();
+            fs::write(root.join("files").join(RAW_FILE_NAME), RAW_PAYLOAD).unwrap();
+        }
+        root
+    }
+
     #[test]
     fn convert_fixture_pb_object_to_markdown_contains_headings() {
         let dir = tempfile::tempdir().unwrap();
@@ -1680,6 +1739,37 @@ mod tests {
         let text = fs::read_to_string(&dest).unwrap();
         assert!(text.contains("# Fixture Handbook"), "{text}");
         assert!(text.contains("| Widget | Count |"), "{text}");
+    }
+
+    #[test]
+    fn save_file_layout_fixture_writes_raw_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        for layout in 8..=12 {
+            let base = dir.path().join(layout.to_string());
+            let archive = raw_json_archive(&base, layout, true);
+            let dest = base.join("out.pdf");
+
+            let kind = save_archive_object(&archive, DOC_ID, &dest).unwrap();
+
+            assert_eq!(kind, SavedObjectKind::Raw, "layout {layout}");
+            assert_eq!(fs::read(&dest).unwrap(), RAW_PAYLOAD, "layout {layout}");
+        }
+    }
+
+    #[test]
+    fn save_file_layout_fixture_classifies_missing_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = raw_json_archive(dir.path(), 8, false);
+        let dest = dir.path().join("out.pdf");
+
+        let err = save_archive_object(&archive, DOC_ID, &dest)
+            .expect_err("a file-layout snapshot without a payload must be rejected");
+        let classified = err
+            .downcast_ref::<MissingRawPayloadError>()
+            .expect("missing raw payload must retain its error classification");
+
+        assert_eq!(classified.object_id(), DOC_ID);
+        assert!(!dest.exists());
     }
 
     #[test]
