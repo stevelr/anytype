@@ -1280,9 +1280,8 @@ pub struct ListArgs {
 #[derive(Args, Debug)]
 pub struct ChatArgs {
     /// transport policy for chat operations: auto (per-operation policy),
-    /// rest (reject gRPC-only operations/options), or grpc. rest's rejection
-    /// guard is enforced today; per-operation REST routing is staged for
-    /// follow-up work, so auto/grpc do not yet change the executed backend.
+    /// rest (reject gRPC-only operations/options), or grpc (reject REST-only
+    /// operations/options)
     #[arg(long, value_enum, default_value = "auto")]
     pub transport: TransportArg,
 
