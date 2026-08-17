@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Run the required disposable live tier on pushes to `main` and nightly, and
+  run the connected upstream-characterization tier weekly. Tier 2 also builds,
+  tests, and documents the crate from its packaged tarball with its packaged
+  `anytype-rpc` dependency.
 - Construct universal object share links locally from validated space and object
   IDs. This replaces the retired `ObjectShareByLink` Heart RPC, whose retained
   compatibility stub terminates the server when called. The disposable

@@ -1,7 +1,11 @@
 name: CI
 
-# Manual-only while the expanded platform matrix is being qualified.
 on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 2 * * *"
   workflow_dispatch:
     inputs:
       platform:
@@ -56,7 +60,7 @@ jobs:
         name: Select native platform rows
         shell: bash
         env:
-          PLATFORM: ${{ inputs.platform }}
+          PLATFORM: ${{ inputs.platform || 'all' }}
         run: |
           set -euo pipefail
           all='[
@@ -95,37 +99,41 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: ./.github/actions/nix-devshell
 
       - name: Verify native prerequisites
-        run: nix develop --command bash .github/scripts/verify-ci-prerequisites.sh
+        run: bash .github/scripts/verify-ci-prerequisites.sh
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: smoke-${{ matrix.platform }}
 
       # Gate steps keep going after a failed gate (`!cancelled()`), and tests
       # run with --no-fail-fast, so one run reports every failing gate. The
       # job itself still fails when any gate fails.
       - name: Build
-        run: nix develop --command cargo build --locked --workspace --all-features
+        run: cargo build --locked --workspace --all-features
 
       - name: Clippy
         if: ${{ !cancelled() }}
-        run: nix develop --command cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       # Mirrors `just test`: every anytype-api integration target requires a
       # reachable Anytype server, which this offline matrix does not provision.
       - name: Test workspace
         if: ${{ !cancelled() }}
         timeout-minutes: 90
-        run: nix develop --command cargo test --locked --workspace --all-features --exclude anytype --no-fail-fast
+        run: cargo test --locked --workspace --all-features --exclude anytype --no-fail-fast
 
       - name: Test anytype library
         if: ${{ !cancelled() }}
         timeout-minutes: 30
-        run: nix develop --command cargo test --locked -p anytype --all-features --lib --no-fail-fast
+        run: cargo test --locked -p anytype --all-features --lib --no-fail-fast
 
       - name: Format check
         if: ${{ !cancelled() }}
-        run: nix develop --command cargo fmt --all --check
+        run: cargo fmt --all --check
 
   arch-native:
     name: native gates (${{ matrix.platform }})
@@ -227,6 +235,11 @@ jobs:
           jq --version
           gcc --version | Select-Object -First 1
 
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: smoke-${{ matrix.platform }}
+
       # Gate steps keep going after a failed gate (`!cancelled()`), and tests
       # run with --no-fail-fast, so one run reports every failing gate. The
       # job itself still fails when any gate fails. Steps stay single-command:
@@ -254,3 +267,24 @@ jobs:
       - name: Format check
         if: ${{ !cancelled() }}
         run: cargo fmt --all --check
+
+  publishable-crates:
+    name: packaged crate isolation
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/nix-devshell
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: packaged-crates-linux-x86_64
+
+      - name: Package, extract, build, test, and document publishable crates
+        shell: bash
+        run: bash .github/scripts/test-packaged-crates.sh

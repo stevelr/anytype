@@ -372,8 +372,10 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
         .unwrap_or_else(|error| panic!("read {}: {error}", workflow.display()));
     assert!(workflow.contains("  workflow_dispatch:\n"));
     assert!(!workflow.contains("  pull_request:\n"));
-    assert!(!workflow.contains("  push:\n"));
-    assert!(!workflow.contains("  schedule:\n"));
+    assert!(workflow.contains("  push:\n"));
+    assert!(workflow.contains("  schedule:\n"));
+    assert!(workflow.contains("- cron: \"29 2 * * *\""));
+    assert!(workflow.contains("- cron: \"43 3 * * 0\""));
     let required = workflow
         .split("  headless-required:\n")
         .nth(1)
@@ -383,9 +385,10 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
         .split("  headless-soak:\n")
         .nth(1)
         .expect("headless-soak block");
-    assert!(required.contains("if: ${{ inputs.tier == 'required' || inputs.tier == 'all' }}"));
+    assert!(required.contains("github.event_name == 'push'"));
+    assert!(required.contains("github.event.schedule == '29 2 * * *'"));
     assert!(required.contains("needs: ignored-test-inventory"));
-    assert!(soak.contains("if: ${{ inputs.tier == 'soak' || inputs.tier == 'all' }}"));
+    assert!(soak.contains("github.event.schedule == '43 3 * * 0'"));
     for block in [required, soak] {
         assert!(block.contains("needs: ignored-test-inventory"));
         // The disposable per-runner server replaced the retired self-hosted

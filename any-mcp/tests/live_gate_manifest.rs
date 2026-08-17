@@ -412,7 +412,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     assert_eq!(
-        digest, "a847f21ef6938c7426be615bb7e3a01f0ca812149e730b04b8e125e406e5bb87",
+        digest, "0c04bfa51d3b912eb857fb5f75b81696845db6fc72901674c1971fa702f92094",
         "workflow policy is an exact reviewed representation; audit before updating this digest"
     );
     let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
@@ -421,8 +421,9 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
 
     assert!(workflow.contains("  workflow_dispatch:\n"));
     assert!(!workflow.contains("  pull_request:\n"));
-    assert!(!workflow.contains("  push:\n"));
-    assert!(!workflow.contains("  schedule:\n"));
+    assert!(workflow.contains("  push:\n"));
+    assert!(workflow.contains("  schedule:\n"));
+    assert!(workflow.contains("- cron: \"23 2 * * *\""));
     assert!(!portable.contains("self-hosted"));
     assert_eq!(occurrences(portable, "if: runner.os == 'Linux'"), 1);
 
@@ -448,7 +449,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
     for (block, predicate) in [
         (
             live,
-            "if: ${{ inputs.tier == 'live' || inputs.tier == 'all' }}",
+            "if: ${{ inputs.tier == 'live' || inputs.tier == 'all' || github.event_name == 'push' || github.event_name == 'schedule' }}",
         ),
         (
             clean,

@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Run the portable cross-platform contracts and disposable headless live gate
+  on pushes to `main` and nightly while retaining manually selected portable,
+  live, clean-server, and combined tiers.
 - Automate the stable Streamable HTTP event-stream contract over real
   loopback sockets: the standalone GET stream's priming event and repeated
   live keep-alives, session survival across an abrupt stream disconnect, the

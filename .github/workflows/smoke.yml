@@ -7,19 +7,23 @@
 # qualification rounds caught lints Linux structurally cannot see), while
 # platform test breadth stays in the deeper tiers.
 #
-# Manual-only while being qualified; intended trigger once proven:
-# push to main + pull_request.
+# These five jobs are the required pull-request and main-branch checks.
 
 name: smoke
 
 on:
+  pull_request:
+    types: [ opened, synchronize, reopened, ready_for_review ]
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: smoke-${{ github.ref }}
+  group: smoke-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:

@@ -11,10 +11,19 @@
 name: anyr-anyback-live
 
 on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "35 2 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: anyr-anyback-live-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

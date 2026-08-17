@@ -3,6 +3,11 @@
 name: any-mcp
 
 on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "23 2 * * *"
   workflow_dispatch:
     inputs:
       tier:
@@ -18,6 +23,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: any-mcp-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -107,7 +116,7 @@ jobs:
 
   headless-e2e:
     name: stdio to headless Anytype
-    if: ${{ inputs.tier == 'live' || inputs.tier == 'all' }}
+    if: ${{ inputs.tier == 'live' || inputs.tier == 'all' || github.event_name == 'push' || github.event_name == 'schedule' }}
     needs: portable-contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 45

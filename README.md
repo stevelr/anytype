@@ -58,15 +58,26 @@ The Nix development shell supplies the Rust version pinned by
 nix develop
 ```
 
-GitHub Actions workflows are manual-only while the expanded matrix is being
-qualified. The CI and build workflows offer platform selectors for Linux
-x86_64 and arm64, macOS arm64, and Windows x86_64 and arm64; CI also has a
-native Arch Linux lane. Nix drives Linux and macOS builds, Windows builds run
-natively, and Linux builds can produce loadable x86_64 or arm64 OCI image
-archives. The release-artifact workflow generates shell and PowerShell
-installers and Homebrew formulae, then validates the POSIX artifacts on both
-Linux and macOS without publishing a release. Linux live workflows select the
-headless server through `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
+GitHub Actions runs five smoke checks on pull requests and pushes to `main`.
+Pushes to `main` and nightly schedules also run the six-platform offline matrix
+and the required disposable live gates. A weekly schedule runs characterization
+and artifact canaries. Every workflow retains a manual dispatch with its
+applicable platform or tier selector.
+
+The CI and build matrices cover Linux x86_64 and arm64, macOS arm64, and
+Windows x86_64 and arm64; CI also has a native Arch Linux lane. Nix drives
+Linux and macOS builds, Windows builds run natively, and Linux builds can
+produce loadable x86_64 or arm64 OCI image archives. Linux live workflows
+select the headless server through `ANYTYPE_CLI_BIN`, defaulting to `anytype`
+on `PATH`.
+
+Pushing a version tag whose commit is reachable from `main` creates a GitHub
+Release after cargo-dist builds and validates its archives, checksums, shell
+and PowerShell installers, and Homebrew formulae. Accepted tags are `X.Y.Z`,
+an optional hyphenated prerelease such as `0.5.1-pre.2`, and the equivalent
+`anyr-vX.Y.Z` form. The version must match the package version. Hyphenated
+versions create GitHub prereleases and do not update the Homebrew tap. Manual
+and weekly release-artifact runs build the same downloads without publishing.
 
 ## Compatibility notes
 

@@ -3,16 +3,22 @@
 # Copyright 2022-2024, axodotdev
 # SPDX-License-Identifier: MIT or Apache-2.0
 #
-# Manual build-only cargo-dist qualification. It builds archives, Homebrew
-# formulae, shell and PowerShell installers, and uploads them as workflow
-# artifacts. Publication jobs remain disabled until automatic release triggers
-# are deliberately restored.
+# Cargo-dist qualification and GitHub Release publication. Manual and weekly
+# runs build and validate artifacts without publishing. A supported version tag
+# on a commit reachable from main publishes the generated archives, checksums,
+# shell and PowerShell installers, and Homebrew formulae.
 
 name: Release artifacts
 permissions:
   contents: read
 
 on:
+  push:
+    tags:
+      - "[0-9]*.[0-9]*.[0-9]*"
+      - "anyr-v[0-9]*.[0-9]*.[0-9]*"
+  schedule:
+    - cron: "17 5 * * 0"
   workflow_dispatch:
     inputs:
       source_ref:
@@ -33,24 +39,44 @@ on:
           - x86_64-unknown-linux-gnu
           - x86_64-pc-windows-msvc
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
+    permissions:
+      contents: write
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ""
-      tag-flag: ""
-      publishing: "false"
+      tag: ${{ github.event_name == 'push' && github.ref_name || '' }}
+      tag-flag: ${{ github.event_name == 'push' && format('--tag={0}', github.ref_name) || '' }}
+      publishing: ${{ github.event_name == 'push' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      SELECTED_ARCHITECTURE: ${{ inputs.architecture }}
+      SELECTED_ARCHITECTURE: ${{ inputs.architecture || 'all' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
           submodules: recursive
-          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
+      - name: Validate release tag and main ancestry
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/validate-release-tag.sh "$RELEASE_TAG"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            printf 'release tag %s does not point to a commit reachable from main\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Verify pinned CI prerequisites
@@ -71,8 +97,14 @@ jobs:
       # (PRs run on the *source* but secrets are usually on the *target* -- that's *good*
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          dist plan --output-format=json > plan-dist-manifest.json
+          if [[ "${{ github.event_name }}" == push ]]; then
+            dist host --steps=create --tag="$RELEASE_TAG" --output-format=json > plan-dist-manifest.json
+          else
+            dist plan --output-format=json > plan-dist-manifest.json
+          fi
           if [[ "$SELECTED_ARCHITECTURE" != "all" ]]; then
             jq --arg target "$SELECTED_ARCHITECTURE" \
               '.ci.github.artifacts_matrix.include |= map(select(.targets | index($target)))' \
@@ -122,7 +154,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
         run: |
@@ -174,7 +206,7 @@ jobs:
       - plan
       - build-local-artifacts
     runs-on: "ubuntu-22.04"
-    if: ${{ inputs.architecture == 'all' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.architecture == 'all' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
@@ -183,7 +215,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
       - name: Install cached dist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -221,7 +253,7 @@ jobs:
     name: Homebrew and shell installers (${{ matrix.platform }})
     needs:
       - build-global-artifacts
-    if: ${{ inputs.architecture == 'all' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.architecture == 'all' }}
     strategy:
       fail-fast: false
       matrix:
@@ -267,7 +299,7 @@ jobs:
     name: PowerShell installer (windows-x86_64)
     needs:
       - build-global-artifacts
-    if: ${{ inputs.architecture == 'all' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.architecture == 'all' }}
     runs-on: windows-2025
     steps:
       - name: Download generated installers
@@ -297,11 +329,15 @@ jobs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - validate-posix-installers
+      - validate-powershell-installer
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.validate-posix-installers.result == 'skipped' || needs.validate-posix-installers.result == 'success') && (needs.validate-powershell-installer.result == 'skipped' || needs.validate-powershell-installer.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
+    permissions:
+      contents: write
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -349,13 +385,14 @@ jobs:
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
+          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
         run: |
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "${{ needs.plan.outputs.tag }}" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   publish-homebrew-formula:
     needs:
@@ -413,6 +450,8 @@ jobs:
     # "host" however must run to completion, no skipping allowed!
     if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
     runs-on: "ubuntu-22.04"
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:

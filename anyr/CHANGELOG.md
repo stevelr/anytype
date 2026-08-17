@@ -8,6 +8,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Publish cargo-dist archives, checksums, shell and PowerShell installers, and
+  Homebrew formulae to a GitHub Release when a supported version tag points at
+  `main`. Prerelease tags create GitHub prereleases without updating the
+  Homebrew tap; manual and weekly runs remain build-only.
+- Run the five-platform smoke checks on pull requests and pushes to `main`, and
+  run the installed anyr/anyback live gate on pushes to `main` and nightly.
 - Add Streamable HTTP conformance across the shipped `anyr mcp` command
   boundary: a portable test spawns the real binary in `streamable-http` mode
   with a private static-token file and a bounded scripted Anytype upstream,

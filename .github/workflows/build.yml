@@ -1,6 +1,8 @@
 name: Build artifacts
 
 on:
+  schedule:
+    - cron: "11 4 * * 0"
   workflow_dispatch:
     inputs:
       platform:
@@ -56,7 +58,7 @@ jobs:
         name: Select artifact rows
         shell: bash
         env:
-          PLATFORM: ${{ inputs.platform }}
+          PLATFORM: ${{ inputs.platform || 'all' }}
         run: |
           set -euo pipefail
           all='[

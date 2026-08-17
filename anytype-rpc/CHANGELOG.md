@@ -10,6 +10,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 **Changed:**
 
+- Tier 2 builds, tests, and documents the crate from its packaged tarball so
+  workspace feature unification cannot hide a missing published dependency or
+  packaged source file.
 - Make `load_headless_config` return `None` only for a missing file and report
   other I/O failures, preventing bootstrap callers from treating an unreadable
   config as an uninitialized account. Windows default-path resolution now
