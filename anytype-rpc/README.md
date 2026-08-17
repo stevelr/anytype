@@ -21,6 +21,7 @@ The gRPC api isn't officially supported (by Anytype) for third party clients. Ho
 
 | anytype-rpc version | anytype-heart version |
 | ------------------- | --------------------- |
+| 0.5.0-pre.5         | 0.50.10               |
 | 0.4.0-pre.1         | 0.50.15               |
 | 0.3.0 – 0.3.1       | 0.48.0                |
 | 0.2.1               | 0.44                  |
@@ -58,8 +59,13 @@ By default, this uses the `develop` branch. You can also pull from a specific gi
 
 ```
 just gen-protos ref=develop
+just gen-protos ref=0.50.10
 just gen-protos ref=abcdef123
 ```
+
+Each generated source records the UTC generation date and the requested ref.
+An unprefixed release version such as `0.50.10` resolves the corresponding
+Anytype Heart `v0.50.10` tag.
 
 ## License
 
