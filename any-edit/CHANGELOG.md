@@ -13,6 +13,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Sort the embedded Markdown command help alphabetically.
 - Normalized documentation emphasis, shell escaping guidance, and spellchecker configuration formatting.
 
 ## [0.1.5]

@@ -99,6 +99,7 @@ pub struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum Commands {
     /// Initialize credentials from a running Anytype CLI server
     InitCli {
@@ -191,6 +192,7 @@ pub struct AuthArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum AuthCommands {
     /// Perform interactive login with desktop app
     Login {
@@ -241,6 +243,7 @@ pub struct SpaceArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum SpaceCommands {
     List {
         #[command(flatten)]
@@ -335,6 +338,7 @@ pub struct InviteArgs {
 
 /// Space invitation operations.
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum InviteCommands {
     /// Show active member and guest invitations
     Show {
@@ -392,6 +396,7 @@ pub struct FileArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum FileCommands {
     List {
         /// space id or name
@@ -646,6 +651,7 @@ pub enum FileCommands {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum ObjectCommands {
     List {
         /// space id or name
@@ -786,6 +792,7 @@ pub struct TypeArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum TypeCommands {
     List {
         /// space id or name
@@ -921,6 +928,7 @@ pub struct PropertyArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum PropertyCommands {
     List {
         /// space id or name
@@ -1007,6 +1015,7 @@ pub struct MemberArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum MemberCommands {
     List {
         /// space id or name
@@ -1059,6 +1068,7 @@ pub struct TagArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum TagCommands {
     List {
         /// space id or name
@@ -1160,6 +1170,7 @@ pub struct ViewArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum ViewCommands {
     /// List objects for a view
     Objects {
@@ -1180,6 +1191,7 @@ pub enum ViewCommands {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum TemplateCommands {
     List {
         /// space id or name
@@ -1248,6 +1260,7 @@ pub struct ChatArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum ChatCommands {
     /// List chats
     List {
@@ -1408,6 +1421,7 @@ pub struct ChatMessagesArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum ChatMessagesCommands {
     /// List messages for a chat
     List {
@@ -1576,6 +1590,7 @@ pub enum ChatMessagesCommands {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
 pub enum ListCommands {
     Objects {
         /// space id or name (required)
@@ -2073,6 +2088,53 @@ pub fn resolve_icon_exists(
         return Ok(Some(Icon::File { file: path }));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod help_order_tests {
+    use super::Cli;
+    use clap::{Command, CommandFactory};
+
+    #[test]
+    fn subcommands_are_alphabetical_at_every_level() {
+        assert_subcommands_are_alphabetical(Cli::command());
+    }
+
+    fn assert_subcommands_are_alphabetical(mut command: Command) {
+        let command_name = command.get_name().to_owned();
+        let children = command.get_subcommands().cloned().collect::<Vec<_>>();
+        let help = command.render_help().to_string();
+        let Some((_, remainder)) = help.split_once("Commands:\n") else {
+            assert!(
+                children.is_empty(),
+                "{command_name} omitted its subcommands from help"
+            );
+            return;
+        };
+        let commands = remainder
+            .split_once("\n\n")
+            .map_or(remainder, |(section, _)| section);
+        let names = commands
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+
+        assert!(
+            !names.is_empty(),
+            "{command_name} commands section was not parsed: {help}"
+        );
+        assert_eq!(
+            names, sorted,
+            "{command_name} help was not alphabetical: {help}"
+        );
+
+        for child in children {
+            assert_subcommands_are_alphabetical(child);
+        }
+    }
 }
 
 #[cfg(test)]

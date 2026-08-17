@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Sort the embedded backup command help alphabetically.
 - Let disposable headless live workflows select the Anytype CLI through
   `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
 - Separate capture fidelity from restore fidelity in the live gate: the

@@ -22,6 +22,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Subcommand)]
+#[command(next_display_order = None)]
 pub enum Commands {
     /// Get an object as markdown file
     Get {
