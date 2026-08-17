@@ -12,9 +12,10 @@ edition.workspace = true
 homepage.workspace = true
 keywords = ["anytype", "backup", "cli"]
 license.workspace = true
+publish = true
 readme = "README.md"
 repository.workspace = true
-description = "Backup and restore CLI for Anytype"
+description = "Backup and restore for Anytype"
 
 [lib]
 name = "anyback_reader"

@@ -12,6 +12,7 @@ edition.workspace = true
 homepage.workspace = true
 keywords = ["anytype", "api", "client"]
 license.workspace = true
+publish = true
 readme = "README.md"
 repository.workspace = true
 description = "An ergonomic Anytype API client in rust"

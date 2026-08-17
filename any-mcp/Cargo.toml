@@ -12,6 +12,7 @@ edition.workspace = true
 homepage.workspace = true
 keywords = ["anytype", "mcp"]
 license.workspace = true
+publish = false
 readme = "README.md"
 repository.workspace = true
 description = "Bounded, workflow-oriented Model Context Protocol server for Anytype."

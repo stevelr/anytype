@@ -12,6 +12,7 @@ edition.workspace = true
 homepage.workspace = true
 keywords = ["anytype", "cli"]
 license.workspace = true
+publish = true
 readme = "README.md"
 repository.workspace = true
 description = "CLI for Anytype - list, search, and perform CRUD operations on Anytype objects."
