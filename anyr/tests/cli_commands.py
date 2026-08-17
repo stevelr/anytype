@@ -915,10 +915,10 @@ class TestAnyrCommands(unittest.TestCase):
         self.assert_help_ok("list", "remove")
 
     def test_real_operations(self) -> None:
-        space_name = (
-            f"{self.space_prefix}-real-operations-{os.getpid()}-{time.time_ns()}"
-        )
-        space_id = create_owned_space(space_name)
+        with self.disposable_space("real-operations") as space_id:
+            self.assert_real_operations(space_id)
+
+    def assert_real_operations(self, space_id: str) -> None:
         suffix = str(int(time.time() * 1000))
         type_key = f"cli_test_type_{suffix}"
         type_name = f"CLI Test Type {suffix}"
@@ -1095,7 +1095,6 @@ class TestAnyrCommands(unittest.TestCase):
                 run_anyr("property", "delete", space_id, prop_key)
             if created_type_id:
                 run_anyr("type", "delete", space_id, type_key)
-            delete_owned_space(space_name, space_id)
 
 
 if __name__ == "__main__":
