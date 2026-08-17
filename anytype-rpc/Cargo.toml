@@ -12,6 +12,7 @@ edition.workspace = true
 homepage.workspace = true
 keywords = ["anytype", "client", "grpc"]
 license.workspace = true
+publish = true
 readme = "README.md"
 repository.workspace = true
 description = "Anytype gRPC client"

@@ -190,11 +190,8 @@ fn indent_doc_list_line(line: &str) -> Option<String> {
         }
         if c.is_ascii_alphabetic() {
             has_letter = true;
-            if let Some(next) = chars.next() {
-                if next != '.' {
-                    return None;
-                }
-            } else {
+            let next = chars.next()?;
+            if next != '.' {
                 return None;
             }
         } else if c != '.' {

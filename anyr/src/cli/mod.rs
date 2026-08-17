@@ -12,7 +12,8 @@ use std::ffi::OsString;
 
 use anyhow::{Context, Result, bail};
 use anytype::prelude::*;
-use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Generator;
 use tracing::warn;
 
 use crate::{
@@ -100,6 +101,13 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Generate a shell completion script
+    Completions {
+        /// Shell whose completion script to generate
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+
     /// Initialize credentials from a running Anytype CLI server
     InitCli {
         /// Join a space with this invitation link after credentials are stored
@@ -173,6 +181,31 @@ pub enum Commands {
     /// Run the bounded Anytype MCP server or its maintenance commands
     #[cfg(feature = "mcp")]
     Mcp(McpArgs),
+}
+
+/// Shells supported by the `completions` command.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum CompletionShell {
+    /// Bourne Again Shell
+    Bash,
+    /// Friendly Interactive Shell
+    Fish,
+    /// PowerShell
+    #[value(name = "powershell")]
+    PowerShell,
+    /// Z shell
+    Zsh,
+}
+
+impl CompletionShell {
+    fn generator(self) -> clap_complete::Shell {
+        match self {
+            Self::Bash => clap_complete::Shell::Bash,
+            Self::Fish => clap_complete::Shell::Fish,
+            Self::PowerShell => clap_complete::Shell::PowerShell,
+            Self::Zsh => clap_complete::Shell::Zsh,
+        }
+    }
 }
 
 /// Arguments passed through unchanged to the embedded any-mcp process.
@@ -1717,6 +1750,10 @@ pub struct AppContext {
 pub async fn run(mut cli: Cli) -> Result<()> {
     apply_init_cli_endpoint_defaults(&mut cli);
 
+    if let Commands::Completions { shell } = &cli.command {
+        return write_completions(*shell, &mut std::io::stdout().lock());
+    }
+
     #[cfg(feature = "backup")]
     if let Commands::Backup(ref command) = cli.command {
         validate_backup_output_flags(&cli, command)?;
@@ -1744,6 +1781,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
     };
 
     match cli.command {
+        Commands::Completions { shell } => write_completions(shell, &mut std::io::stdout().lock()),
         Commands::InitCli { join, save_env } => {
             init_cli::handle(&ctx, join.as_deref(), save_env.as_deref()).await
         }
@@ -1768,6 +1806,87 @@ pub async fn run(mut cli: Cli) -> Result<()> {
         }
         #[cfg(feature = "mcp")]
         Commands::Mcp(_) => unreachable!("MCP is dispatched before the standard runtime"),
+    }
+}
+
+/// Writes the generated completion script for `shell` to `writer`.
+fn write_completions(shell: CompletionShell, writer: &mut dyn std::io::Write) -> Result<()> {
+    let mut command = Cli::command();
+    command.set_bin_name("anyr");
+    command.build();
+    shell
+        .generator()
+        .try_generate(&command, writer)
+        .context("write shell completion script")
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use std::io;
+
+    use super::*;
+
+    fn generated_script(shell_name: &str) -> String {
+        let cli = Cli::try_parse_from(["anyr", "completions", shell_name])
+            .expect("completion command should parse");
+        let Commands::Completions { shell } = cli.command else {
+            panic!("expected completions command");
+        };
+        let mut output = Vec::new();
+        write_completions(shell, &mut output).expect("completion script should be generated");
+        String::from_utf8(output).expect("completion script should be UTF-8")
+    }
+
+    #[test]
+    fn generates_scripts_for_supported_shells() {
+        for (shell, marker) in [
+            ("bash", "_anyr()"),
+            ("fish", "complete -c anyr"),
+            ("powershell", "Register-ArgumentCompleter"),
+            ("zsh", "#compdef anyr"),
+        ] {
+            let script = generated_script(shell);
+            assert!(script.contains(marker), "missing {shell} marker: {marker}");
+            assert!(
+                script.contains("completions"),
+                "{shell} script should include the completions subcommand"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_shells_outside_the_supported_set() {
+        for shell in ["elvish", "nushell"] {
+            let error = Cli::try_parse_from(["anyr", "completions", shell])
+                .expect_err("unsupported shell should be rejected");
+            let message = error.to_string();
+            assert!(message.contains("bash"), "{message}");
+            assert!(message.contains("fish"), "{message}");
+            assert!(message.contains("powershell"), "{message}");
+            assert!(message.contains("zsh"), "{message}");
+        }
+    }
+
+    #[test]
+    fn reports_completion_output_write_errors() {
+        struct BrokenWriter;
+
+        impl io::Write for BrokenWriter {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "test failure"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let error = write_completions(CompletionShell::Bash, &mut BrokenWriter)
+            .expect_err("write failure should be returned");
+        assert!(
+            error.to_string().contains("write shell completion script"),
+            "{error:#}"
+        );
     }
 }
 

@@ -7,3 +7,7 @@ test:
 
 check:
     gate check
+
+rustdoc:
+    cargo doc --workspace --no-deps --open
+    dufs --port 8085 target/doc
