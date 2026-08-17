@@ -958,6 +958,7 @@ mod tests {
     use std::{future::Future, time::Duration};
 
     use anytype::{
+        objects::DataModel,
         prelude::{AnytypeClient, ClientConfig, HttpCredentials},
         properties::PropertyFormat,
         test_util::{DisposableRun, unique_suffix, with_disposable_space_context},
@@ -1292,6 +1293,7 @@ mod tests {
 
     fn tag(id: &str, name: &str, key: &str, color: Color) -> Tag {
         Tag {
+            object: DataModel::Tag,
             id: id.to_owned(),
             name: name.to_owned(),
             key: key.to_owned(),

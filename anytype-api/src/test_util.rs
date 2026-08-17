@@ -5566,6 +5566,7 @@ mod tests {
             snippet: None,
             space_id: SPACE_ID.to_owned(),
             r#type: Some(Type {
+                object: DataModel::Type,
                 archived: false,
                 icon: None,
                 id: type_id.to_owned(),

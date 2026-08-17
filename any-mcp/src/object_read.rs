@@ -504,6 +504,7 @@ mod tests {
             snippet: Some("private snippet".to_owned()),
             space_id: "space-1".to_owned(),
             r#type: Some(Type {
+                object: DataModel::Type,
                 archived: false,
                 icon: None,
                 id: "type-1".to_owned(),

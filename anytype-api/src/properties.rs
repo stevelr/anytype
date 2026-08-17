@@ -142,6 +142,10 @@ pub enum PropertyFormat {
 /// or if it was cached)
 #[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct Property {
+    /// Data model type returned by the REST API.
+    #[serde(default = "property_data_model")]
+    pub object: DataModel,
+
     /// Display name of the property
     pub name: String,
 
@@ -156,6 +160,10 @@ pub struct Property {
 
     /// optional tags, if property is Select or `MultiSelect`, and tags have been fetched
     tags: Option<Vec<Tag>>,
+}
+
+fn property_data_model() -> DataModel {
+    DataModel::Property
 }
 
 /// Property with its value, as returned in Object.properties.
@@ -189,6 +197,7 @@ impl Property {
     /// Constructs a `Property` from `PropertyWithValue`.
     pub fn new_from(other: &PropertyWithValue) -> Self {
         Self {
+            object: DataModel::Property,
             format: other.format(),
             id: other.id.clone(),
             key: other.key.clone(),
@@ -1894,6 +1903,46 @@ mod tests {
     const TEST_PROPERTY_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4y";
     const OTHER_PROPERTY_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4z";
     const TEST_TAG_ID: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4x";
+
+    #[test]
+    fn property_schema_preserves_discriminator() {
+        let response: PropertyResponse = serde_json::from_value(serde_json::json!({
+            "property": {
+                "object": "property",
+                "name": "Description",
+                "key": "description",
+                "id": "property-id",
+                "format": "text"
+            }
+        }))
+        .expect("property response schema");
+
+        assert_eq!(response.property.object, DataModel::Property);
+        let serialized = serde_json::to_value(response.property).expect("serialize property");
+        assert_eq!(serialized["object"], "property");
+    }
+
+    #[test]
+    fn property_discriminator_defaults_when_omitted_and_preserves_present_value() {
+        let property_without_discriminator: Property = serde_json::from_value(serde_json::json!({
+            "name": "Description",
+            "key": "description",
+            "id": "property-id",
+            "format": "text"
+        }))
+        .expect("property without discriminator");
+        assert_eq!(property_without_discriminator.object, DataModel::Property);
+
+        let property_with_observed_tag: Property = serde_json::from_value(serde_json::json!({
+            "object": "tag",
+            "name": "Description",
+            "key": "description",
+            "id": "property-id",
+            "format": "text"
+        }))
+        .expect("property with observed discriminator");
+        assert_eq!(property_with_observed_tag.object, DataModel::Tag);
+    }
 
     #[derive(Debug, Default)]
     struct PropertyRouteTraffic {

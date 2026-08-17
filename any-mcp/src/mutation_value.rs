@@ -811,7 +811,7 @@ fn canonical_returned_date(value: &str) -> Result<MutationDate, MutationCompareE
 #[cfg(test)]
 mod tests {
     use anytype::{
-        objects::Color,
+        objects::{Color, DataModel},
         properties::{PropertyValue, SetProperty},
     };
     use rmcp::schemars::schema_for;
@@ -1168,6 +1168,7 @@ mod tests {
             select
                 .matches_returned(Some(&PropertyValue::Select {
                     select: anytype::tags::Tag {
+                        object: DataModel::Tag,
                         id: ID_A.to_owned(),
                         name: "server name".to_owned(),
                         key: "server-key".to_owned(),
@@ -1181,6 +1182,7 @@ mod tests {
             "format":"multi_select", "key":"m", "multi_select":[ID_A,ID_B]
         }));
         let tag = |id: &str| anytype::tags::Tag {
+            object: DataModel::Tag,
             id: id.to_owned(),
             name: "ignored".to_owned(),
             key: "ignored".to_owned(),
@@ -1364,6 +1366,7 @@ mod tests {
         );
         let select = property(json!({"format":"select","key":"k","select":ID_A}));
         let malformed_tag = anytype::tags::Tag {
+            object: DataModel::Tag,
             id: "../unsafe".to_owned(),
             name: "name".to_owned(),
             key: "key".to_owned(),

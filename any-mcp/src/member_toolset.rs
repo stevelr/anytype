@@ -364,7 +364,10 @@ mod tests {
         schema::{input_schema, output_schema},
         server::AnyMcpServer,
     };
-    use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials};
+    use anytype::{
+        objects::{DataModel, Icon},
+        prelude::{AnytypeClient, ClientConfig, HttpCredentials},
+    };
     use rmcp::model::ListToolsResult;
     use serde_json::json;
     use sha2::{Digest, Sha256};
@@ -540,8 +543,11 @@ mod tests {
 
     fn member(role: MemberRole, status: MemberStatus) -> Member {
         Member {
+            object: DataModel::Member,
             global_name: Some("global-secret".to_owned()),
-            icon: Some(json!({"url": "private-icon"})),
+            icon: Some(Icon::File {
+                file: "private-icon".to_owned(),
+            }),
             id: "member-1".to_owned(),
             identity: Some("network-secret".to_owned()),
             name: Some("Local name".to_owned()),

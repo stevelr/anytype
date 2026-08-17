@@ -575,9 +575,17 @@ async fn test_member_optional_fields() -> TestResult<()> {
         for member in members.iter() {
             // These are all Option types - just access them to verify structure
             let _global_name: &Option<String> = &member.global_name;
-            let _icon: &Option<serde_json::Value> = &member.icon;
+            let _icon: &Option<Icon> = &member.icon;
             let _identity: &Option<String> = &member.identity;
             let _name: &Option<String> = &member.name;
+
+            if let Some(icon) = &member.icon {
+                match icon {
+                    Icon::Emoji { emoji } => assert!(!emoji.is_empty()),
+                    Icon::File { file } => assert!(!file.is_empty()),
+                    Icon::Icon { name, .. } => assert!(!name.is_empty()),
+                }
+            }
         }
 
         Ok(())

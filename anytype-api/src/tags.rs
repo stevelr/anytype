@@ -54,6 +54,10 @@ use crate::{
 /// Represents a tag for select/multi-select properties.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Tag {
+    /// Data model type returned by the REST API.
+    #[serde(default = "tag_data_model")]
+    pub object: DataModel,
+
     /// Unique tag identifier
     pub id: String,
     /// Display name of the tag
@@ -62,6 +66,10 @@ pub struct Tag {
     pub key: String,
     /// Tag color
     pub color: Color,
+}
+
+fn tag_data_model() -> DataModel {
+    DataModel::Tag
 }
 
 /// Request structure for creating a tag (used in property creation).
@@ -656,5 +664,50 @@ impl AnytypeClient {
             space_id,
             property_id,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_schema_preserves_discriminator() {
+        let response: TagResponse = serde_json::from_value(serde_json::json!({
+            "tag": {
+                "object": "tag",
+                "id": "tag-id",
+                "name": "In progress",
+                "key": "in_progress",
+                "color": "yellow"
+            }
+        }))
+        .expect("tag response schema");
+
+        assert_eq!(response.tag.object, DataModel::Tag);
+        let serialized = serde_json::to_value(response.tag).expect("serialize tag");
+        assert_eq!(serialized["object"], "tag");
+    }
+
+    #[test]
+    fn tag_discriminator_defaults_when_omitted_and_preserves_present_value() {
+        let tag_without_discriminator: Tag = serde_json::from_value(serde_json::json!({
+            "id": "tag-id",
+            "name": "In progress",
+            "key": "in_progress",
+            "color": "yellow"
+        }))
+        .expect("tag without discriminator");
+        assert_eq!(tag_without_discriminator.object, DataModel::Tag);
+
+        let tag_with_observed_property: Tag = serde_json::from_value(serde_json::json!({
+            "object": "property",
+            "id": "tag-id",
+            "name": "In progress",
+            "key": "in_progress",
+            "color": "yellow"
+        }))
+        .expect("tag with observed discriminator");
+        assert_eq!(tag_with_observed_property.object, DataModel::Property);
     }
 }
