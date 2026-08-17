@@ -5,167 +5,93 @@
  * SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
  * SPDX-License-Identifier: Apache-2.0
  */
-//! # Anytype Rust API Client
+//! # Anytype Rust API client
 //!
-//! An ergonomic Anytype API client in Rust.
+//! The `anytype` crate provides a fluent Rust client for Anytype automation.
+//! [`AnytypeClient`](client::AnytypeClient) combines the public HTTP API with
+//! selected anytype-heart gRPC capabilities behind one client and one
+//! credential store.
 //!
-//! ## Features
+//! ## Transport and coverage
 //!
-//! - broad coverage of the Anytype REST API 2025-11-08 (see
-//!   [API coverage](#api-coverage))
-//! - paginated responses and async Streams
-//! - authentication
-//! - integrates with OS Keyring for secure key storage
-//! - http middleware with retry logic and rate limit handling
-//! - client caching (spaces, properties, types)
-//! - nested filter expression builder
-//! - parameter validation
-//! - metrics
-//! - companion cli tool
+//! Direct HTTP support covers authentication, spaces, types, properties, tags,
+//! objects, templates, views, members, search, basic file transfer, and
+//! space-scoped chats for API version [`ANYTYPE_API_VERSION`]. gRPC supplies
+//! capabilities that HTTP does not expose or represents with less fidelity,
+//! including rich file operations, structured chat messages and streams,
+//! typed body blocks, archived-object cleanup, space backup, and process
+//! watching.
 //!
-//! ## API coverage
+//! HTTP calls require an access token. gRPC calls require an account key or
+//! session token. [`KeyStore`](keystore::KeyStore) stores both credential
+//! families. The crate has no default Cargo features; its optional features
+//! expose test fixtures only.
 //!
-//! [`AnytypeClient`](client::AnytypeClient) presents one Rust API over two
-//! transports, so coverage has
-//! two parts:
-//!
-//! - *Direct REST coverage*: nearly every documented operation of the Anytype
-//!   REST API dated 2025-11-08 is called directly over HTTP - auth, spaces,
-//!   types, properties, tags, objects, templates, views, members, search, basic
-//!   file transfer, and space-scoped chats. No exact percentage is claimed: the
-//!   upstream operation list changes with each Anytype release, and a few
-//!   surfaces (such as cross-space chat discovery) are deliberately reached
-//!   only through gRPC.
-//! - *gRPC-equivalent coverage*: capabilities that REST does not expose, or
-//!   exposes with less fidelity, are reached through anytype-heart's gRPC
-//!   service - rich file metadata and upload options, structured chat blocks
-//!   and event streams, typed body blocks, archived-object cleanup, space
-//!   backup, and process watching. These methods need gRPC credentials in the
-//!   keystore at run time.
-//!
-//! The current transport mapping is recorded in `docs/http-grpc-overlap.md` in
-//! the crate source tree.
-//!
-//!
-//! ## Quick Start
+//! ## Quick start
 //!
 //! ```rust,no_run
-//!
 //! use anytype::prelude::*;
+//!
 //! # async fn example() -> Result<(), AnytypeError> {
+//! let client = AnytypeClient::new("my-app")?;
+//! let spaces = client.spaces().list().await?;
+//! let Some(space) = spaces.iter().next() else {
+//!     return Ok(());
+//! };
 //!
-//! // Initialize the client with file-based keystore.
-//! let mut config = ClientConfig::default().app_name("my-app");
-//! config.keystore = Some("file".to_string());
-//! let client = AnytypeClient::with_config(config)?;
-//! if !client.auth_status()?.http.is_authenticated() {
-//!     println!("Not authenticated. Please log in.");
-//! }
+//! let page = client
+//!     .new_object(&space.id, "page")
+//!     .name("Meeting notes")
+//!     .body("# Decisions")
+//!     .create()
+//!     .await?;
 //!
-//! // List spaces
-//! let spaces: PagedResult<Space> = client.spaces().list().await?;
-//! for space in spaces.iter() {
-//!     println!("{}", &space.name);
-//! }
-//! // Get the first space
-//! let space1 = spaces.iter().next().unwrap();
-//!
-//! // Create an object
-//! let obj = client.new_object(&space1.id, "page")
-//!     .name("My Document")
-//!     .body("# Hello World")
-//!     .create().await?;
-//!
-//! // Search, with filtering and sorting
-//! let results: PagedResult<Object> = client.search_in(&space1.id)
+//! let results = client
+//!     .search_in(&space.id)
 //!     .text("meeting notes")
 //!     .types(["page", "note"])
 //!     .sort_desc("last_modified_date")
 //!     .limit(10)
-//!     .execute().await?;
-//! for doc in results.iter() {
-//!     println!("{} {}",
-//!         doc.get_property_date("last_modified_date").unwrap_or_default(),
-//!         doc.name.as_deref().unwrap_or("(unnamed)"));
+//!     .execute()
+//!     .await?;
+//! for object in results.iter() {
+//!     println!("{}", object.name.as_deref().unwrap_or("(unnamed)"));
 //! }
 //!
-//! // delete object
-//! client.object(&space1.id, &obj.id).delete().await?;
+//! client.object(&space.id, &page.id).delete().await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! ## API Structure
+//! ## Builder API
 //!
-//! The API uses a fluent builder pattern. Methods on `AnytypeClient` return
-//! request builders that are configured with chained method calls and then
-//! executed with a terminal method like `get()`, `create()`, `update()`, `delete()`,
-//! `list()`, or `search()`.
-//!
-//! Applies to all entity types: - Member, Object, Property, Space, Tag, Template, Type, View,
-//! (not all CRUD methods are supported for all types; for example, member deletion is not exposed).
-//!
-//! ### Pattern Examples
+//! Methods on [`AnytypeClient`](client::AnytypeClient) return request builders.
+//! Builder setters configure a request, and a terminal verb such as `get`,
+//! `list`, `create`, `update`, `delete`, or `execute` sends it. Entity APIs use
+//! consistent entry points: plural names list values, singular names address
+//! one value, `new_*` creates values, and `update_*` modifies them.
 //!
 //! ```rust,no_run
 //! use anytype::prelude::*;
 //! # async fn example(client: &AnytypeClient) -> Result<(), AnytypeError> {
 //!
-//! // Get/Delete single item: client.<entity>(ids...).get/delete()
-//! let obj = client.object("space_id", "obj_id").get().await?;
-//! client.object("space_id", "obj_id").delete().await?;
-//!
-//! // Create: client.new_<entity>(required_args).optional_args().create()
-//! let space = client.new_space("My Space")
-//!     .description("Description")
-//!     .create().await?;
-//!
-//! // Update: client.update_<entity>(ids...).fields().update()
-//! let space = client.update_space("space_id")
-//!     .name("New Name")
-//!     .update().await?;
-//!
-//! // List: client.<entities>(ids...).limit().filter().list()
+//! let object = client.object("space_id", "object_id").get().await?;
 //! let objects = client.objects("space_id")
-//!     .filter(Filter::type_in(vec!["page"]))
+//!     .filter(Filter::type_in(["page"]))
 //!     .limit(50)
 //!     .list().await?;
+//! let space = client.new_space("Project")
+//!     .description("Project documents")
+//!     .create().await?;
+//! # let _ = (object, objects, space);
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! ## Cargo features
-//!
-//! The `anytype` crate has no default features.
-//! The non-default features are used only for testing.
-//!
-//! ### Notes on API Design
-//!
-//! - Similar structs are combined to keep the API surface small and consistent.
-//!   Example: Object and `ObjectWithBody` are unified as `Object { markdown: Option<String>, ... }`.
-//! - All methods use a consistent builder flow:
-//!   `things(..)`, `thing(..)`, `new_thing(..)`, `update_thing(..)` + optional setters +
-//!   terminal verbs like `list()`, `get()`, `create()`, `update()`, or `delete()`.
-//! - Single-field response wrappers are unwrapped so callers get the inner type directly.
-//! - Parameters accept flexible input types via `Into<String>` and `IntoIterator` where useful.
-//! - Property and type keys converted to ids if upstream api requires ids.
-//! - Filter/Condition constructors prevent invalid operator combinations, with escape hatches
-//!   available for advanced use cases.
-//! - Filters default to AND semantics: `.filter()` chains into AND, and `Vec<Filter>.into()`
-//!   yields an AND `FilterExpression`.
-//! - Numeric filters support `eq`, `ne`, `lt`, `lte`, `gt`, and `gte`; checkbox
-//!   filters support `eq` and `ne`. Search bodies retain typed JSON values, while
-//!   list-query builders emit canonical number text and lowercase boolean text
-//!   without changing conditions or filtering returned pages locally.
-//! - Enums represent token types like Color and Layout.
-//! - A single HTTP pipeline handles validation, logging, serialization, retries, and rate limits.
-//! - Pagination uses `PaginatedResponse<T>` and `PagedResult<T>` with `into_stream()` and
-//!   `collect_all()` helpers.
-//! - Naming exceptions to avoid confusion:
-//!   - `get_type()` avoids the `type` keyword (`object()` and `space()` keep the simple name).
-//!   - View-related APIs use `view_*` to disambiguate list/collection/query objects
-//!     (`list_views`, `view_list_objects`, `view_add_objects`, `view_remove_object`), while
-//!     `observe_collection_membership` reads canonical direct membership without a view.
+//! List operations return [`PagedResult`](paged::PagedResult) or
+//! [`PaginatedResponse`](paged::PaginatedResponse) values with stream and
+//! collection helpers. Filter constructors preserve typed number and checkbox
+//! values and reject invalid operator combinations before dispatch.
 //!
 //! ## Secret-safe HTTP diagnostics
 //!

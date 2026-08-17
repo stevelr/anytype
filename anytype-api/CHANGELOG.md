@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Align the README and crate-level documentation on the current HTTP/gRPC
+  credential model, transport coverage, fluent builder API, and a compact
+  panic-free quick start.
 - Run the required disposable live tier on pushes to `main` and nightly, and
   run the connected upstream-characterization tier weekly. Tier 2 also builds,
   tests, and documents the crate from its packaged tarball with its packaged

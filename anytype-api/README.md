@@ -10,9 +10,16 @@ An ergonomic Anytype API client in Rust.
 
 ## Overview
 
-`anytype` provides an ergonomic rust client for [Anytype](https://anytype.io). It supports listing, searches, and CRUD operations on Objects, Properties, Spaces, Tags, Types, Members, Views, Files, and Chats, with optional key storage and caching. REST is preferred when it has equivalent functionality; gRPC supplies richer file metadata/upload options, structured chat messages, attached object discussions, and event streaming.
+`anytype` provides a fluent Rust client for [Anytype](https://anytype.io). It
+supports listing, search, and CRUD operations for objects, properties, spaces,
+tags, types, members, views, files, and chats, with credential storage and
+client-side caching. REST is preferred when it has equivalent functionality;
+gRPC supplies capabilities that REST does not expose or represents with less
+fidelity.
 
-Applications authenticate with Anytype servers using access tokens. One token is required for http apis, and if gRPC apis are used (for files or chats), an additional gRPC token is required. The `anytype` library helps generate tokens and store them in a KeyStore.
+HTTP calls require an access token. gRPC calls require an account key or
+session token. The library can generate and store both credential families in
+a `KeyStore`.
 
 Call `AnytypeError::is_authentication()` when an embedding application needs
 stable authentication guidance. The predicate recognizes direct HTTP and
@@ -32,40 +39,28 @@ return `None`.
 - Broad coverage of the Anytype REST API 2025-11-08: nearly every documented REST
   operation is called directly over HTTP (see [Status and Compatibility](#status-and-compatibility)
   for the known exceptions)
-- gRPC back-end provides extensions not available in REST (rich file operations, structured chat blocks, and full event streaming)
+- gRPC back end provides rich file operations, structured chat messages and
+  streams, typed body blocks, archived-object cleanup, space backup, and
+  process watching
 - Paginated responses and async Streams
 - Integrates with OS Keyring for secure storage of credentials (HTTP + gRPC)
 - HTTP middleware with secret-safe metadata logging, retries, and rate limit handling
 - Client-side caching (spaces, properties, types)
 - Space administration through typed APIs for chat-space creation, deletion,
   invitations, and sharing controls
-- Name and id resolution helpers (`resolve` module): accept a space, type,
-  template, chat, view, or property by name, key, or id; ambiguous names return up to 10
-  deterministic candidate ids and display names for an actionable retry, and
-  bounded scans fail explicitly instead of guessing from partial results;
-  candidate ordering is independent of upstream page order. Explicit type IDs
-  that need metadata use one cache-independent scoped GET and reject a
-  mismatched returned identity instead of priming the all-types cache. Direct
-  property reads provide the same metadata-only exact-identity path and never
-  expand tags. Explicit-ID tag lookup follows that GET with a separately
-  paginated 1,000-row scan whose total and page windows must remain coherent
-  before a match or not-found result is accepted, without priming all space
-  properties or guessing from incomplete results. Template
-  resolution uses a direct-id GET or an exact 1,000-row scan and re-fetches the
-  selected template to verify its space, canonical generic template type
-  id/key, and non-archived state; the validated endpoint path establishes the
-  owning object type. Malformed rows that match the requested template name
-  fail closed unless a valid row with the same stable id supplies the safe
-  representative.
+- Deterministic name and ID resolution for spaces, types, templates, chats,
+  views, properties, and tags, with bounded scans and actionable ambiguity
+  errors
 - Typed, bounded body-block reads (`body` module): validated block trees with
   exact IDs and order over gRPC `ObjectShow`, plus verified typed create,
   append, update, delete, move, and bounded non-transactional batch operations
 - Nested filter expression builder
 - Parameter validation
 - Metrics
-- used in:
-  - [anyr](https://github.com/stevelr/anytype/tree/main/anyr) - list, search, and manipulate anytype objects
-  - [any-edit](https://github.com/stevelr/anytype/tree/main/any-edit) - edit anytype docs in markdown in external editor
+- Used by [anyr](https://github.com/stevelr/anytype/tree/main/anyr) for Anytype
+  automation from the command line and
+  [any-edit](https://github.com/stevelr/anytype/tree/main/any-edit) for editing
+  Anytype documents as Markdown
 
 Numeric filters support `eq`, `ne`, `lt`, `lte`, `gt`, and `gte`; checkbox
 filters support `eq` and `ne`. Typed values pass through unchanged in search
@@ -74,10 +69,7 @@ where a list endpoint requires URL query values. The client does not coerce
 strings to numbers or booleans, accept checkbox `1`/`0` aliases, or emulate
 server filtering after pagination. When typed list filters include one positive
 type filter, the client maps it to search's dedicated type selector instead of
-sending it as a generic property condition. The reproducible probe requires
-unfiltered endpoint controls, a bounded settling window before classifying a
-repeated mismatch, redacted relation/count output, and verified
-disposable-space absence.
+sending it as a generic property condition.
 
 ### Bounded HTTP responses
 
@@ -231,93 +223,45 @@ Standard `AnytypeError` `Display` and `Debug` output and its error source chain
 exclude all free-form messages, identities, candidate values, last errors,
 paths from malformed targets, and typed upstream sources that could contain
 request or document content. Use `error.diagnostic()` for structured
-application logs. Raw public fields—including `ApiError::message`,
+application logs. Raw public fields, including `ApiError::message`,
 `RateLimitExceeded::header`, validation messages, resolver identities, and
-typed sources—remain available through explicit variant matching and must not
+typed sources, remain available through explicit variant matching and must not
 be logged without an application policy.
 
 ## Quick start
 
-```rust
+```rust,no_run
 use anytype::prelude::*;
 
-const PROJECT_SPACE: &str = "Projects";
-const CHAT_SPACE: &str = "Chat";
+# async fn example() -> Result<(), AnytypeError> {
+let client = AnytypeClient::new("my-app")?;
+let spaces = client.spaces().list().await?;
+let Some(space) = spaces.iter().next() else {
+    return Ok(());
+};
 
-//! Agenda automation:
-//! - list top 10 tasks sorted by priority
-//! - list 10 most recent documents containing the text "meeting notes"
-//! - send the lists in a rich-text chat message with colors and hyperlinks
-#[tokio::main]
-async fn main() -> Result<(), AnytypeError> {
-    let config = ClientConfig {
-        app_name: "agenda".to_string(),
-        keystore_service: Some("anyr".to_string()),
-        ..Default::default()
-    };
-    let client = AnytypeClient::with_config(config)?;
-    let space = client.lookup_space_by_name(PROJECT_SPACE).await?;
+let page = client
+    .new_object(&space.id, "page")
+    .name("Meeting notes")
+    .body("# Decisions")
+    .create()
+    .await?;
 
-    // List 10 tasks sorted by priority
-    let mut tasks = client
-        .search_in(&space.id)
-        .types(vec!["task"])
-        .sort_desc("last_modified_date")
-        .limit(40)
-        .execute()
-        .await?
-        .into_response()
-        .take_items();
-    tasks.sort_by_key(|t| t.get_property_u64("priority").unwrap_or_default());
-
-    // Get 10 most recent pages or notes containing the text "meeting notes"
-    // sort most recent on top
-    let recent_note_docs = client
-        .search_in(&space.id)
-        .text("meeting notes")
-        .types(["page", "note"])
-        .sort_desc("last_modified_date")
-        .limit(10)
-        .execute()
-        .await?;
-
-    // Build the message with colored status indicators
-    let mut message = MessageContent::new()
-        .text("Good morning Jim,\n")
-        .bold("Here are your tasks\n");
-    for task in tasks.iter().take(10) {
-        let priority = task.get_property_u64("priority").unwrap_or_default();
-        let name = task.name.as_deref().unwrap_or("(unnamed)");
-        message = message.text(&format!("{priority} "));
-        message = status_color(message, task);
-        message = message.text(&format!(" {name}\n"));
-    }
-
-    // add list of docs with hyperlinks
-    message = message.bold("\nand recent notes:\n");
-    for doc in &recent_note_docs {
-        let date = doc
-            .get_property_date("last_modified_date")
-            .unwrap_or_default()
-            .format("%Y-%m-%d %H:%M");
-        let name = doc.name.as_deref().unwrap_or("(unnamed)");
-        message = message
-            .text(&format!("{date} "))
-            .link(name, doc.get_link())
-            .nl();
-    }
-
-    // Send it over chat message
-    let chat = client.chats().space_chat(CHAT_SPACE).get().await?;
-    client
-        .chats()
-        .add_message(chat.id)
-        .content(message)
-        .send()
-        .await?;
-
-    Ok(())
+let results = client
+    .search_in(&space.id)
+    .text("meeting notes")
+    .types(["page", "note"])
+    .sort_desc("last_modified_date")
+    .limit(10)
+    .execute()
+    .await?;
+for object in results.iter() {
+    println!("{}", object.name.as_deref().unwrap_or("(unnamed)"));
 }
+
+client.object(&space.id, &page.id).delete().await?;
+# Ok(())
+# }
 ```
 
 Search pagination limits must be between 1 and 1000 inclusive. Both global and
@@ -667,7 +611,7 @@ async fn print_body(client: &AnytypeClient) -> Result<(), AnytypeError> {
 
 Reads are fail-closed: duplicate, cyclic, orphaned, dangling, oversized, or
 malformed block graphs fail whole with a typed `AnytypeError::BodyGraph`
-error — a partial or truncated tree is never returned. Per-request
+error. A partial or truncated tree is never returned. Per-request
 `BodyLimits` can tighten (never widen) the hard ceilings on block count,
 depth, fanout, text size, and mark count. Content the typed layer does not
 model (dataviews, widgets, unknown styles or marks from newer servers) reads
