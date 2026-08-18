@@ -535,6 +535,16 @@ putting their bytes in MCP messages:
   hashes, and bounded receipts. Document creation can also apply up to 50 typed
   properties validated against the resolved Anytype type.
 
+`file_import` and `document_import_create` validate their requested names
+before resolving the source or dispatching a mutation. Names containing a
+Unicode `Bidi_Control` character are rejected to prevent directional display
+spoofing; the validation diagnostic does not echo the name or code point.
+Zero-width non-joiner and joiner (ZWNJ and ZWJ), ordinary right-to-left text,
+and exact non-normalized Unicode spelling remain accepted, subject to each
+tool's existing length and control-character rules. This check is specific to
+bidirectional controls; it is not general protection against homographs or
+every invisible character.
+
 Local paths contain a logical root ID and relative path. If no roots are
 declared, root-based calls explain that you must select a policy file with
 `ANY_MCP_CONFIG` or `--config`. Imports verify source identity, size, and

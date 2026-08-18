@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Reject Unicode `Bidi_Control` characters in `file_import` and
+  `document_import_create` names before mutation dispatch, using validation
+  diagnostics that do not repeat the rejected name or code point. ZWNJ, ZWJ,
+  ordinary right-to-left text, and non-normalized spelling remain accepted.
 - Keep ignored live-test instructions tied to executable targets and scenario
   roles without hard-coded suite totals that drift as coverage grows.
 - Document the cross-platform CA trust requirements for private-authority JWKS
