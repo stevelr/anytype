@@ -66,6 +66,14 @@ whole-call `grpc-timeout` is propagated for this class, with its remaining
 absolute budget reduced by readiness time; the library setup and enclosing
 budgets remain local to response setup.
 
+`scope_grpc_enclosing_deadline` installs an absolute task scope for composed
+workflows. Generated calls made inside that scope take its minimum with their
+explicit options and policy profile, so retries and later calls cannot mint a
+fresh workflow budget. Channel connection keeps its separate fixed 30-second
+boundary. Higher-level applications should normally use
+`anytype::scope_grpc_deadline` and retain the documented crate dependency
+direction.
+
 When idle or lifetime limits are enabled, `GrpcStreamDeadline` observes raw,
 nonempty HTTP data frames before tonic decodes a message. Such progress resets
 idle; empty frames do not, and neither progress nor reconnect resets total

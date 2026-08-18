@@ -10,6 +10,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 **Changed:**
 
+- Add a task-scoped absolute enclosing deadline that generated calls merge
+  with method policy and explicit request options, preserving the remaining
+  local and `grpc-timeout` budget across composed workflows.
 - Apply validated logical deadlines to generated gRPC clients, including
   finite credential, ordinary, long-operation, stream-setup, and cleanup
   profiles; absolute enclosing and caller bounds; typed, payload-free timeout

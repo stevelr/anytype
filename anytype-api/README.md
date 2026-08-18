@@ -256,6 +256,14 @@ tonic treats as a whole-stream limit. For this class, only an explicit caller
 whole-call timeout is propagated, reduced to its remaining absolute budget
 after readiness; the library setup and enclosing budgets remain local.
 
+Applications that compose several client operations can call
+`scope_grpc_deadline` with one absolute Tokio instant. Every nested generated
+gRPC call observes the remaining budget and propagates only that remainder
+where the method profile permits it. Channel connection keeps its separate
+fixed 30-second boundary. The scope does not change the one-way dependency:
+callers use the public `anytype` API rather than depending on `anytype-rpc`
+directly.
+
 Configured stream idle is reset by raw nonempty transport progress before
 message decoding; total lifetime and enclosing deadlines never reset.
 `chat_stream` keeps capped exponential reconnect backoff, resubscription, and

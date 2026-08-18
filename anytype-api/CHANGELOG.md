@@ -8,6 +8,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Add `scope_grpc_deadline` so a caller-owned absolute workflow deadline caps
+  all nested generated gRPC calls, readiness waits, and propagated
+  `grpc-timeout` remainders without exposing `anytype-rpc` as a direct
+  dependency to higher-level applications.
 - Validate direct gRPC chat text, reaction, chat/message identifiers, and the
   legacy `read_all` space argument before transport. Cleanup-owned live
   coverage independently reads back `send_text` and reaction add/remove state.

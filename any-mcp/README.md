@@ -2212,11 +2212,29 @@ Every request passes fixed gates in order (exact `Host` allowlist, exact
 `Origin` allowlist with fail-closed CORS, a process-global request-rate
 window, bearer authentication, a 64-request concurrency bound, and 2 MiB
 bounded body collection) before any JSON decoding or handler work.
-Authentication is required on every request and is separate from the Anytype
-keystore:
+
+The listener also admits at most 128 TCP connections before parsing headers,
+allows five seconds, 64 headers, and 64 KiB of buffered header data per
+connection, and continuously reaps completed connection tasks. Authenticated
+requests capture their ordinary and artifact deadline candidates before body
+collection. Only a fully decoded call to `file_import`, `file_export`,
+`document_import_create`, `document_import_update`, or `document_export`
+selects the artifact deadline; every other request keeps the ordinary
+deadline. The 2 MiB body has a 30-second no-progress bound that resets only on
+nonempty data and never resets the selected absolute deadline.
+
+One admitted deadline and concurrency lease cover permit waits, nested Anytype
+HTTP and gRPC calls, verification, and approved settlement supervisors. A
+deadline that wins before mutation dispatch returns HTTP 408; after dispatch,
+the protocol result remains `mutation_indeterminate` and the caller must
+reconcile state before retrying. Shutdown applies one absolute cleanup budget
+across artifact settlement and staging on every transport exit.
 
 On Windows, private runtime paths require ownership and every access-granting
 ACL entry to name the process user, LocalSystem, or Built-in Administrators.
+
+Authentication is required on every request and is separate from the Anytype
+keystore:
 
 - `ANY_MCP_HTTP_AUTH=static-token` reads one 43..512-byte base64url token
   from the owner-only regular file named by `ANY_MCP_HTTP_TOKEN_FILE` and

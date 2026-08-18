@@ -8,6 +8,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Bound Streamable HTTP before authentication with a 128-connection ceiling,
+  five-second and finite-size header parsing, and continuous task reaping. One
+  ingress anchor, concurrency lease, and absolute deadline now cover bounded
+  body collection, exact ordinary-versus-artifact routing, nested Anytype
+  calls, and approved supervisors. Predispatch expiry returns HTTP 408;
+  post-dispatch expiry retains structured mutation-indeterminate guidance. A
+  separate post-drain deadline covers settlement and staging cleanup together
+  on every transport exit.
 - Make `artifact_status` report the session's effective local-root authority as
   `unavailable`, `configured`, `narrowed`, or `disabled`, with path-free
   effective root counts. Status and artifact operations now share one
