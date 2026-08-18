@@ -1688,6 +1688,22 @@ async fn artifact_object_ids(ctx: &TestContext) -> Result<BTreeSet<String>, Stri
     Ok(objects.into_iter().map(|object| object.id).collect())
 }
 
+async fn artifact_file_ids(ctx: &TestContext) -> Result<BTreeSet<String>, String> {
+    let page = ctx
+        .client
+        .files()
+        .list(&ctx.space_id)
+        .limit(200)
+        .list()
+        .await
+        .map_err(|_| "capture adversarial file inventory".to_owned())?;
+    let files = page
+        .collect_all()
+        .await
+        .map_err(|_| "capture adversarial file inventory".to_owned())?;
+    Ok(files.into_iter().map(|file| file.id).collect())
+}
+
 async fn adversarial_seed_file(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
@@ -4919,32 +4935,56 @@ pub async fn run_artifact_malicious_metadata_default(
     execution.record_executed(AdversarialCaseId::Mal01)?;
 
     let bidi_name = format!("adversarial-\u{202e}-join\u{200d}-{}", unique_suffix());
-    let bidi_source = seed_distinct_import_source(run.policy, "mal02")?;
+    let allocation = allocate_stage_upload(
+        driver,
+        space,
+        ARTIFACT_FILE_PAYLOAD.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&artifact_sha256(ARTIFACT_FILE_PAYLOAD)),
+    )
+    .await?;
+    upload_stage_bytes(&allocation, ARTIFACT_FILE_PAYLOAD, ARTIFACT_FILE_MEDIA_TYPE).await?;
     execution.record_forbidden_log_needle(bidi_name.as_bytes())?;
-    let imported = driver
-        .call_tool(
-            "file_import",
-            file_import_arguments(
-                space,
-                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &bidi_source),
-                &bidi_name,
-                Some(ARTIFACT_FILE_MEDIA_TYPE),
-            ),
-        )
-        .await?;
-    let bidi_file_id = required_str(&imported, "/file_id")?;
-    run.ctx.register_file(&bidi_file_id);
-    let fetched = run
-        .ctx
-        .client
-        .files()
-        .get(space, &bidi_file_id)
-        .get()
-        .await
-        .map_err(|_| "read back adversarial file name".to_owned())?;
-    if fetched.name.as_deref() != Some(bidi_name.as_str()) {
-        return Err("MAL-02 name did not round-trip exactly".to_owned());
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let stage_before = stage_head_status(&allocation).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let files_before = artifact_file_ids(run.ctx).await?;
+    let staged_source = json!({"staged_handle": allocation.handle()});
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            staged_source.clone(),
+            &bidi_name,
+            Some(ARTIFACT_FILE_MEDIA_TYPE),
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[bidi_name.as_str(), allocation.handle()],
+    )
+    .await?;
+    adversarial_refusal(
+        driver,
+        "document_import_create",
+        json!({
+            "space": space,
+            "source": staged_source,
+            "source_format": "markdown",
+            "object_type": "page",
+            "name": bidi_name,
+            "idempotency_key": format!("mal02-document-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::Validation,
+        &[bidi_name.as_str(), allocation.handle()],
+    )
+    .await?;
+    if stage_head_status(&allocation).await? != stage_before
+        || artifact_object_ids(run.ctx).await? != objects_before
+        || artifact_file_ids(run.ctx).await? != files_before
+    {
+        return Err("MAL-02 consumed its stage or created an object".to_owned());
     }
+    release_stage_upload(driver, &allocation).await?;
     execution.record_executed(AdversarialCaseId::Mal02)?;
 
     let accepted_name = "n".repeat(255);
@@ -5354,32 +5394,56 @@ pub async fn run_artifact_adversarial_stdio_sentinels(
     execution.record_executed(AdversarialCaseId::Mal01)?;
 
     let bidi_name = format!("adversarial-\u{202e}-join\u{200d}-{}", unique_suffix());
-    let bidi_source = seed_distinct_import_source(run.policy, "stdio-mal02")?;
+    let allocation = allocate_stage_upload(
+        driver,
+        space,
+        ARTIFACT_FILE_PAYLOAD.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&artifact_sha256(ARTIFACT_FILE_PAYLOAD)),
+    )
+    .await?;
+    upload_stage_bytes(&allocation, ARTIFACT_FILE_PAYLOAD, ARTIFACT_FILE_MEDIA_TYPE).await?;
     execution.record_forbidden_log_needle(bidi_name.as_bytes())?;
-    let imported = driver
-        .call_tool(
-            "file_import",
-            file_import_arguments(
-                space,
-                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &bidi_source),
-                &bidi_name,
-                Some(ARTIFACT_FILE_MEDIA_TYPE),
-            ),
-        )
-        .await?;
-    let bidi_file_id = required_str(&imported, "/file_id")?;
-    run.ctx.register_file(&bidi_file_id);
-    let fetched = run
-        .ctx
-        .client
-        .files()
-        .get(space, &bidi_file_id)
-        .get()
-        .await
-        .map_err(|_| "read back stdio adversarial file name".to_owned())?;
-    if fetched.name.as_deref() != Some(bidi_name.as_str()) {
-        return Err("MAL-02 stdio name did not round-trip exactly".to_owned());
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let stage_before = stage_head_status(&allocation).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let files_before = artifact_file_ids(run.ctx).await?;
+    let staged_source = json!({"staged_handle": allocation.handle()});
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            staged_source.clone(),
+            &bidi_name,
+            Some(ARTIFACT_FILE_MEDIA_TYPE),
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[bidi_name.as_str(), allocation.handle()],
+    )
+    .await?;
+    adversarial_refusal(
+        driver,
+        "document_import_create",
+        json!({
+            "space": space,
+            "source": staged_source,
+            "source_format": "markdown",
+            "object_type": "page",
+            "name": bidi_name,
+            "idempotency_key": format!("stdio-mal02-document-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::Validation,
+        &[bidi_name.as_str(), allocation.handle()],
+    )
+    .await?;
+    if stage_head_status(&allocation).await? != stage_before
+        || artifact_object_ids(run.ctx).await? != objects_before
+        || artifact_file_ids(run.ctx).await? != files_before
+    {
+        return Err("MAL-02 stdio consumed its stage or created an object".to_owned());
     }
+    release_stage_upload(driver, &allocation).await?;
     execution.record_executed(AdversarialCaseId::Mal02)?;
     finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     execution.assert_exact(ADVERSARIAL_STDIO_SENTINEL_IDS)?;

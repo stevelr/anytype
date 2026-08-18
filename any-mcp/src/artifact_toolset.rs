@@ -20,6 +20,7 @@ use anytype::{
     files::FileObject,
     objects::{Object, plain_markdown_representation},
 };
+use icu_properties::{CodePointSetData, props::BidiControl};
 use rmcp::{
     model::{
         CallToolRequestMethod, CallToolRequestParams, CallToolResult, ErrorData, ProtocolVersion,
@@ -1192,12 +1193,31 @@ fn validate_name(name: &str) -> Result<(), ArtifactToolError> {
     if name.is_empty()
         || name.len() > 255
         || name.chars().any(char::is_control)
+        || contains_bidi_control(name)
         || name.contains(['/', '\\'])
         || matches!(name, "." | "..")
     {
         return Err(ArtifactToolError::Validation);
     }
     Ok(())
+}
+
+fn validate_document_name(name: &str) -> Result<(), ArtifactToolError> {
+    if name.is_empty()
+        || name.chars().count() > 512
+        || name.chars().any(char::is_control)
+        || contains_bidi_control(name)
+    {
+        return Err(ArtifactToolError::Validation);
+    }
+    Ok(())
+}
+
+fn contains_bidi_control(value: &str) -> bool {
+    let bidi_control = CodePointSetData::new::<BidiControl>();
+    value
+        .chars()
+        .any(|character| bidi_control.contains(character))
 }
 
 fn normalize_media_type(value: Option<&str>) -> Result<Option<String>, ArtifactToolError> {
@@ -3109,12 +3129,7 @@ async fn document_import_create(
     if runtime.is_read_only() {
         return Err(ArtifactToolError::ReadOnly);
     }
-    if input.name.is_empty()
-        || input.name.chars().count() > 512
-        || input.name.chars().any(char::is_control)
-    {
-        return Err(ArtifactToolError::Validation);
-    }
+    validate_document_name(&input.name)?;
     let space_id = resolve_space(runtime.client(), &input.space).await?;
     let typ = runtime
         .client()
@@ -4248,6 +4263,50 @@ mod tests {
             Some("application/octet-stream".to_owned())
         );
         assert!(normalize_media_type(Some("text/plain; charset=utf-8")).is_err());
+    }
+
+    #[test]
+    fn bidi_controls_are_rejected_from_file_and_document_import_names() {
+        let bidi_controls = [
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}',
+            '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ];
+
+        for control in bidi_controls {
+            let name = format!("safe{control}name");
+            assert!(
+                validate_name(&name).is_err(),
+                "file_import accepted U+{:04X}",
+                u32::from(control)
+            );
+            assert!(
+                validate_document_name(&name).is_err(),
+                "document_import_create accepted U+{:04X}",
+                u32::from(control)
+            );
+        }
+    }
+
+    #[test]
+    fn import_names_preserve_safe_unicode_and_distinct_bounds() {
+        for name in [
+            "join\u{200c}control.bin",
+            "join\u{200d}control.bin",
+            "ملف-עברית.bin",
+            "cafe\u{0301}.bin",
+        ] {
+            assert!(validate_name(name).is_ok(), "file_import rejected {name:?}");
+            assert!(
+                validate_document_name(name).is_ok(),
+                "document_import_create rejected {name:?}"
+            );
+        }
+
+        assert!(validate_name("path/name").is_err());
+        assert!(validate_document_name("path/name").is_ok());
+        assert!(validate_name(&"n".repeat(256)).is_err());
+        assert!(validate_document_name(&"n".repeat(512)).is_ok());
+        assert!(validate_document_name(&"n".repeat(513)).is_err());
     }
 
     #[test]
