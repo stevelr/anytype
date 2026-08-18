@@ -628,6 +628,12 @@ Structured message blocks, full-fidelity reads, cross-chat previews, reconnect
 watermarks, and dynamic subscription control remain available as gRPC
 extensions because the REST representation omits blocks and per-user state.
 
+`ChatClient::read_all` is account-global. Heart's `ChatReadAll` request has no
+space or chat field, and its handler traverses every chat known to the current
+session. The legacy `space_id` argument is validated but is not sent on the
+wire. Only run this operation when the account's complete chat inventory is
+safe to mark read; the shared-server live suite deliberately does not call it.
+
 Older REST history uses a typed page with a 1 through 12 item limit. Its
 `next_before` value is an equality-only opaque server token limited to 256
 ASCII graphic bytes. Pass it only to the next `older_messages` request; do not

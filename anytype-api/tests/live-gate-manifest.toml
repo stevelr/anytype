@@ -59,6 +59,11 @@ target = "test_chats"
 test = "direct_grpc_chat_listing_space_chat_and_edit_text_read_back"
 serial_group = "disposable_anytype_api"
 
+[[required]]
+target = "test_chats"
+test = "direct_grpc_send_text_and_toggle_reaction_have_independent_readback"
+serial_group = "disposable_anytype_api"
+
 # The two chat subscriptions share protected stream credentials. The harness
 # verifies registered-resource cleanup before deleting the disposable space.
 [[required]]

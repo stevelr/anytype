@@ -76,6 +76,9 @@ use crate::{
     validation::looks_like_object_id,
 };
 
+const MAX_CHAT_REFERENCE_BYTES: usize = 256;
+const MAX_CHAT_REACTION_BYTES: usize = 64;
+
 // ============================================================================
 // Public types
 // ============================================================================
@@ -771,7 +774,12 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Mark all messages as read (if supported server-side).
+    /// Mark every chat known to the current Heart session as read.
+    ///
+    /// Heart's `ChatReadAll` request has no space field, so `space_id` does not
+    /// scope the mutation. The argument is retained for API compatibility and
+    /// validated before dispatch. Only call this operation when the account's
+    /// complete chat inventory is safe to mutate.
     pub fn read_all(&self, space_id: impl Into<String>) -> ChatReadAllRequest<'a> {
         ChatReadAllRequest {
             client: self.client,
@@ -2498,6 +2506,8 @@ impl ChatSendTextRequest<'_> {
     }
 
     pub async fn send(self) -> Result<String> {
+        validate_chat_reference("chat object id", &self.chat_object_id)?;
+        validate_chat_text(&self.text, self.client.get_config().limits.markdown_max_len)?;
         ChatAddMessageRequest {
             client: self.client,
             chat_object_id: self.chat_object_id,
@@ -2564,6 +2574,9 @@ pub struct ChatToggleReactionRequest<'a> {
 
 impl ChatToggleReactionRequest<'_> {
     pub async fn send(self) -> Result<bool> {
+        validate_chat_reference("chat object id", &self.chat_object_id)?;
+        validate_chat_reference("chat message id", &self.message_id)?;
+        validate_chat_reaction(&self.emoji)?;
         let grpc = self.client.grpc_client().await?;
         let mut commands = grpc.client_commands();
         let request = toggle_message_reaction::Request {
@@ -2589,7 +2602,7 @@ pub struct ChatReadAllRequest<'a> {
 
 impl ChatReadAllRequest<'_> {
     pub async fn mark_read(self) -> Result<()> {
-        let _ = self.space_id;
+        validate_chat_reference("space id", &self.space_id)?;
         let grpc = self.client.grpc_client().await?;
         let mut commands = grpc.client_commands();
         let request = read_all::Request {};
@@ -2602,6 +2615,46 @@ impl ChatReadAllRequest<'_> {
         ensure_error_ok(response.error.as_ref(), "chat read all")?;
         Ok(())
     }
+}
+
+fn validate_chat_reference(description: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > MAX_CHAT_REFERENCE_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(AnytypeError::Validation {
+            message: format!(
+                "{description} must be nonempty, at most {MAX_CHAT_REFERENCE_BYTES} bytes, and control-free"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_chat_text(text: &str, maximum_bytes: u64) -> Result<()> {
+    let text_bytes = u64::try_from(text.len()).map_err(|_| AnytypeError::Validation {
+        message: "chat text exceeds the configured size limit".to_owned(),
+    })?;
+    if text.is_empty() || text_bytes > maximum_bytes {
+        return Err(AnytypeError::Validation {
+            message: format!("chat text must be nonempty and at most {maximum_bytes} bytes"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_chat_reaction(emoji: &str) -> Result<()> {
+    if emoji.is_empty()
+        || emoji.len() > MAX_CHAT_REACTION_BYTES
+        || emoji.chars().any(char::is_control)
+    {
+        return Err(AnytypeError::Validation {
+            message: format!(
+                "chat reaction must be nonempty, at most {MAX_CHAT_REACTION_BYTES} bytes, and control-free"
+            ),
+        });
+    }
+    Ok(())
 }
 
 pub struct ChatAddMessageRequest<'a> {
@@ -4033,7 +4086,7 @@ mod tests {
         chat_stream_diagnostic_path, decode_history_messages, grpc_message_block,
         message_block_from_grpc, timestamp_to_datetime,
     };
-    use anytype_rpc::model;
+    use anytype_rpc::{error::AnytypeGrpcError, model};
     use futures::StreamExt;
     use reqwest::StatusCode;
     use tokio::{
@@ -4047,7 +4100,7 @@ mod tests {
         client::{AnytypeClient, ClientConfig},
         error::AnytypeError,
         filters::{Condition, Filter},
-        keystore::HttpCredentials,
+        keystore::{GrpcCredentials, HttpCredentials},
         test_util::scripted_http::{
             ScriptedHttpContentType, ScriptedHttpFixture, ScriptedHttpRequest, ScriptedHttpResponse,
         },
@@ -5342,5 +5395,89 @@ mod tests {
                 "type": "mentions"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn direct_grpc_chat_builders_validate_before_transport() {
+        let id = NEXT_SCRIPT_ID.fetch_add(1, Ordering::Relaxed);
+        let key_path = std::env::temp_dir().join(format!(
+            "anytype-chat-validation-{}-{id}.db",
+            std::process::id()
+        ));
+        let mut config = ClientConfig::default().app_name("chat-validation-unit");
+        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore_service = Some(format!("chat-validation-unit-{id}"));
+        let client = AnytypeClient::with_config(config).expect("construct validation-only client");
+
+        assert!(matches!(
+            client.chats().send_text("", "text").send().await,
+            Err(AnytypeError::Validation { .. })
+        ));
+        assert!(matches!(
+            client.chats().send_text("chat-id", "").send().await,
+            Err(AnytypeError::Validation { .. })
+        ));
+        assert!(matches!(
+            client
+                .chats()
+                .toggle_reaction("chat-id", "message-id", "")
+                .send()
+                .await,
+            Err(AnytypeError::Validation { .. })
+        ));
+        assert!(matches!(
+            client.chats().read_all("").mark_read().await,
+            Err(AnytypeError::Validation { .. })
+        ));
+
+        for suffix in ["", "-shm", "-wal"] {
+            let _ = std::fs::remove_file(format!("{}{}", key_path.display(), suffix));
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_grpc_chat_builder_preserves_typed_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind closed gRPC endpoint");
+        let address = listener.local_addr().expect("closed gRPC endpoint address");
+        drop(listener);
+
+        let id = NEXT_SCRIPT_ID.fetch_add(1, Ordering::Relaxed);
+        let key_path = std::env::temp_dir().join(format!(
+            "anytype-chat-grpc-failure-{}-{id}.db",
+            std::process::id()
+        ));
+        let mut config = ClientConfig::default().app_name("chat-grpc-failure-unit");
+        config.grpc_endpoint = Some(format!("http://{address}"));
+        config.keystore = Some(format!("file:path={}", key_path.display()));
+        config.keystore_service = Some(format!("chat-grpc-failure-unit-{id}"));
+        let client = AnytypeClient::with_config(config).expect("create gRPC failure client");
+        client
+            .keystore
+            .update_grpc_credentials(&GrpcCredentials::from_token("test-session-token"))
+            .expect("store isolated gRPC credentials");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.chats().send_text("chat-id", "text").send(),
+        )
+        .await
+        .expect("closed loopback failure is bounded");
+
+        client
+            .keystore
+            .clear_all_credentials()
+            .expect("clear isolated gRPC credentials");
+        for suffix in ["", "-shm", "-wal"] {
+            let _ = std::fs::remove_file(format!("{}{}", key_path.display(), suffix));
+        }
+
+        assert!(matches!(
+            result,
+            Err(AnytypeError::Grpc {
+                source: AnytypeGrpcError::Transport { .. },
+            })
+        ));
     }
 }

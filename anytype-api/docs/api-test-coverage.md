@@ -195,7 +195,8 @@ Coverage classes:
 | REST: MCP chat prerequisites                            | Unit: timestamp, history-page, and edit transport cases<br>Live: disposable prerequisite suite                                                                                                                                                 | covered                                                                  |
 | REST: SSE `message_stream(..).open`                     | Unit: bounds and robustness<br>Live: initial-message receipt                                                                                                                                                                                   | covered                                                                  |
 | gRPC: message CRUD/read operations                      | Unit: block and rich-state conversion<br>Live: `test_chat_message_crud`                                                                                                                                                                        | covered                                                                  |
-| gRPC: `send_text` / `toggle_reaction` / `read_all`      | Live: single paths in `test_chats` and `test_chat_discovery`                                                                                                                                                                                   | partial; `any-ih7t` (P3)                                                 |
+| gRPC: `send_text` / `toggle_reaction`                   | Unit: validation and typed transport failure<br>Live: direct builders with independent REST text and reaction readback                                                                                                                         | covered                                                                  |
+| gRPC: account-global `read_all`                         | Unit: validation and generated-wire/source audit<br>Live: requires an isolated disposable account and complete before/after inventory                                                                                                          | blocked; the shared-server tier cannot safely supply global evidence     |
 | gRPC: `edit_text`                                       | Live: direct edit with independent REST text/style/mark readback                                                                                                                                                                               | covered                                                                  |
 | gRPC: search/get/resolve chat                           | Unit: resolver cases<br>Live: disposable discovery                                                                                                                                                                                             | covered                                                                  |
 | Mixed: global and in-space chat list                    | Unit: resolver and REST wire shapes<br>Live: direct global and scoped assertions                                                                                                                                                               | covered                                                                  |
@@ -269,7 +270,7 @@ matrices, repaired CLI output contracts, backup-before-delete archive
 selection, exact ignored-test dispositions, and protected serial live gates
 for anytype-api, any-mcp, and anyr.
 
-The anytype-api manifest now owns 20 required cases, three scheduled
+The anytype-api manifest now owns 21 required cases, three scheduled
 characterization cases, and two explicitly excluded probes. Seven superseded
 filter ignores were removed. The former ambient Set/view probes now create
 cleanup-owned source-backed Sets and collections. These cross-crate gates are
@@ -325,7 +326,7 @@ review.
 | P2       | `any-vvue`                | Real-server `ProcessWatcher` reconnect and fault coverage, blocked by the P4 `any-k6o5.4`–`any-k6o5.6` design/review/harness chain. |
 | P2       | `any-ucd.4`               | Literal all-target and clippy evidence on all five supported platform rows.                                                         |
 | P3       | `any-upsa`                | Direct assertions on the public HTTP metrics snapshot.                                                                              |
-| P3       | `any-ih7t`                | Direct `send_text`, `toggle_reaction`, and `read_all` coverage.                                                                     |
+| P2       | `any-ih7t`                | Isolated-account coverage for the account-global `read_all` mutation.                                                               |
 | P3       | `any-vjj`                 | Direct `delete_all_archived` live coverage.                                                                                         |
 | P3       | `any-gz2k`                | Real-server negative tag-filter pagination.                                                                                         |
 | P4       | `any-k6o5.4`–`any-k6o5.6` | Reviewed external fault injection and chat-stream reconnect coverage.                                                               |

@@ -8,6 +8,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Validate direct gRPC chat text, reaction, chat/message identifiers, and the
+  legacy `read_all` space argument before transport. Cleanup-owned live
+  coverage independently reads back `send_text` and reaction add/remove state.
+  `read_all` remains account-global because Heart's wire request has no scope;
+  the shared-server live tier does not execute it.
 - Align the README and crate-level documentation on the current HTTP/gRPC
   credential model, transport coverage, fluent builder API, and a compact
   panic-free quick start.
@@ -19,7 +24,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   IDs. This replaces the retired `ObjectShareByLink` Heart RPC, whose retained
   compatibility stub terminates the server when called. The disposable
   object-link live test is now registered in the protected live manifest,
-  which owns 20 required cases.
+  which owns 21 required cases.
 - Serialize first-use gRPC client initialization behind the client cache,
   prefer a nonempty session token over an account key, and classify missing
   credentials and connection failures without exposing their values. Local
