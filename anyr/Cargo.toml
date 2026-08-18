@@ -49,9 +49,10 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 hex = "0.4"
+tokio = { workspace = true, features = ["test-util"] }
 
-[target.'cfg(unix)'.dev-dependencies]
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-[target.'cfg(windows)'.dev-dependencies]
+[target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true

@@ -4,6 +4,15 @@
 
 ### Changed
 
+- Compose backup and restore under one absolute workflow deadline, including
+  selection, export/import, process watching, verification, and local result
+  publication. Timeout environment values now use strict finite ranges, and
+  restore timeouts identify the dispatched mutation outcome as indeterminate.
+  Local publication uses a revocable prepare/commit handshake. A manifest binds
+  the staged archive's exact byte length and SHA-256 digest before the archive is
+  the final commit record; failed publication conditionally removes only its own
+  manifest identity. Restore completion is
+  bound to a unique server-issued collection correlation for every import batch.
 - Run the installed anyr backup/create/restore live gate on pushes to `main`
   and nightly while retaining manual dispatch.
 - Sort the embedded backup command help alphabetically.

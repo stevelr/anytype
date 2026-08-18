@@ -33,7 +33,9 @@ pub async fn handle(ctx: &AppContext, args: super::TypeArgs) -> Result<()> {
             }
 
             if pagination.all {
-                let items = request.list().await?.collect_all().await?;
+                let items = ctx
+                    .collect_all(async { request.list().await?.collect_all().await })
+                    .await?;
                 if ctx.output.format() == OutputFormat::Table {
                     return ctx.output.emit_table(&items);
                 }
@@ -455,6 +457,9 @@ mod tests {
                             None,
                         ),
                         date_format: "%Y-%m-%d".to_string(),
+                        workflow_deadline: crate::cli::deadline::WorkflowDeadline::after(Some(
+                            std::time::Duration::from_mins(30),
+                        )),
                     };
                     let args = crate::cli::TypeArgs {
                         command: crate::cli::TypeCommands::Update {

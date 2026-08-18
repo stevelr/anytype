@@ -15,12 +15,28 @@
 //! diagnostics, progress, and errors stay on stderr so that stdout remains
 //! machine-parseable. Interactive commands render their own terminal UI.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
+
+use super::deadline::PublicationCommit;
+
+pub(super) enum PreparedOutput {
+    Quiet,
+    Stdout(String),
+    File { path: PathBuf, stage: PathBuf },
+}
+
+impl Drop for PreparedOutput {
+    fn drop(&mut self) {
+        if let Self::File { stage, .. } = self {
+            let _ = fs::remove_file(stage);
+        }
+    }
+}
 
 /// How a backup command result should be presented.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -180,6 +196,65 @@ impl CommandOutput {
         }
     }
 
+    pub(super) fn render<T, F>(&self, value: &T, render_human: F) -> Result<Option<String>>
+    where
+        T: Serialize + ?Sized,
+        F: FnOnce() -> String,
+    {
+        let text = match self.mode {
+            OutputMode::Quiet => return Ok(None),
+            OutputMode::Json => serde_json::to_string(value)?,
+            OutputMode::Pretty => serde_json::to_string_pretty(value)?,
+            OutputMode::Human => render_human(),
+        };
+        Ok(Some(text))
+    }
+
+    pub(super) fn prepare_rendered(&self, data: String) -> Result<PreparedOutput> {
+        let mut text = data;
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        let Some(path) = self.path.as_deref() else {
+            return Ok(PreparedOutput::Stdout(text));
+        };
+
+        let (mut stage, stage_path) = create_staging_file(path)?;
+        let staged = stage
+            .write_all(text.as_bytes())
+            .and_then(|()| stage.sync_all());
+        drop(stage);
+        if let Err(error) = staged {
+            let _ = fs::remove_file(&stage_path);
+            return Err(error)
+                .with_context(|| format!("failed to stage output file {}", path.display()));
+        }
+        Ok(PreparedOutput::File {
+            path: path.to_path_buf(),
+            stage: stage_path,
+        })
+    }
+
+    pub(super) fn commit_prepared(
+        mut prepared: PreparedOutput,
+        authority: PublicationCommit,
+    ) -> Result<()> {
+        authority.commit(|| match &mut prepared {
+            PreparedOutput::Quiet => Ok(()),
+            PreparedOutput::Stdout(text) => {
+                let mut stdout = io::stdout().lock();
+                stdout
+                    .write_all(text.as_bytes())
+                    .context("failed to write backup result to stdout")?;
+                stdout
+                    .flush()
+                    .context("failed to flush backup result to stdout")
+            }
+            PreparedOutput::File { path, stage } => replace_file(stage, path)
+                .with_context(|| format!("failed to publish output file {}", path.display())),
+        })
+    }
+
     fn write(&self, data: &str) -> Result<()> {
         let mut text = data.to_string();
         if !text.ends_with('\n') {
@@ -199,6 +274,61 @@ impl CommandOutput {
         fs::write(path, text.as_bytes())
             .with_context(|| format!("failed to write output file {}", path.display()))
     }
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let flags: MOVE_FILE_FLAGS = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn create_staging_file(destination: &Path) -> Result<(fs::File, PathBuf)> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = destination
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("output destination must name a file"))?;
+    for nonce in 0..100_u32 {
+        let path = parent.join(format!(
+            ".{}.anyback-stage-{}-{nonce}",
+            name.to_string_lossy(),
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to stage output file {}", path.display()));
+            }
+        }
+    }
+    bail!("failed to allocate output staging file")
 }
 
 fn paths_alias(left: &Path, right: &Path) -> Result<bool> {

@@ -434,7 +434,10 @@ script needs the full reply shape.
   alongside `--text` (text search uses the gRPC discovery API).
 - `anyr chat list ... --all` and `anyr chat messages search ... --all` exhaust
   the server's pages. Pagination that claims another page without usable
-  progress fails closed.
+  progress fails closed. All `--all` requests share one 30-minute workflow
+  deadline, including page requests and retry waits. Set
+  `ANYR_WORKFLOW_TIMEOUT_SECS` to canonical decimal seconds up to 3600, or to
+  exactly `0` to disable only this aggregate boundary.
 - `anyr chat create SPACE NAME [--icon-emoji EMOJI | --icon-file FILE]` attaches
   an icon; the two icon options are mutually exclusive. With an icon under REST
   the dedicated chat builder is used; otherwise the generic object create is.
@@ -596,6 +599,18 @@ anyr ARGS ...
   Subprocess failures identify the Anytype CLI operation; child output remains
   withheld, while platform-specific exit-status text is diagnostic detail.
   Credential-bearing output is captured under a fixed byte limit.
+
+  Initialization shares one 120-second deadline across account setup, token
+  creation, verification, and an optional join. Each owned child process has a
+  30-second safety limit that includes output collection and exit waiting. A
+  timeout terminates and reaps the direct child. On Unix it also signals
+  descendants that remain in the child's owned process group; descendants that
+  deliberately call `setsid` or `setpgid` after spawn are outside that boundary.
+  On Windows the child starts suspended and is assigned to a kill-on-close Job
+  Object before its code runs, so its descendants remain in the owned job. A
+  dispatched operation has an indeterminate server outcome. Set
+  `ANYR_INIT_CLI_TIMEOUT_SECS` to canonical
+  decimal seconds from 1 through 600. This deadline cannot be disabled.
 
 The global `--keystore` and `--keystore-service` options (or their environment
 variables) select where `init-cli` stores credentials. See

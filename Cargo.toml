@@ -77,7 +77,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-general-category = "1.1.0"
 unicode-normalization = "0.1.25"
 url = "2.5.8"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading"] }
 zeroize = { version = "1.9.0", features = ["derive"] }
 
 # The profile that 'dist' will build with
