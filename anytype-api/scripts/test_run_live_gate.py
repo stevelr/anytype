@@ -34,11 +34,19 @@ class LiveGateTests(unittest.TestCase):
             "ANYTYPE_URL": "http://127.0.0.1",
             "ANYTYPE_GRPC_ENDPOINT": "https://[::1]",
         }
-        self.assertTrue(GATE.environment_is_admitted(environment))
-        self.assertFalse(GATE.environment_is_admitted({**environment, "ANYTYPE_KEY_BAD": "x"}))
+        self.assertTrue(GATE.environment_is_admitted(environment, "required"))
         self.assertFalse(
-            GATE.environment_is_admitted({**environment, "ANYTYPE_KEY_SESSION_TOKEN": ""})
+            GATE.environment_is_admitted({**environment, "ANYTYPE_KEY_BAD": "x"}, "required")
         )
+        self.assertFalse(
+            GATE.environment_is_admitted(
+                {**environment, "ANYTYPE_KEY_SESSION_TOKEN": ""}, "required"
+            )
+        )
+        account_global = {**environment, "ANYTYPE_ACCOUNT_GLOBAL_TEST_PROCESS": "1"}
+        self.assertTrue(GATE.environment_is_admitted(account_global, "account_global"))
+        self.assertFalse(GATE.environment_is_admitted(account_global, "required"))
+        self.assertFalse(GATE.environment_is_admitted(environment, "account_global"))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "manifest.toml"
             path.write_text(

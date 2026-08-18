@@ -776,14 +776,30 @@ impl<'a> ChatClient<'a> {
 
     /// Mark every chat known to the current Heart session as read.
     ///
-    /// Heart's `ChatReadAll` request has no space field, so `space_id` does not
-    /// scope the mutation. The argument is retained for API compatibility and
-    /// validated before dispatch. Only call this operation when the account's
-    /// complete chat inventory is safe to mutate.
+    /// Heart's `ChatReadAll` request carries no scope. This operation marks
+    /// message, mention, and reaction state read across the account's complete
+    /// chat inventory.
+    #[must_use]
+    pub fn read_all_account(&self) -> ChatReadAllRequest<'a> {
+        ChatReadAllRequest {
+            client: self.client,
+            legacy_space_id: None,
+        }
+    }
+
+    /// Mark every chat known to the current Heart session as read.
+    ///
+    /// `space_id` is validated for compatibility but is not sent on the wire
+    /// and does not scope the mutation. Use [`Self::read_all_account`] to make
+    /// the account-global contract explicit.
+    #[deprecated(
+        since = "0.5.0",
+        note = "use read_all_account; Heart ChatReadAll is account-global"
+    )]
     pub fn read_all(&self, space_id: impl Into<String>) -> ChatReadAllRequest<'a> {
         ChatReadAllRequest {
             client: self.client,
-            space_id: space_id.into(),
+            legacy_space_id: Some(space_id.into()),
         }
     }
 
@@ -2595,14 +2611,18 @@ impl ChatToggleReactionRequest<'_> {
     }
 }
 
+/// Account-global mark-read request for every chat known to Heart.
 pub struct ChatReadAllRequest<'a> {
     client: &'a AnytypeClient,
-    space_id: String,
+    legacy_space_id: Option<String>,
 }
 
 impl ChatReadAllRequest<'_> {
+    /// Mark message, mention, and reaction state read across the account.
     pub async fn mark_read(self) -> Result<()> {
-        validate_chat_reference("space id", &self.space_id)?;
+        if let Some(space_id) = self.legacy_space_id {
+            validate_chat_reference("space id", &space_id)?;
+        }
         let grpc = self.client.grpc_client().await?;
         let mut commands = grpc.client_commands();
         let request = read_all::Request {};
@@ -4084,10 +4104,11 @@ mod tests {
         MessageTextMarkType, MessageTextStyle, ReadMessagesBody, append_sse_byte,
         canonical_chat_timestamp, chat_message_from_grpc, chat_message_path,
         chat_stream_diagnostic_path, decode_history_messages, grpc_message_block,
-        message_block_from_grpc, timestamp_to_datetime,
+        message_block_from_grpc, read_all, timestamp_to_datetime,
     };
     use anytype_rpc::{error::AnytypeGrpcError, model};
     use futures::StreamExt;
+    use prost::Message;
     use reqwest::StatusCode;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -5398,6 +5419,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn direct_grpc_chat_builders_validate_before_transport() {
         let id = NEXT_SCRIPT_ID.fetch_add(1, Ordering::Relaxed);
         let key_path = std::env::temp_dir().join(format!(
@@ -5435,6 +5457,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn direct_grpc_chat_read_all_has_no_wire_scope() {
+        let request = read_all::Request {};
+        assert_eq!(request.encoded_len(), 0);
+        assert!(request.encode_to_vec().is_empty());
+    }
+
     #[tokio::test]
     async fn direct_grpc_chat_builder_preserves_typed_transport_failure() {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -5458,12 +5487,18 @@ mod tests {
             .update_grpc_credentials(&GrpcCredentials::from_token("test-session-token"))
             .expect("store isolated gRPC credentials");
 
-        let result = tokio::time::timeout(
+        let send_result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             client.chats().send_text("chat-id", "text").send(),
         )
         .await
         .expect("closed loopback failure is bounded");
+        let global_read_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.chats().read_all_account().mark_read(),
+        )
+        .await
+        .expect("closed loopback global read failure is bounded");
 
         client
             .keystore
@@ -5474,7 +5509,13 @@ mod tests {
         }
 
         assert!(matches!(
-            result,
+            send_result,
+            Err(AnytypeError::Grpc {
+                source: AnytypeGrpcError::Transport { .. },
+            })
+        ));
+        assert!(matches!(
+            global_read_result,
             Err(AnytypeError::Grpc {
                 source: AnytypeGrpcError::Transport { .. },
             })

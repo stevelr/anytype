@@ -111,6 +111,13 @@ target = "test_object_links"
 test = "object_link_is_local_and_preserves_live_server_health_and_cleanup"
 serial_group = "disposable_anytype_api"
 
+# This entry runs alone against a fresh account and server. The workflow owns
+# the complete service cgroup because ChatReadAll has no space or chat scope.
+[[account_global]]
+target = "test_chat_read_all"
+test = "account_global_chat_read_all_converges_and_preserves_inventory"
+serial_group = "disposable_anytype_api"
+
 [[soak]]
 target = "test_filters"
 test = "test_filter_number_checkbox_condition_matrix"

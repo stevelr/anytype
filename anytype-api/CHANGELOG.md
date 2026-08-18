@@ -21,10 +21,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `grpc-timeout` remainders without exposing `anytype-rpc` as a direct
   dependency to higher-level applications.
 - Validate direct gRPC chat text, reaction, chat/message identifiers, and the
-  legacy `read_all` space argument before transport. Cleanup-owned live
-  coverage independently reads back `send_text` and reaction add/remove state.
-  `read_all` remains account-global because Heart's wire request has no scope;
-  the shared-server live tier does not execute it.
+  legacy `read_all` space argument before transport. Add the explicit
+  account-global `read_all_account` builder and deprecate the misleading
+  argument-taking form. Cleanup-owned live coverage independently reads back
+  `send_text` and reaction add/remove state; a dedicated fresh-account gate
+  inventories every chat, message, and reaction around the global mutation and
+  owns the complete server process tree.
 - Align the README and crate-level documentation on the current HTTP/gRPC
   credential model, transport coverage, fluent builder API, and a compact
   panic-free quick start.

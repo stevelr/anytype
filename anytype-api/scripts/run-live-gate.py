@@ -121,7 +121,7 @@ def endpoint_is_loopback(value: str | None) -> bool:
         return False
 
 
-def environment_is_admitted(environment: dict[str, str]) -> bool:
+def environment_is_admitted(environment: dict[str, str], tier: str) -> bool:
     allowed = {
         "ANYTYPE_KEY_HTTP_TOKEN",
         "ANYTYPE_KEY_ACCOUNT_ID",
@@ -129,6 +129,7 @@ def environment_is_admitted(environment: dict[str, str]) -> bool:
         "ANYTYPE_KEY_SESSION_TOKEN",
     }
     service = environment.get("ANYTYPE_KEYSTORE_SERVICE", "")
+    account_global_admitted = environment.get("ANYTYPE_ACCOUNT_GLOBAL_TEST_PROCESS") == "1"
     return (
         environment.get("ANYTYPE_DISPOSABLE_TEST_PROCESS") == "1"
         and bool(PREFIX.fullmatch(environment.get("ANYTYPE_TEST_SPACE_PREFIX", "")))
@@ -147,6 +148,7 @@ def environment_is_admitted(environment: dict[str, str]) -> bool:
         and environment.get("ANYTYPE_RATE_LIMIT_MAX_RETRIES", "5") == "5"
         and endpoint_is_loopback(environment.get("ANYTYPE_URL"))
         and endpoint_is_loopback(environment.get("ANYTYPE_GRPC_ENDPOINT"))
+        and (tier == "account_global") == account_global_admitted
     )
 
 
@@ -209,9 +211,9 @@ def run_entry(index: int, entry: dict[str, str]) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 3 or sys.argv[1] not in {"required", "soak"}:
-        fail("usage: run-live-gate.py required|soak MANIFEST")
-    if not environment_is_admitted(dict(os.environ)):
+    if len(sys.argv) != 3 or sys.argv[1] not in {"required", "account_global", "soak"}:
+        fail("usage: run-live-gate.py required|account_global|soak MANIFEST")
+    if not environment_is_admitted(dict(os.environ), sys.argv[1]):
         fail("live gate environment is invalid")
     try:
         authenticate()

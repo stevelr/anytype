@@ -10,6 +10,7 @@ use std::{
 struct Manifest {
     version: u8,
     required: Vec<Entry>,
+    account_global: Vec<Entry>,
     soak: Vec<Entry>,
     excluded: Vec<ExcludedEntry>,
 }
@@ -52,7 +53,7 @@ fn manifest() -> Manifest {
             .take()
             .unwrap_or_else(|| panic!("{section} entry is missing test"));
         match section {
-            "required" | "soak" => {
+            "required" | "account_global" | "soak" => {
                 assert!(
                     reason.is_none(),
                     "{section} entry must not contain an exclusion reason"
@@ -64,10 +65,11 @@ fn manifest() -> Manifest {
                         .take()
                         .unwrap_or_else(|| panic!("{section} entry is missing serial_group")),
                 };
-                if section == "required" {
-                    manifest.required.push(entry);
-                } else {
-                    manifest.soak.push(entry);
+                match section {
+                    "required" => manifest.required.push(entry),
+                    "account_global" => manifest.account_global.push(entry),
+                    "soak" => manifest.soak.push(entry),
+                    _ => unreachable!("validated live-gate section"),
                 }
             }
             "excluded" => {
@@ -107,7 +109,10 @@ fn manifest() -> Manifest {
                 );
             }
             assert!(
-                matches!(next_section, "required" | "soak" | "excluded"),
+                matches!(
+                    next_section,
+                    "required" | "account_global" | "soak" | "excluded"
+                ),
                 "unsupported manifest section {next_section}"
             );
             section = Some(next_section);
@@ -278,11 +283,21 @@ fn manifest_is_a_complete_partition_of_ignored_tests() {
     let manifest = manifest();
     assert_eq!(manifest.version, 1, "unexpected manifest version");
     assert_eq!(manifest.required.len(), 21, "required inventory changed");
+    assert_eq!(
+        manifest.account_global.len(),
+        1,
+        "account-global inventory changed"
+    );
     assert_eq!(manifest.soak.len(), 3, "soak inventory changed");
     assert_eq!(manifest.excluded.len(), 2, "excluded inventory changed");
 
     let mut expected_by_target = BTreeMap::<String, BTreeSet<String>>::new();
-    for entry in manifest.required.iter().chain(&manifest.soak) {
+    for entry in manifest
+        .required
+        .iter()
+        .chain(&manifest.account_global)
+        .chain(&manifest.soak)
+    {
         assert!(safe_target(&entry.target), "unsafe target {}", entry.target);
         assert!(
             safe_test_path(&entry.test),
@@ -343,7 +358,7 @@ fn manifest_is_a_complete_partition_of_ignored_tests() {
     let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     assert_eq!(
         source_ignore_attribute_inventory(&source_root),
-        (26, 0),
+        (27, 0),
         "source ignore-attribute inventory drifted"
     );
 }
@@ -379,8 +394,13 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
     let required = workflow
         .split("  headless-required:\n")
         .nth(1)
-        .and_then(|block| block.split("  headless-soak:\n").next())
+        .and_then(|block| block.split("  headless-account-global:\n").next())
         .expect("headless-required block");
+    let account_global = workflow
+        .split("  headless-account-global:\n")
+        .nth(1)
+        .and_then(|block| block.split("  headless-soak:\n").next())
+        .expect("headless-account-global block");
     let soak = workflow
         .split("  headless-soak:\n")
         .nth(1)
@@ -388,6 +408,29 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
     assert!(required.contains("github.event_name == 'push'"));
     assert!(required.contains("github.event.schedule == '29 2 * * *'"));
     assert!(required.contains("needs: ignored-test-inventory"));
+    assert!(account_global.contains("needs: ignored-test-inventory"));
+    assert!(account_global.contains("runs-on: ubuntu-24.04"));
+    assert!(account_global.contains("provision-headless-server.sh ANYTYPE_ACCOUNT_GLOBAL"));
+    assert!(account_global.contains("ANYTYPE_ACCOUNT_GLOBAL_TEST_PROCESS=1"));
+    assert!(
+        account_global
+            .contains("run-live-gate.py account_global anytype-api/tests/live-gate-manifest.toml")
+    );
+    for guard in [
+        "systemd-run --user --wait --pipe --collect --same-dir",
+        "--service-type=exec",
+        "--property=KillMode=control-group",
+        "trap cleanup_unit EXIT",
+        "systemctl --user stop \"$unit\"",
+        "systemctl --user is-active --quiet \"$unit\"",
+    ] {
+        assert!(
+            account_global.contains(guard),
+            "account-global job lacks process-tree guard {guard:?}"
+        );
+    }
+    assert!(!account_global.contains("ANYTYPE_HEADLESS_NETWORK_MODE: connected"));
+    assert!(!account_global.contains("self-hosted"));
     assert!(soak.contains("github.event.schedule == '43 3 * * 0'"));
     for block in [required, soak] {
         assert!(block.contains("needs: ignored-test-inventory"));

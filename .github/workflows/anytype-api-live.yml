@@ -16,6 +16,7 @@ on:
         default: required
         options:
           - required
+          - account-global
           - soak
           - all
 
@@ -192,6 +193,93 @@ jobs:
           name: anytype-api-required-server-log
           path: ${{ env.ANYTYPE_API_LIVE_FAILURE_EVIDENCE }}
           if-no-files-found: warn
+          retention-days: 7
+
+  headless-account-global:
+    name: isolated account-global chat read tier
+    if: ${{ inputs.tier == 'account-global' || inputs.tier == 'all' || github.event_name == 'push' || github.event.schedule == '29 2 * * *' }}
+    needs: ignored-test-inventory
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: Expose pinned devshell tools to the job
+        run: |
+          nix develop --command bash -euo pipefail -c '
+            {
+              printf "PATH=%s\n" "$PATH"
+              printf "PROTOC=%s\n" "$PROTOC"
+              printf "PROTOC_INCLUDE=%s\n" "$PROTOC_INCLUDE"
+            } >> "$GITHUB_ENV"
+          '
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: anytype-api-headless
+      - name: Run account-global test in an owned service cgroup
+        shell: bash
+        run: |
+          set -euo pipefail
+          systemctl --user show-environment > /dev/null
+          unit="anytype-api-account-global-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.service"
+          cleanup_unit() {
+            systemctl --user stop "$unit" > /dev/null 2>&1 || true
+          }
+          trap cleanup_unit EXIT
+          systemd-run --user --wait --pipe --collect --same-dir \
+            --unit="$unit" \
+            --service-type=exec \
+            --property=KillMode=control-group \
+            --setenv=PATH="$PATH" \
+            --setenv=RUNNER_TEMP="$RUNNER_TEMP" \
+            --setenv=GITHUB_ENV="$GITHUB_ENV" \
+            --setenv=ANYTYPE_TEST_SPACE_PREFIX="$ANYTYPE_TEST_SPACE_PREFIX" \
+            --setenv=CARGO_TERM_COLOR="$CARGO_TERM_COLOR" \
+            --setenv=RUST_BACKTRACE="$RUST_BACKTRACE" \
+            bash -euo pipefail -c '
+              bash .github/scripts/provision-headless-server.sh ANYTYPE_ACCOUNT_GLOBAL
+              test -r "$RUNNER_TEMP/headless-credentials.env"
+              set -a; source "$RUNNER_TEMP/headless-credentials.env"; set +a
+              export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
+              export ANYTYPE_ACCOUNT_GLOBAL_TEST_PROCESS=1
+              export ANYTYPE_API_GATE_OUTPUT="$RUNNER_TEMP/anytype-api-account-global-output.log"
+              python3 anytype-api/scripts/run-live-gate.py account_global anytype-api/tests/live-gate-manifest.toml
+            '
+          if systemctl --user is-active --quiet "$unit"; then
+            printf '%s\n' 'account-global service cgroup remained active after test' >&2
+            exit 1
+          fi
+          trap - EXIT
+      - name: Retain bounded gate output on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: anytype-api-account-global-output
+          path: ${{ runner.temp }}/anytype-api-account-global-output.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Bound reviewed server evidence on failure
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          source="${ANYTYPE_ACCOUNT_GLOBAL_REVIEWED_LOG_FILE:-}"
+          artifact="$RUNNER_TEMP/anytype-api-account-global-reviewed.log"
+          if [[ "$source" == /* && -r "$source" ]]; then
+            tail -c 65000 -- "$source" > "$artifact"
+            chmod 0600 "$artifact"
+          fi
+      - name: Retain bounded reviewed server evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: anytype-api-account-global-server-log
+          path: ${{ runner.temp }}/anytype-api-account-global-reviewed.log
+          if-no-files-found: ignore
           retention-days: 7
 
   headless-soak:
