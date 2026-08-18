@@ -3697,11 +3697,13 @@ async fn run_mutations(
 ) -> Result<(), String> {
     let suffix = unique_suffix();
     let name = format!("MCP shared mutation {suffix}");
+    let requested_body = "shared mutation body";
     evidence.sensitive(&name);
     let create_input = json!({
         "space": ctx.space_id,
         "type": "page",
         "name": name,
+        "body_markdown": requested_body,
         "idempotency_key": format!("mcp-shared-{suffix}")
     });
     let created = driver
@@ -3724,6 +3726,10 @@ async fn run_mutations(
     require(
         visible.name.as_deref() == Some(name.as_str()),
         "create readback",
+    )?;
+    require(
+        visible.markdown.as_deref() == Some("shared mutation body   \n"),
+        "create body readback",
     )?;
 
     let current = driver

@@ -549,10 +549,6 @@ async fn execute_create(
                 .map_err(|_| indeterminate_operation())?;
             let object_id =
                 ObjectId::new(created.id.clone()).map_err(|_| indeterminate_operation())?;
-            let created_matches = verify_object_semantics(
-                &created, &object_id, &space_id, &type_id, &type_key, &input,
-            )
-            .map_err(|_| indeterminate_operation())?;
             let verified = verify_semantic(
                 &verify_config,
                 "object",
@@ -567,9 +563,6 @@ async fn execute_create(
             )
             .await
             .map_err(|_| indeterminate_operation())?;
-            if !created_matches {
-                return Err(indeterminate_operation());
-            }
             let object = object_summary(&verified).map_err(|_| indeterminate_operation())?;
             Ok::<_, HandlerOperationError>(ObjectCreateOutput { object })
         },
@@ -1435,6 +1428,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plain_body_uses_independent_read_when_create_response_is_not_canonical_yet() {
+        let requested = "alpha stable body";
+        let canonical = "alpha stable body   \n";
+        let replies = vec![
+            FixtureReply::json(type_value()),
+            FixtureReply::json(object_value(OBJECT_ID, requested, "Q3")),
+            FixtureReply::json(object_value(OBJECT_ID, canonical, "Q3")),
+        ];
+        let (base_url, server) = fixture(replies).await;
+        let handlers = ObjectCreateHandlers::with_verify_config(
+            runtime(base_url, Duration::from_secs(2)),
+            test_verify_config(),
+        )
+        .unwrap();
+
+        let result = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input_with_body(None, requested),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(result.is_error, Some(false));
+        let requests = server.await.expect("plain create response fixture");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(request_body(&requests[1])["body"], requested);
+        assert!(requests[2].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/objects/{OBJECT_ID} HTTP/1.1\r\n"
+        )));
+    }
+
+    #[tokio::test]
     async fn underscore_plain_body_replay_uses_one_unescaped_wire_form() {
         let raw = "alpha unique_0";
         let canonical = "alpha unique\\_0   \n";
@@ -1527,7 +1553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_response_and_final_get_must_both_match_normalized_semantics() {
+    async fn independent_final_get_is_authoritative_over_transient_create_representation() {
         let replies = vec![
             FixtureReply::json(type_value()),
             FixtureReply::json(object_value(OBJECT_ID, "# changed", "Q3")),
@@ -1547,7 +1573,7 @@ mod tests {
             )
             .await;
 
-        assert_eq!(result_code(&result), "conflict");
+        assert_eq!(result.is_error, Some(false));
         let requests = server.await.expect("response/final semantic fixture");
         assert_eq!(requests.len(), 3);
         assert_eq!(
