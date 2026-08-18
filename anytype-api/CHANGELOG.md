@@ -77,6 +77,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   secret-safe timeout outcomes and saturating per-class metrics distinguish
   aborted reads, indeterminate mutations, terminated streams, and caller
   transport timeouts.
+- Apply a validated `GrpcTimeoutPolicy` to the cached gRPC client, with
+  credential, ordinary, long-operation, stream-setup, cleanup, optional idle,
+  and optional lifetime classes. Absolute enclosing and tighter caller bounds
+  win; reads abort while possibly dispatched mutations remain indeterminate.
+  Chat reconnect, capped backoff, and watermark catch-up now remain inside the
+  stream lifetime; queued chat events survive output backpressure and a
+  simultaneous disconnect, and backoff resets after two delivered decoded
+  events. Redacted transport failures discard their original payload while
+  retaining the status code, process-watcher diagnostics omit peer text and
+  process content, and local gRPC discovery gives each connect/version probe
+  one two-second budget.
 - Restrict automatic HTTP replay to `GET`, `HEAD`, and `OPTIONS`. Mutation
   `POST`, `PATCH`, `DELETE`, and unapproved `PUT` dispatch once; ambiguous
   transport, timeout, 408, 429, 504, and server failures require a fresh state
@@ -100,6 +111,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add `ClientConfig::grpc_timeouts` and its fluent builder, inherited
+  `ANYTYPE_GRPC_TIMEOUT_SECS` resolution, typed gRPC deadline/control errors,
+  and deadline-aware generated-client access through `anytype-rpc`.
 - Add `count_archived_bounded`, which returns an exact archived-object count
   only when exhaustion is proven within the caller's logical-page budget.
   Preserve exhaustive `count_archived` behavior, validate archive pagination

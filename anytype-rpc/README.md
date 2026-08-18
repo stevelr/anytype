@@ -22,9 +22,69 @@ Before using this crate, check whether [anytype](https://crates.io/crates/anytyp
 | 0.3.0 – 0.3.1       | 0.48.0                |
 | 0.2.1               | 0.44                  |
 
+## Logical deadlines
+
+`AnytypeGrpcClient` applies a resolved `GrpcTimeoutPolicy` to generated RPCs.
+The default boundaries are 120 seconds for credential setup and ordinary
+unary calls, 30 minutes for long imports, exports, uploads, and downloads, 120
+seconds through streaming response headers, and five seconds for cleanup.
+Established-stream idle and total-lifetime boundaries are disabled by default.
+
+Policy resolution has three modes:
+
+- An explicit `AnytypeGrpcConfig::grpc_timeouts` policy wins and ignores the
+  process environment. Each `None` field disables that boundary.
+- Without an explicit policy, `ANYTYPE_GRPC_TIMEOUT_SECS=1..3600` gives
+  credential, ordinary, long, and stream-setup calls one inherited value; `0`
+  disables those four boundaries. In either case, established-stream idle and
+  lifetime remain disabled and cleanup retains its five-second default.
+- Without either setting, the defaults above apply.
+
+Finite credential, ordinary, stream-setup, idle, and lifetime values must be
+one through 3,600 seconds. Long unary values may be as high as 7,200 seconds;
+cleanup may be at most 30 seconds. The environment value must be an exact
+ASCII decimal with no sign, whitespace, or leading zero. Invalid policy or
+environment values fail before connection activity.
+
+Generated methods are classified as credential, ordinary, long, stream setup,
+or cleanup operations. An unknown generated RPC is conservatively treated as
+an ordinary mutation. Reads that expire are reported as aborted, mutations
+that may have reached Heart are indeterminate, and established-stream expiry
+terminates the stream. Inspect the typed `GrpcDeadlineError` class, outcome,
+source, and elapsed time. A transport failure is consumed after conversion: the
+wrapper retains its error-type marker and closed tonic status code, but not the
+original error value or payload. Standard source traversal returns a synthetic
+status containing that code and fixed redacted text.
+
+The effective boundary is the earliest of the selected policy duration, an
+absolute `GrpcEnclosingDeadline`, and an existing, tighter `grpc-timeout`. It
+includes service readiness, and the remaining budget is propagated after
+readiness. `StreamSetup` is intentionally different: the library profile is a
+local response-header/setup boundary and is not sent as `grpc-timeout`, because
+tonic applies that header to the whole stream. Only a caller-supplied
+whole-call `grpc-timeout` is propagated for this class, with its remaining
+absolute budget reduced by readiness time; the library setup and enclosing
+budgets remain local to response setup.
+
+When idle or lifetime limits are enabled, `GrpcStreamDeadline` observes raw,
+nonempty HTTP data frames before tonic decodes a message. Such progress resets
+idle; empty frames do not, and neither progress nor reconnect resets total
+lifetime or an enclosing deadline. Reconnect backoff, resubscription, and
+caller-provided replay work can remain inside those absolute bounds.
+
+`client_commands()` returns generated clients over the deadline-aware
+`AnytypeGrpcService`; `deadline_channel()` exposes a clone of that service for
+other generated clients. `channel()` remains a raw `tonic::transport::Channel`
+for compatibility. Calls made through the raw channel bypass this logical
+policy, and a disabled boundary is unbounded unless the caller supplies a
+separate timeout.
+
 ## Related projects
 
 - [anytype](https://crates.io/crates/anytype) An ergonomic Anytype API client in Rust. Includes http rest api plus gRPC backend using this crate, for access to Files and Chats.
+
+  The dependency remains one-way: `anytype` uses `anytype-rpc`; this crate does
+  not depend on `anytype`.
 
 - [anyr](https://crates.io/crates/anyr) a CLI tool for listing, searching, and performing CRUD operations on anytype objects. via `anytype`, also includes operations on Files and Chats.
 
