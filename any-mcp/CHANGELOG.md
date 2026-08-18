@@ -8,6 +8,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Add a non-default, fail-closed benchmark harness core with pinned artifact
+  admission, isolated-arm and credential-descriptor checks, bounded child
+  protocol ownership, layered secret scanning, independent oracle contracts,
+  and closed failure-inclusive statistics. Live catalog, model, scenario, and
+  paired execution remain blocked and the harness cannot publish comparison
+  numbers.
 - Bound Streamable HTTP before authentication with a 128-connection ceiling,
   five-second and finite-size header parsing, and continuous task reaping. One
   ingress anchor, concurrency lease, and absolute deadline now cover bounded

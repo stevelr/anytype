@@ -2170,6 +2170,22 @@ explicitly through `view_object_list`, preserving the selected-view path. The
 required heart RPCs stay inside `anytype-api`, so `any-mcp` retains its
 `anytype-api`-only dependency boundary.
 
+## Benchmark harness status
+
+The non-default `benchmark-harness` feature builds a protected, fail-closed
+benchmark core for comparing this server with the official npm server. It
+validates pinned artifacts, isolated arm configuration, credential descriptor
+handling, bounded JSON-RPC process I/O, secret-free diagnostics, independent
+oracle inputs, and a closed result/statistics schema. The Linux launcher owns
+its transient service and network namespaces and refuses uncertain setup or
+cleanup.
+
+This core does not run or publish a comparison. The live catalog, scenario,
+model, and 120-pair execution loop are not implemented, and the command records
+a blocked result instead of producing benchmark numbers. Live work also
+requires operator-approved immutable upstream artifacts, isolated credentials,
+the reviewed implementation ancestry, and fixed model and cost settings.
+
 ## Build
 
 ```sh
