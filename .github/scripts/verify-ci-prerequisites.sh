@@ -50,6 +50,7 @@ just --version
 jq --version
 gcc --version | head -n 1
 bash .github/scripts/test-release-tag-policy.sh
+bash .github/scripts/test-package-nix-dist-archive.sh
 
 if "$check_gate"; then
   gate --version

@@ -473,18 +473,22 @@ Chat message order ids are converted to lowercase hex before display in table-fo
 
 Release binaries are on [github](https://github.com/stevelr/anytype/tags)
 
-**Macos via Homebrew**
+**macOS (arm64)**
 
 ```sh
 brew install stevelr/tap/anyr
 ```
+
+The Homebrew formula and release archive install the portable binary built by
+the repository flake. Its system-library install names work without Nix.
 
 **Linux (arm64/x86_64)**
 
 Download the archive for your architecture and its checksum from the
 [releases page](https://github.com/stevelr/anytype/releases). Verify the
 download against the published checksum, then extract `anyr` to a directory on
-`PATH`.
+`PATH`. Linux release archives contain the fully static musl binary built by
+the repository flake.
 
 **Windows Powershell**
 

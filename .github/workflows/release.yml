@@ -3,10 +3,12 @@
 # Copyright 2022-2024, axodotdev
 # SPDX-License-Identifier: MIT or Apache-2.0
 #
-# Cargo-dist qualification and GitHub Release publication. Manual and weekly
-# runs build and validate artifacts without publishing. A supported version tag
-# on a commit reachable from main publishes the generated archives, checksums,
-# shell and PowerShell installers, and Homebrew formulae.
+# Cargo-dist qualification and GitHub Release publication. This generated file
+# has an allow-dirty CI edit: Linux and macOS local archives come from flake
+# outputs, while dist retains the Windows, installer, formula, and host steps.
+# Manual and weekly runs build and validate artifacts without publishing. A
+# supported version tag on a commit reachable from main publishes the generated
+# archives, checksums, shell and PowerShell installers, and Homebrew formulae.
 
 name: Release artifacts
 permissions:
@@ -164,6 +166,9 @@ jobs:
           fi
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
+      - name: Install Nix
+        if: runner.os != 'Windows'
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       # Get the dist-manifest
       - name: Fetch local artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -172,13 +177,58 @@ jobs:
           path: target/distrib/
           merge-multiple: true
       - name: Install dependencies
+        if: runner.os == 'Windows'
         run: |
           ${{ matrix.packages_install }}
-      - name: Build artifacts
+      - name: Build Windows artifacts
+        if: runner.os == 'Windows'
         run: |
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      - name: Build Nix release binary
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_TARGET: ${{ matrix.targets[0] }}
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TARGET" in
+            aarch64-apple-darwin)
+              nix_attr=.#anytype-toolbox-aarch64-darwin
+              ;;
+            aarch64-unknown-linux-gnu | x86_64-unknown-linux-gnu)
+              nix_attr=.#anytype-toolbox-static
+              ;;
+            *)
+              printf 'unsupported Nix release target: %s\n' "$RELEASE_TARGET" >&2
+              exit 2
+              ;;
+          esac
+          nix build -L "$nix_attr"
+          bash .github/scripts/package-nix-dist-archive.sh "$RELEASE_TARGET" result/bin/anyr
+      - name: Verify Nix release binary portability
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.targets[0] }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_TARGET" == aarch64-apple-darwin ]]; then
+            otool -L result/bin/anyr
+            if otool -L result/bin/anyr | grep -q '/nix/store'; then
+              printf 'anyr references /nix/store dylibs and is not portable\n' >&2
+              exit 1
+            fi
+          else
+            file result/bin/anyr
+            file result/bin/anyr | grep -Eq 'statically linked|static-pie linked' || {
+              printf 'anyr is not statically linked\n' >&2
+              exit 1
+            }
+          fi
+          result/bin/anyr --help > /dev/null
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
