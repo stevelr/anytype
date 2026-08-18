@@ -64,8 +64,43 @@ anyr backup inspect ARCHIVE [--max-cache SIZE]
   `inspect`, or a result file that aliases an input or generated artifact) instead
   of silently choosing one.
 - **Archive formats**: `list`, `diff`, `inspect`, and `restore` accept both `.zip` archives and unpacked archive directories.
+- **Raw extraction**: `extract` writes archived payload bytes for file-layout
+  snapshots 8 through 12. A missing payload returns the typed
+  `MissingRawPayloadError` without creating the destination.
 - **Pre-delete archives**: `anyr space delete SPACE --archive PATH` writes a complete protobuf `.zip` to the exact non-existing path before deletion. Validate the selected file with `anyr backup list PATH --files`.
 - **Manifest**: anyback writes manifest metadata to `<archive>.manifest.json`. Archives without manifests (including direct pre-delete and desktop-generated backups) are still supported.
+
+### Workflow deadlines
+
+`backup create` and `backup restore` share one outer deadline per command. The
+default is one hour. `ANYBACK_WORKFLOW_TIMEOUT_SECS` accepts canonical decimal
+seconds up to 7200; exactly `0` disables only the outer workflow boundary.
+Nested HTTP, gRPC, and restore progress limits still apply. Expiry before an
+import dispatch is reported as pre-dispatch; after dispatch, the mutation
+outcome is indeterminate. Archive, sidecar, report, and result-file writes are
+staged under the same deadline, so expiry cannot publish a prepared replacement.
+Archive publication binds an owned staging identity before creating the final
+path. Its manifest records the exact staged archive length and SHA-256 digest,
+then the archive becomes the final commit record. A sidecar left before that
+commit cannot validate against a missing or different archive.
+Each restore batch binds completion to the non-empty collection correlation
+returned by its import RPC. Completion requires the same correlation on the
+server's `importFinish` event; missing or reused correlations fail closed.
+Uncorrelated lifecycle events cannot establish success, while terminal failure
+events still fail the restore closed.
+
+Restore progress limits use seconds and remain mandatory:
+
+| Environment variable                   | Default | Maximum |
+| -------------------------------------- | ------: | ------: |
+| `ANYBACK_EVENT_STREAM_CONNECT_TIMEOUT` |      10 |     120 |
+| `ANYBACK_PROCESS_START_TIMEOUT`        |      20 |     300 |
+| `ANYBACK_PROCESS_IDLE_TIMEOUT`         |      30 |     300 |
+| `ANYBACK_PROCESS_DONE_TIMEOUT`         |    1800 |    3600 |
+
+Every timeout value rejects empty strings, whitespace, signs, leading zeros,
+non-decimal input, overflow, and values above its maximum before client
+construction.
 
 ---
 
@@ -73,7 +108,14 @@ anyr backup inspect ARCHIVE [--max-cache SIZE]
 
 ### Library Crate
 
-This package also exposes a reusable Rust library crate, `anyback_reader`, for archive traversal and snapshot file inspection. Library consumers can use `default-features = false` to exclude CLI-only dependencies.
+This package also exposes a reusable Rust library crate, `anyback_reader`, for
+archive traversal and snapshot file inspection. The command types and
+`run_command` entry point are embedded by `anyr backup`; the crate has no
+standalone top-level parser. Library consumers can use
+`default-features = false` to exclude CLI-only dependencies.
+Consumers that construct the Anytype client themselves can call
+`WorkflowDeadline::from_env` first and pass it to `run_command_with_deadline`;
+this validates configuration before client construction.
 
 ### Restore Transport
 
@@ -100,6 +142,11 @@ output, callback evidence, or restored content fails the gate. Run this target
 alone with `--ignored --exact --test-threads=1`; do not share its server with
 parallel mutation suites. Normal workspace tests remain offline because the
 live test stays ignored.
+
+The shared live-test command harness validates non-TTY stderr on every `anyr`
+attempt, including attempts made by lock-retry policies. Failure reports expose
+only exit status, byte lengths, and terminal-control categories; malformed
+result documents and archive paths are not echoed into diagnostics.
 
 ### Restore Content-Fidelity Live Matrix
 

@@ -1688,6 +1688,22 @@ async fn artifact_object_ids(ctx: &TestContext) -> Result<BTreeSet<String>, Stri
     Ok(objects.into_iter().map(|object| object.id).collect())
 }
 
+async fn artifact_file_ids(ctx: &TestContext) -> Result<BTreeSet<String>, String> {
+    let page = ctx
+        .client
+        .files()
+        .list(&ctx.space_id)
+        .limit(200)
+        .list()
+        .await
+        .map_err(|_| "capture adversarial file inventory".to_owned())?;
+    let files = page
+        .collect_all()
+        .await
+        .map_err(|_| "capture adversarial file inventory".to_owned())?;
+    Ok(files.into_iter().map(|file| file.id).collect())
+}
+
 async fn adversarial_seed_file(
     driver: &mut impl McpDriver,
     run: &ArtifactAdversarialRun<'_>,
@@ -4258,14 +4274,20 @@ pub async fn run_artifact_missing_roots_case(
 
 /// Client-root posture of one stable stdio acceptance session.
 ///
-/// The two variants are the remaining MCP protocol-matrix rows: a client that
-/// advertises roots and narrows the static policy, and a client without the
-/// roots capability that keeps the configured static policy exactly.
+/// The rows cover configured authority, valid intersections with partial and
+/// nested coverage, and a snapshot that disables authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ArtifactClientRootsMode {
     /// The client advertises roots and its snapshot names only the physical
     /// import root, so the configured export root loses its authority.
     ImportIntersection,
+    /// The client advertises two nested roots covering the complete static
+    /// policy. The authority is still classified as narrowed because a valid
+    /// client snapshot governs it, while effective counts remain one per kind.
+    NestedIntersection,
+    /// The client advertises roots but returns an invalid snapshot, so local
+    /// authority is terminally disabled with no effective roots.
+    DisabledSnapshot,
     /// The client advertises no roots capability, so both configured roots
     /// stay effective and no snapshot is ever requested.
     StaticFallback,
@@ -4273,13 +4295,20 @@ pub enum ArtifactClientRootsMode {
 
 impl ArtifactClientRootsMode {
     /// Complete closed inventory of client-root protocol rows.
-    pub const ALL: [Self; 2] = [Self::ImportIntersection, Self::StaticFallback];
+    pub const ALL: [Self; 4] = [
+        Self::ImportIntersection,
+        Self::NestedIntersection,
+        Self::DisabledSnapshot,
+        Self::StaticFallback,
+    ];
 
     /// Stable identifier used in evidence and failure reports.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ImportIntersection => "client_root_intersection",
+            Self::NestedIntersection => "nested_client_root_intersection",
+            Self::DisabledSnapshot => "disabled_client_root_snapshot",
             Self::StaticFallback => "static_root_fallback",
         }
     }
@@ -4291,7 +4320,7 @@ impl ArtifactClientRootsMode {
     #[must_use]
     pub const fn expected_snapshots(self) -> u64 {
         match self {
-            Self::ImportIntersection => 1,
+            Self::ImportIntersection | Self::NestedIntersection | Self::DisabledSnapshot => 1,
             Self::StaticFallback => 0,
         }
     }
@@ -4299,7 +4328,48 @@ impl ArtifactClientRootsMode {
     /// Whether the export root keeps its authority under this posture.
     #[must_use]
     pub const fn export_authorized(self) -> bool {
-        matches!(self, Self::StaticFallback)
+        matches!(self, Self::NestedIntersection | Self::StaticFallback)
+    }
+
+    /// Whether the configured import root remains effective.
+    #[must_use]
+    pub const fn import_authorized(self) -> bool {
+        !matches!(self, Self::DisabledSnapshot)
+    }
+
+    /// Exact authority status after the session's terminal decision.
+    #[must_use]
+    pub const fn expected_status(self) -> ArtifactStatusEvidence {
+        match self {
+            Self::ImportIntersection => ArtifactStatusEvidence {
+                local_root_authority: ArtifactLocalRootAuthorityEvidence::Narrowed,
+                import_root_count: 1,
+                export_root_count: 0,
+                staging_configured: false,
+                staging_active: false,
+            },
+            Self::NestedIntersection => ArtifactStatusEvidence {
+                local_root_authority: ArtifactLocalRootAuthorityEvidence::Narrowed,
+                import_root_count: 1,
+                export_root_count: 1,
+                staging_configured: false,
+                staging_active: false,
+            },
+            Self::DisabledSnapshot => ArtifactStatusEvidence {
+                local_root_authority: ArtifactLocalRootAuthorityEvidence::Disabled,
+                import_root_count: 0,
+                export_root_count: 0,
+                staging_configured: false,
+                staging_active: false,
+            },
+            Self::StaticFallback => ArtifactStatusEvidence {
+                local_root_authority: ArtifactLocalRootAuthorityEvidence::Configured,
+                import_root_count: 1,
+                export_root_count: 1,
+                staging_configured: false,
+                staging_active: false,
+            },
+        }
     }
 }
 
@@ -4322,6 +4392,17 @@ pub enum ArtifactClientRootsExport {
     Published(String),
     /// The export was refused by the uniform hidden-resource rejection.
     RefusedNotFound,
+    /// The session disabled every local root before dispatch.
+    RefusedDisabled,
+}
+
+/// Observed authority over the configured import root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactClientRootsImport {
+    /// The import consumed the exact fixture bytes and reported this digest.
+    Imported(String),
+    /// The session disabled every local root before dispatch.
+    RefusedDisabled,
 }
 
 /// Content-free result of one client-roots protocol row.
@@ -4331,22 +4412,21 @@ pub struct ArtifactClientRootsEvidence {
     pub mode: &'static str,
     /// Exact advertised artifact catalog.
     pub catalog: ArtifactCatalogSnapshot,
-    /// Exact `artifact_status` projection, which narrowing must not change.
+    /// Exact effective `artifact_status` projection for this session.
     pub status: ArtifactStatusEvidence,
     /// Exact number of `roots/list` snapshots production requested.
     pub snapshot_requests: u64,
     /// Digest of the bytes imported through the retained import root.
-    pub import_sha256: String,
+    pub import: ArtifactClientRootsImport,
     /// Observed authority over the configured export root.
     pub export: ArtifactClientRootsExport,
 }
 
 /// Runs one client-roots protocol row against a real Anytype backend.
 ///
-/// Both rows import through the physical import root, so the intersecting row
-/// proves narrowing retains a covered root while removing the uncovered one,
-/// and the fallback row proves an unadvertised session keeps the complete
-/// static policy. Every created file is registered with the cleanup-owning
+/// Authorized rows import through the physical import root. The disabled row
+/// proves its fixed refusal leaves both local roots and the Anytype object
+/// inventory unchanged. Every created file is registered with the cleanup
 /// context immediately after production reports its identity.
 ///
 /// # Errors
@@ -4366,12 +4446,58 @@ pub async fn run_artifact_client_roots_scenario(
     let status = ArtifactStatusEvidence::from_status(
         &driver.call_tool("artifact_status", json!({})).await?,
     )?;
-    if !status.local_roots_active || status.import_root_count != 1 || status.export_root_count != 1
-    {
-        return Err("client-roots status did not report the configured roots".to_owned());
+    if status != mode.expected_status() {
+        return Err("client-roots status did not report effective authority".to_owned());
     }
-    if run.snapshots.load(Ordering::Acquire) != 0 {
-        return Err("a read-only status projection requested a client-root snapshot".to_owned());
+    if run.snapshots.load(Ordering::Acquire) != mode.expected_snapshots() {
+        return Err("client-roots status took an unexpected snapshot count".to_owned());
+    }
+
+    if !mode.import_authorized() {
+        let import_before = RootInventory::capture(run.policy.import_root())?;
+        let export_before = run.policy.export_snapshot()?;
+        let objects_before = artifact_object_ids(run.ctx).await?;
+        for attempt in 0..2 {
+            let destination = format!("client-roots-disabled-{attempt}-{suffix}.bin");
+            adversarial_refusal(
+                driver,
+                "file_import",
+                file_import_arguments(
+                    space_id,
+                    local_source(
+                        ArtifactPolicyFixture::IMPORT_ROOT,
+                        ArtifactPolicyFixture::FILE_SOURCE,
+                    ),
+                    &destination,
+                    Some(ARTIFACT_FILE_MEDIA_TYPE),
+                ),
+                ExpectedToolErrorKind::Upstream,
+                &[&destination, ArtifactPolicyFixture::IMPORT_ROOT],
+            )
+            .await?;
+        }
+        let snapshot_requests = run.snapshots.load(Ordering::Acquire);
+        if snapshot_requests != mode.expected_snapshots()
+            || ArtifactStatusEvidence::from_status(
+                &driver.call_tool("artifact_status", json!({})).await?,
+            )? != status
+        {
+            return Err("disabled client-root decision was not terminal".to_owned());
+        }
+        import_before.assert_unchanged()?;
+        if run.policy.export_snapshot()? != export_before
+            || artifact_object_ids(run.ctx).await? != objects_before
+        {
+            return Err("disabled client-root session produced side effects".to_owned());
+        }
+        return Ok(ArtifactClientRootsEvidence {
+            mode: mode.as_str(),
+            catalog,
+            status,
+            snapshot_requests,
+            import: ArtifactClientRootsImport::RefusedDisabled,
+            export: ArtifactClientRootsExport::RefusedDisabled,
+        });
     }
 
     let repeated_source = seed_distinct_import_source(run.policy, "client-roots-repeat")?;
@@ -4468,16 +4594,15 @@ pub async fn run_artifact_client_roots_scenario(
         catalog,
         status,
         snapshot_requests,
-        import_sha256,
+        import: ArtifactClientRootsImport::Imported(import_sha256),
         export,
     })
 }
 
 /// Compares the complete closed client-roots row inventory.
 ///
-/// The rows must advertise one identical catalog and one identical status
-/// projection: client-root narrowing is a per-session authority decision and
-/// must never be observable in the advertised surface.
+/// The rows must advertise one identical catalog and their exact effective
+/// authority projections.
 ///
 /// # Errors
 ///
@@ -4498,16 +4623,21 @@ pub fn assert_artifact_client_roots_parity(
         return Err("client-roots rows produced no evidence".to_owned());
     };
     for (row, mode) in evidence.iter().zip(ArtifactClientRootsMode::ALL) {
-        if row.catalog != first.catalog || row.status != first.status {
-            return Err("client-roots rows advertised divergent surfaces".to_owned());
+        if row.catalog != first.catalog || row.status != mode.expected_status() {
+            return Err("client-roots rows advertised the wrong surface or authority".to_owned());
         }
-        if row.snapshot_requests != mode.expected_snapshots()
-            || row.import_sha256 != artifact_sha256(ARTIFACT_FILE_PAYLOAD)
-        {
+        let expected_import = if mode.import_authorized() {
+            ArtifactClientRootsImport::Imported(artifact_sha256(ARTIFACT_FILE_PAYLOAD))
+        } else {
+            ArtifactClientRootsImport::RefusedDisabled
+        };
+        if row.snapshot_requests != mode.expected_snapshots() || row.import != expected_import {
             return Err("client-roots row diverged from its declared posture".to_owned());
         }
-        let expected_export = if mode.export_authorized() {
-            ArtifactClientRootsExport::Published(row.import_sha256.clone())
+        let expected_export = if !mode.import_authorized() {
+            ArtifactClientRootsExport::RefusedDisabled
+        } else if mode.export_authorized() {
+            ArtifactClientRootsExport::Published(artifact_sha256(ARTIFACT_FILE_PAYLOAD))
         } else {
             ArtifactClientRootsExport::RefusedNotFound
         };
@@ -4919,32 +5049,56 @@ pub async fn run_artifact_malicious_metadata_default(
     execution.record_executed(AdversarialCaseId::Mal01)?;
 
     let bidi_name = format!("adversarial-\u{202e}-join\u{200d}-{}", unique_suffix());
-    let bidi_source = seed_distinct_import_source(run.policy, "mal02")?;
+    let allocation = allocate_stage_upload(
+        driver,
+        space,
+        ARTIFACT_FILE_PAYLOAD.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&artifact_sha256(ARTIFACT_FILE_PAYLOAD)),
+    )
+    .await?;
+    upload_stage_bytes(&allocation, ARTIFACT_FILE_PAYLOAD, ARTIFACT_FILE_MEDIA_TYPE).await?;
     execution.record_forbidden_log_needle(bidi_name.as_bytes())?;
-    let imported = driver
-        .call_tool(
-            "file_import",
-            file_import_arguments(
-                space,
-                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &bidi_source),
-                &bidi_name,
-                Some(ARTIFACT_FILE_MEDIA_TYPE),
-            ),
-        )
-        .await?;
-    let bidi_file_id = required_str(&imported, "/file_id")?;
-    run.ctx.register_file(&bidi_file_id);
-    let fetched = run
-        .ctx
-        .client
-        .files()
-        .get(space, &bidi_file_id)
-        .get()
-        .await
-        .map_err(|_| "read back adversarial file name".to_owned())?;
-    if fetched.name.as_deref() != Some(bidi_name.as_str()) {
-        return Err("MAL-02 name did not round-trip exactly".to_owned());
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let stage_before = stage_head_status(&allocation).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let files_before = artifact_file_ids(run.ctx).await?;
+    let staged_source = json!({"staged_handle": allocation.handle()});
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            staged_source.clone(),
+            &bidi_name,
+            Some(ARTIFACT_FILE_MEDIA_TYPE),
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[bidi_name.as_str(), allocation.handle()],
+    )
+    .await?;
+    adversarial_refusal(
+        driver,
+        "document_import_create",
+        json!({
+            "space": space,
+            "source": staged_source,
+            "source_format": "markdown",
+            "object_type": "page",
+            "name": bidi_name,
+            "idempotency_key": format!("mal02-document-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::Validation,
+        &[bidi_name.as_str(), allocation.handle()],
+    )
+    .await?;
+    if stage_head_status(&allocation).await? != stage_before
+        || artifact_object_ids(run.ctx).await? != objects_before
+        || artifact_file_ids(run.ctx).await? != files_before
+    {
+        return Err("MAL-02 consumed its stage or created an object".to_owned());
     }
+    release_stage_upload(driver, &allocation).await?;
     execution.record_executed(AdversarialCaseId::Mal02)?;
 
     let accepted_name = "n".repeat(255);
@@ -5354,32 +5508,56 @@ pub async fn run_artifact_adversarial_stdio_sentinels(
     execution.record_executed(AdversarialCaseId::Mal01)?;
 
     let bidi_name = format!("adversarial-\u{202e}-join\u{200d}-{}", unique_suffix());
-    let bidi_source = seed_distinct_import_source(run.policy, "stdio-mal02")?;
+    let allocation = allocate_stage_upload(
+        driver,
+        space,
+        ARTIFACT_FILE_PAYLOAD.len() as u64,
+        ARTIFACT_FILE_MEDIA_TYPE,
+        Some(&artifact_sha256(ARTIFACT_FILE_PAYLOAD)),
+    )
+    .await?;
+    upload_stage_bytes(&allocation, ARTIFACT_FILE_PAYLOAD, ARTIFACT_FILE_MEDIA_TYPE).await?;
     execution.record_forbidden_log_needle(bidi_name.as_bytes())?;
-    let imported = driver
-        .call_tool(
-            "file_import",
-            file_import_arguments(
-                space,
-                local_source(ArtifactPolicyFixture::IMPORT_ROOT, &bidi_source),
-                &bidi_name,
-                Some(ARTIFACT_FILE_MEDIA_TYPE),
-            ),
-        )
-        .await?;
-    let bidi_file_id = required_str(&imported, "/file_id")?;
-    run.ctx.register_file(&bidi_file_id);
-    let fetched = run
-        .ctx
-        .client
-        .files()
-        .get(space, &bidi_file_id)
-        .get()
-        .await
-        .map_err(|_| "read back stdio adversarial file name".to_owned())?;
-    if fetched.name.as_deref() != Some(bidi_name.as_str()) {
-        return Err("MAL-02 stdio name did not round-trip exactly".to_owned());
+    execution.record_forbidden_log_needle(allocation.handle().as_bytes())?;
+    let stage_before = stage_head_status(&allocation).await?;
+    let objects_before = artifact_object_ids(run.ctx).await?;
+    let files_before = artifact_file_ids(run.ctx).await?;
+    let staged_source = json!({"staged_handle": allocation.handle()});
+    adversarial_refusal(
+        driver,
+        "file_import",
+        file_import_arguments(
+            space,
+            staged_source.clone(),
+            &bidi_name,
+            Some(ARTIFACT_FILE_MEDIA_TYPE),
+        ),
+        ExpectedToolErrorKind::Validation,
+        &[bidi_name.as_str(), allocation.handle()],
+    )
+    .await?;
+    adversarial_refusal(
+        driver,
+        "document_import_create",
+        json!({
+            "space": space,
+            "source": staged_source,
+            "source_format": "markdown",
+            "object_type": "page",
+            "name": bidi_name,
+            "idempotency_key": format!("stdio-mal02-document-{}", unique_suffix()),
+        }),
+        ExpectedToolErrorKind::Validation,
+        &[bidi_name.as_str(), allocation.handle()],
+    )
+    .await?;
+    if stage_head_status(&allocation).await? != stage_before
+        || artifact_object_ids(run.ctx).await? != objects_before
+        || artifact_file_ids(run.ctx).await? != files_before
+    {
+        return Err("MAL-02 stdio consumed its stage or created an object".to_owned());
     }
+    release_stage_upload(driver, &allocation).await?;
     execution.record_executed(AdversarialCaseId::Mal02)?;
     finish_adversarial_quota(driver, quota_before, &mut execution).await?;
     execution.assert_exact(ADVERSARIAL_STDIO_SENTINEL_IDS)?;
@@ -7347,6 +7525,12 @@ impl ArtifactPolicyFixture {
         &self.import
     }
 
+    /// Physical parent directory containing both configured local roots.
+    #[must_use]
+    pub fn local_roots_parent(&self) -> &Path {
+        &self.base
+    }
+
     /// Physical directory backing the logical export root.
     #[must_use]
     pub fn export_root(&self) -> &Path {
@@ -7976,7 +8160,11 @@ pub async fn run_artifact_smoke_scenario(
     let export_root_count = required_u64(&status, "export_root_count")?;
     let staging_configured = status["staging_configured"] == Value::Bool(true);
     let staging_active = status["staging_active"] == Value::Bool(true);
-    if import_root_count != 1 || export_root_count != 1 {
+    if ArtifactLocalRootAuthorityEvidence::parse(&status["local_root_authority"])?
+        != ArtifactLocalRootAuthorityEvidence::Configured
+        || import_root_count != 1
+        || export_root_count != 1
+    {
         return Err("artifact status did not report the fixture roots".to_owned());
     }
     if staging_configured != fixture.policy.options().staging
@@ -8499,17 +8687,6 @@ impl ArtifactPolicyScenario {
         }
     }
 
-    /// Whether this configuration activates the local artifact root plane.
-    ///
-    /// Only a read-only server leaves the plane inactive. A compatibility
-    /// start activates it with zero declared roots, which is what
-    /// `artifact_status.local_roots_active` reports; use
-    /// [`Self::declares_local_roots`] for the presence of actual roots.
-    #[must_use]
-    pub const fn activates_local_roots(self) -> bool {
-        !self.policy_options().read_only
-    }
-
     /// Whether this configuration declares any local artifact root.
     ///
     /// An unselected file declares none, so every local operation is refused
@@ -8537,19 +8714,20 @@ impl ArtifactPolicyScenario {
     #[must_use]
     pub const fn expected_status(self) -> ArtifactStatusEvidence {
         let options = self.policy_options();
-        // A read-only server never activates the local plane, and staging is
-        // only activated on top of an activated plane, so both report
-        // inactive while a configured staging declaration stays visible. A
-        // compatibility start activates the plane with zero roots, so it
-        // reports an active plane and empty counts.
-        let plane_active = self.activates_local_roots();
+        // Read-only and rootless starts expose no local-root authority. Every
+        // direct-router policy with roots retains its complete configured
+        // authority; client narrowing is exercised by the stable stdio rows.
         let roots = if self.declares_local_roots() { 1 } else { 0 };
         ArtifactStatusEvidence {
-            local_roots_active: plane_active,
+            local_root_authority: if roots == 0 {
+                ArtifactLocalRootAuthorityEvidence::Unavailable
+            } else {
+                ArtifactLocalRootAuthorityEvidence::Configured
+            },
             import_root_count: roots,
             export_root_count: roots,
             staging_configured: options.selected && options.staging,
-            staging_active: options.selected && options.staging && plane_active,
+            staging_active: options.selected && options.staging && !options.read_only,
         }
     }
 }
@@ -8874,8 +9052,8 @@ pub const fn probe_expectation(
 /// Content-free `artifact_status` projection compared across transports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactStatusEvidence {
-    /// Whether local roots were activated.
-    pub local_roots_active: bool,
+    /// Closed path-free local-root authority category.
+    pub local_root_authority: ArtifactLocalRootAuthorityEvidence,
     /// Authorized import roots.
     pub import_root_count: u64,
     /// Authorized export roots.
@@ -8886,6 +9064,31 @@ pub struct ArtifactStatusEvidence {
     pub staging_active: bool,
 }
 
+/// Closed path-free local-root authority observed through `artifact_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactLocalRootAuthorityEvidence {
+    /// No local roots were activated.
+    Unavailable,
+    /// The complete configured root policy is effective.
+    Configured,
+    /// A valid client snapshot narrowed the configured root policy.
+    Narrowed,
+    /// Client-root resolution failed closed.
+    Disabled,
+}
+
+impl ArtifactLocalRootAuthorityEvidence {
+    fn parse(value: &Value) -> Result<Self, String> {
+        match value.as_str() {
+            Some("unavailable") => Ok(Self::Unavailable),
+            Some("configured") => Ok(Self::Configured),
+            Some("narrowed") => Ok(Self::Narrowed),
+            Some("disabled") => Ok(Self::Disabled),
+            _ => Err("artifact status omitted its closed local-root authority".to_owned()),
+        }
+    }
+}
+
 impl ArtifactStatusEvidence {
     /// Reads the projection from an `artifact_status` result.
     ///
@@ -8894,7 +9097,9 @@ impl ArtifactStatusEvidence {
     /// Returns a fixed message when a required status field is absent.
     pub fn from_status(status: &Value) -> Result<Self, String> {
         Ok(Self {
-            local_roots_active: status["local_roots_active"] == Value::Bool(true),
+            local_root_authority: ArtifactLocalRootAuthorityEvidence::parse(
+                &status["local_root_authority"],
+            )?,
             import_root_count: required_u64(status, "import_root_count")?,
             export_root_count: required_u64(status, "export_root_count")?,
             staging_configured: status["staging_configured"] == Value::Bool(true),
@@ -11825,15 +12030,11 @@ mod tests {
         // Built-in policy admits the space even though the unselected file
         // renders an allowlist, and no local plane is activated.
         assert!(scenario.admits_space_under_test());
-        // The root plane is activated for a read-write start even with no
-        // declared roots, so the compatibility status reports an active plane
-        // with empty counts.
-        assert!(scenario.activates_local_roots());
         assert!(!scenario.declares_local_roots());
         assert_eq!(
             scenario.expected_status(),
             ArtifactStatusEvidence {
-                local_roots_active: true,
+                local_root_authority: ArtifactLocalRootAuthorityEvidence::Unavailable,
                 import_root_count: 0,
                 export_root_count: 0,
                 staging_configured: false,
@@ -12084,7 +12285,7 @@ mod tests {
         assert_eq!(
             ArtifactPolicyScenario::ReadOnly.expected_status(),
             ArtifactStatusEvidence {
-                local_roots_active: false,
+                local_root_authority: ArtifactLocalRootAuthorityEvidence::Unavailable,
                 import_root_count: 0,
                 export_root_count: 0,
                 staging_configured: true,
@@ -12103,7 +12304,10 @@ mod tests {
                 continue;
             }
             let status = scenario.expected_status();
-            assert!(status.local_roots_active);
+            assert_eq!(
+                status.local_root_authority,
+                ArtifactLocalRootAuthorityEvidence::Configured
+            );
             assert_eq!(status.import_root_count, 1);
             assert_eq!(status.export_root_count, 1);
             assert_eq!(

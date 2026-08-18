@@ -7,14 +7,15 @@ use std::{
     io::{self, Write},
     path::Path,
     process::Stdio,
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use anytype::prelude::{AnytypeClient, GrpcCredentials, HttpCredentials, KeyStore};
-use tokio::{io::AsyncReadExt, process::Command, time::timeout};
+use tokio::{io::AsyncReadExt, process::Command, time::Instant};
 
-use crate::cli::AppContext;
+use crate::cli::{AppContext, deadline::WorkflowDeadline};
 
 const DEFAULT_ANYTYPE_CLI: &str = "anytype";
 const MAX_CREDENTIAL_OUTPUT_BYTES: u64 = 64 * 1024;
@@ -24,12 +25,32 @@ const MIN_CREDENTIAL_BYTES: usize = 20;
 const MAX_INVITE_LINK_BYTES: usize = 8 * 1024;
 const MAX_ACCOUNT_NAME_BYTES: usize = 256;
 const CLI_TIMEOUT: Duration = Duration::from_secs(30);
+const CHILD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const INIT_CLI_TIMEOUT: Duration = Duration::from_mins(2);
+const INIT_CLI_TIMEOUT_MAX: Duration = Duration::from_mins(10);
+
+#[cfg(windows)]
+const WINDOWS_CHILD_CREATION_FLAGS: u32 = windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+pub(super) fn workflow_deadline_from_env() -> Result<WorkflowDeadline> {
+    WorkflowDeadline::from_env(
+        "ANYR_INIT_CLI_TIMEOUT_SECS",
+        INIT_CLI_TIMEOUT,
+        INIT_CLI_TIMEOUT_MAX,
+        false,
+    )
+}
 
 /// Initializes the selected `anyr` keystore from a running Anytype CLI.
 ///
 /// The child process output is consumed only for credential extraction and is
 /// never forwarded to `anyr` output or included in errors.
-pub async fn handle(ctx: &AppContext, join: Option<&str>, save_env: Option<&Path>) -> Result<()> {
+pub(super) async fn handle(
+    ctx: &AppContext,
+    join: Option<&str>,
+    save_env: Option<&Path>,
+    deadline: WorkflowDeadline,
+) -> Result<()> {
     if let Some(invite) = join {
         validate_invite_link(invite)?;
     }
@@ -59,6 +80,7 @@ pub async fn handle(ctx: &AppContext, join: Option<&str>, save_env: Option<&Path
         executable,
         ctx.client.get_http_endpoint().to_owned(),
         grpc_endpoint,
+        deadline,
     );
     let environment_file = save_env.map(|path| EnvironmentFile {
         path,
@@ -77,11 +99,18 @@ pub async fn handle(ctx: &AppContext, join: Option<&str>, save_env: Option<&Path
     )
     .await?;
     ctx.client.set_api_key(http_credentials);
-    let status = verify_stored_credentials(&ctx.client).await?;
+    let status = deadline
+        .run(
+            "anyr init-cli workflow; mutation outcome is indeterminate",
+            verify_stored_credentials(&ctx.client),
+        )
+        .await??;
 
     if let Some(invite) = join {
         join_space(&process, invite).await?;
     }
+
+    deadline.ensure_remaining("anyr init-cli workflow; mutation outcome is indeterminate")?;
 
     ctx.output.emit_json(&serde_json::json!({
         "initialized": true,
@@ -216,7 +245,8 @@ async fn initialize_keystore(
                 ],
             )
             .await?;
-        let account_key = parse_account_key(&account_output)?;
+        let account_key = parse_account_key(&account_output)
+            .context("Anytype CLI account output was invalid; mutation outcome is indeterminate")?;
         GrpcCredentials::from_account_key(account_key)
     };
     let account_key = grpc_credentials
@@ -236,7 +266,8 @@ async fn initialize_keystore(
             ],
         )
         .await?;
-    let http_token = parse_http_token(&token_output)?;
+    let http_token = parse_http_token(&token_output)
+        .context("Anytype CLI HTTP token output was invalid; mutation outcome is indeterminate")?;
 
     let http_credentials = HttpCredentials::new(http_token.clone());
     store_credential_pair(keystore, &grpc_credentials, &http_credentials)?;
@@ -529,17 +560,26 @@ struct CliProcess {
     http_endpoint: String,
     grpc_endpoint: String,
     timeout: Duration,
+    cleanup_timeout: Duration,
+    workflow_deadline: WorkflowDeadline,
     #[cfg(all(test, unix))]
     script: Option<OsString>,
 }
 
 impl CliProcess {
-    fn new(executable: OsString, http_endpoint: String, grpc_endpoint: String) -> Self {
+    fn new(
+        executable: OsString,
+        http_endpoint: String,
+        grpc_endpoint: String,
+        workflow_deadline: WorkflowDeadline,
+    ) -> Self {
         Self {
             executable,
             http_endpoint,
             grpc_endpoint,
             timeout: CLI_TIMEOUT,
+            cleanup_timeout: CHILD_CLEANUP_TIMEOUT,
+            workflow_deadline,
             #[cfg(all(test, unix))]
             script: None,
         }
@@ -549,6 +589,12 @@ impl CliProcess {
     #[cfg(all(test, unix))]
     fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    #[cfg(all(test, unix))]
+    fn with_workflow_timeout(mut self, timeout: Duration) -> Self {
+        self.workflow_deadline = WorkflowDeadline::after(Some(timeout));
         self
     }
 
@@ -565,25 +611,46 @@ impl CliProcess {
             .env("ANYTYPE_URL", &self.http_endpoint)
             .env("ANYTYPE_GRPC_ENDPOINT", &self.grpc_endpoint)
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+
+            command
+                .as_std_mut()
+                .creation_flags(WINDOWS_CHILD_CREATION_FLAGS);
+        }
         command
     }
 
     async fn run_capture(&self, kind: CommandKind, args: &[&OsStr]) -> Result<Vec<u8>> {
+        self.workflow_deadline
+            .ensure_remaining("anyr init-cli workflow; mutation outcome is indeterminate")?;
+        let deadline = self.child_deadline()?;
         let mut command = self.command(args);
         command.stdout(Stdio::piped());
-        let mut child = command.spawn().with_context(|| {
+        let child = command.spawn().with_context(|| {
             format!(
                 "failed to start Anytype CLI for {} (set ANYTYPE_CLI_BIN to its executable)",
                 kind.description()
             )
         })?;
-        let stdout = child
-            .stdout
-            .take()
-            .context("failed to capture Anytype CLI output")?;
+        let mut child = OwnedChild::new(child, self.cleanup_timeout).await.context(
+            "failed to establish Anytype CLI process-tree ownership; mutation outcome is indeterminate",
+        )?;
+        let Some(stdout) = child.child.stdout.as_mut() else {
+            return Err(stop_child_after_failure(
+                child,
+                kind,
+                "failed to capture Anytype CLI output",
+                self.cleanup_timeout,
+            )
+            .await);
+        };
         let mut output = Vec::new();
-        let read = timeout(
-            self.timeout,
+        let read = tokio::time::timeout_at(
+            deadline,
             stdout
                 .take(MAX_CREDENTIAL_OUTPUT_BYTES + 1)
                 .read_to_end(&mut output),
@@ -592,29 +659,36 @@ impl CliProcess {
         let read = if let Ok(result) = read {
             result.context("failed to read Anytype CLI output")
         } else {
-            stop_child(&mut child).await;
-            bail!("Anytype CLI {} timed out", kind.description());
+            return Err(stop_child_after_failure(
+                child,
+                kind,
+                "timed out while collecting Anytype CLI output",
+                self.cleanup_timeout,
+            )
+            .await);
         };
         if let Err(err) = read {
-            stop_child(&mut child).await;
-            return Err(err).with_context(|| {
-                format!(
-                    "Anytype CLI {} failed while collecting output",
-                    kind.description()
-                )
-            });
+            return Err(stop_child_after_failure(
+                child,
+                kind,
+                &format!("failed while collecting Anytype CLI output: {err}"),
+                self.cleanup_timeout,
+            )
+            .await);
         }
         if output.len() as u64 > MAX_CREDENTIAL_OUTPUT_BYTES {
-            stop_child(&mut child).await;
-            bail!(
-                "Anytype CLI {} output exceeded the safety limit",
-                kind.description()
-            );
+            return Err(stop_child_after_failure(
+                child,
+                kind,
+                "Anytype CLI output exceeded the safety limit",
+                self.cleanup_timeout,
+            )
+            .await);
         }
-        let status = wait_for_child(&mut child, kind, self.timeout).await?;
+        let status = wait_for_child(child, kind, deadline, self.cleanup_timeout).await?;
         if !status.success() {
             bail!(
-                "Anytype CLI {} failed with status {}; child output was withheld",
+                "Anytype CLI {} failed with status {}; child output was withheld; mutation outcome is indeterminate",
                 kind.description(),
                 status
             );
@@ -623,47 +697,358 @@ impl CliProcess {
     }
 
     async fn run_status(&self, kind: CommandKind, args: &[&OsStr]) -> Result<()> {
+        self.workflow_deadline
+            .ensure_remaining("anyr init-cli workflow; mutation outcome is indeterminate")?;
+        let deadline = self.child_deadline()?;
         let mut command = self.command(args);
         command.stdout(Stdio::null());
-        let mut child = command.spawn().with_context(|| {
+        let child = command.spawn().with_context(|| {
             format!(
                 "failed to start Anytype CLI for {} (set ANYTYPE_CLI_BIN to its executable)",
                 kind.description()
             )
         })?;
-        let status = wait_for_child(&mut child, kind, self.timeout).await?;
+        let child = OwnedChild::new(child, self.cleanup_timeout).await.context(
+            "failed to establish Anytype CLI process-tree ownership; mutation outcome is indeterminate",
+        )?;
+        let status = wait_for_child(child, kind, deadline, self.cleanup_timeout).await?;
         if !status.success() {
             bail!(
-                "Anytype CLI {} failed with status {}; child output was withheld",
+                "Anytype CLI {} failed with status {}; child output was withheld; mutation outcome is indeterminate",
                 kind.description(),
                 status
             );
         }
         Ok(())
     }
+
+    fn child_deadline(&self) -> Result<Instant> {
+        let child_deadline = Instant::now()
+            .checked_add(self.timeout)
+            .context("Anytype CLI child deadline cannot be represented")?;
+        Ok(self
+            .workflow_deadline
+            .expires_at()
+            .map_or(child_deadline, |workflow| workflow.min(child_deadline)))
+    }
 }
 
-async fn wait_for_child(
-    child: &mut tokio::process::Child,
-    kind: CommandKind,
-    wait_timeout: Duration,
-) -> Result<std::process::ExitStatus> {
-    match timeout(wait_timeout, child.wait()).await {
-        Ok(Ok(status)) => Ok(status),
-        Ok(Err(_)) => {
-            stop_child(child).await;
-            bail!("failed waiting for Anytype CLI {}", kind.description());
+struct OwnedChild {
+    child: tokio::process::Child,
+    #[cfg(unix)]
+    process_group: libc::pid_t,
+    #[cfg(windows)]
+    job: OwnedJob,
+}
+
+impl OwnedChild {
+    #[cfg_attr(not(windows), allow(clippy::unused_async))]
+    async fn new(child: tokio::process::Child, cleanup_timeout: Duration) -> Result<Self> {
+        #[cfg(windows)]
+        let mut child = child;
+        #[cfg(not(windows))]
+        let child = child;
+        #[cfg(not(windows))]
+        let _ = cleanup_timeout;
+        #[cfg(unix)]
+        let process_group = child
+            .id()
+            .and_then(|id| libc::pid_t::try_from(id).ok())
+            .context("spawned Anytype CLI process has no valid process-group id")?;
+        #[cfg(windows)]
+        let job = match OwnedJob::assign(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                let cleanup = terminate_unowned_child(child, cleanup_timeout).await;
+                return match cleanup {
+                    Ok(()) => {
+                        Err(error).context("suspended child setup failed and was terminated")
+                    }
+                    Err(cleanup_error) => Err(error).context(format!(
+                        "suspended child setup failed; fixed-category cleanup failure: {cleanup_error}"
+                    )),
+                };
+            }
+        };
+        #[cfg(windows)]
+        if let Err(error) = job.resume(&child) {
+            let owned = Self { child, job };
+            let cleanup = stop_child(owned, cleanup_timeout).await;
+            return match cleanup {
+                Ok(()) => Err(error)
+                    .context("suspended child resume failed and its job was terminated and reaped"),
+                Err(cleanup_error) => Err(error).context(format!(
+                    "suspended child resume failed; fixed-category cleanup failure: {cleanup_error}"
+                )),
+            };
         }
-        Err(_) => {
-            stop_child(child).await;
-            bail!("Anytype CLI {} timed out", kind.description());
+        Ok(Self {
+            child,
+            #[cfg(unix)]
+            process_group,
+            #[cfg(windows)]
+            job,
+        })
+    }
+
+    fn signal_tree(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
+            if result != 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error).context("failed to signal child process group");
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            #[cfg(windows)]
+            return self.job.terminate();
+            #[cfg(not(windows))]
+            return self.child.start_kill().context("failed to signal child");
         }
     }
 }
 
-async fn stop_child(child: &mut tokio::process::Child) {
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+#[cfg(windows)]
+async fn terminate_unowned_child(
+    mut child: tokio::process::Child,
+    cleanup_timeout: Duration,
+) -> Result<()> {
+    child
+        .start_kill()
+        .context("failed to terminate suspended child leader")?;
+    match tokio::time::timeout(cleanup_timeout, child.wait()).await {
+        Ok(result) => {
+            result.context("failed to reap suspended child leader")?;
+            Ok(())
+        }
+        Err(_) => {
+            spawn_unowned_reaper(child)?;
+            bail!("suspended child cleanup exceeded its fixed bound; owned reaper continues")
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_unowned_reaper(mut child: tokio::process::Child) -> Result<()> {
+    thread::Builder::new()
+        .name("anyr-child-leader-reaper".to_string())
+        .spawn(move || {
+            let _ = child.start_kill();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(runtime) = runtime {
+                let _ = runtime.block_on(child.wait());
+            }
+        })
+        .context("failed to start durable child leader reaper thread")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+struct OwnedJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+unsafe impl Send for OwnedJob {}
+
+#[cfg(windows)]
+impl OwnedJob {
+    fn assign(child: &tokio::process::Child) -> Result<Self> {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error()).context("failed to create child job object");
+        }
+        let job = Self(handle);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                u32::try_from(std::mem::size_of_val(&limits))
+                    .context("job configuration size overflow")?,
+            )
+        };
+        if configured == 0 {
+            return Err(io::Error::last_os_error()).context("failed to configure child job object");
+        }
+        let process = child
+            .raw_handle()
+            .context("spawned Anytype CLI process has no process handle")?;
+        if unsafe { AssignProcessToJobObject(job.0, process.cast()) } == 0 {
+            return Err(io::Error::last_os_error())
+                .context("failed to assign Anytype CLI process to owned job object");
+        }
+        Ok(job)
+    }
+
+    fn resume(&self, child: &tokio::process::Child) -> Result<()> {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+            System::{
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                    Thread32Next,
+                },
+                Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+            },
+        };
+
+        let process_id = child
+            .id()
+            .context("suspended Anytype CLI process has no process id")?;
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error())
+                .context("failed to enumerate suspended child threads");
+        }
+        let mut entry = THREADENTRY32 {
+            dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>())
+                .context("thread-entry size overflow")?,
+            ..THREADENTRY32::default()
+        };
+        let mut found = false;
+        let mut next = unsafe { Thread32First(snapshot, &raw mut entry) };
+        while next != 0 {
+            if entry.th32OwnerProcessID == process_id {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() {
+                    unsafe { CloseHandle(snapshot) };
+                    return Err(io::Error::last_os_error())
+                        .context("failed to open suspended child thread");
+                }
+                let previous = unsafe { ResumeThread(thread) };
+                unsafe { CloseHandle(thread) };
+                if previous == u32::MAX {
+                    unsafe { CloseHandle(snapshot) };
+                    return Err(io::Error::last_os_error())
+                        .context("failed to resume suspended child thread");
+                }
+                found = true;
+            }
+            next = unsafe { Thread32Next(snapshot, &raw mut entry) };
+        }
+        unsafe { CloseHandle(snapshot) };
+        if !found {
+            bail!("suspended child thread was not found");
+        }
+        Ok(())
+    }
+
+    fn terminate(&self) -> Result<()> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        if unsafe { TerminateJobObject(self.0, 1) } == 0 {
+            return Err(io::Error::last_os_error()).context("failed to terminate child job object");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OwnedJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+async fn wait_for_child(
+    mut child: OwnedChild,
+    kind: CommandKind,
+    wait_deadline: Instant,
+    cleanup_timeout: Duration,
+) -> Result<std::process::ExitStatus> {
+    match tokio::time::timeout_at(wait_deadline, child.child.wait()).await {
+        Ok(Ok(status)) => {
+            child.signal_tree().with_context(|| {
+                format!(
+                    "Anytype CLI {} completed but process-tree cleanup failed; mutation outcome is indeterminate",
+                    kind.description()
+                )
+            })?;
+            Ok(status)
+        }
+        Ok(Err(error)) => Err(stop_child_after_failure(
+            child,
+            kind,
+            &format!("failed waiting for Anytype CLI child: {error}"),
+            cleanup_timeout,
+        )
+        .await),
+        Err(_) => Err(stop_child_after_failure(
+            child,
+            kind,
+            "timed out waiting for Anytype CLI child",
+            cleanup_timeout,
+        )
+        .await),
+    }
+}
+
+async fn stop_child_after_failure(
+    child: OwnedChild,
+    kind: CommandKind,
+    failure: &str,
+    cleanup_timeout: Duration,
+) -> anyhow::Error {
+    match stop_child(child, cleanup_timeout).await {
+        Ok(()) => anyhow::anyhow!(
+            "Anytype CLI {} {failure}; mutation outcome is indeterminate",
+            kind.description()
+        ),
+        Err(cleanup_error) => anyhow::anyhow!(
+            "Anytype CLI {} {failure}; mutation outcome is indeterminate; child termination or reaping failed: {cleanup_error}",
+            kind.description()
+        ),
+    }
+}
+
+async fn stop_child(mut child: OwnedChild, cleanup_timeout: Duration) -> Result<()> {
+    if cleanup_timeout.is_zero() {
+        spawn_owned_reaper(child)?;
+        bail!("child cleanup exceeded 0 seconds");
+    }
+    child.signal_tree()?;
+    if let Ok(result) = tokio::time::timeout(cleanup_timeout, child.child.wait()).await {
+        result.context("failed to reap child")?;
+        Ok(())
+    } else {
+        spawn_owned_reaper(child)?;
+        bail!(
+            "child cleanup exceeded {} seconds; owned reaper continues",
+            cleanup_timeout.as_secs_f64()
+        )
+    }
+}
+
+fn spawn_owned_reaper(mut child: OwnedChild) -> Result<()> {
+    thread::Builder::new()
+        .name("anyr-child-reaper".to_string())
+        .spawn(move || {
+            let _ = child.signal_tree();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(runtime) = runtime {
+                let _ = runtime.block_on(child.child.wait());
+            }
+        })
+        .context("failed to start durable child reaper thread")?;
+    Ok(())
 }
 
 fn parse_account_key(output: &[u8]) -> Result<String> {
@@ -1195,6 +1580,131 @@ esac
         assert_eq!(marker, "ran");
         assert!(!error.contains(HTTP_TOKEN));
         assert!(error.contains("HTTP token creation"));
+        assert!(error.contains("mutation outcome is indeterminate"));
+    }
+
+    #[test]
+    fn portable_sleep_child_helper() {
+        if std::env::var_os("ANYR_TEST_SLEEP_CHILD").is_some() {
+            std::thread::sleep(Duration::from_mins(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn portable_child_teardown_is_bounded_and_reaped() {
+        let executable = std::env::current_exe().expect("current test executable");
+        let mut command = Command::new(&executable);
+        command
+            .args([
+                "--exact",
+                "cli::init_cli::tests::portable_sleep_child_helper",
+                "--nocapture",
+            ])
+            .env("ANYR_TEST_SLEEP_CHILD", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = OwnedChild::new(
+            command.spawn().expect("spawn portable child"),
+            CHILD_CLEANUP_TIMEOUT,
+        )
+        .await
+        .expect("own portable child tree");
+
+        stop_child(child, CHILD_CLEANUP_TIMEOUT)
+            .await
+            .expect("terminate and reap portable child");
+    }
+
+    #[tokio::test]
+    async fn child_teardown_timeout_is_reported_without_process_details() {
+        let executable = std::env::current_exe().expect("current test executable");
+        let mut command = Command::new(&executable);
+        command
+            .args([
+                "--exact",
+                "cli::init_cli::tests::portable_sleep_child_helper",
+                "--nocapture",
+            ])
+            .env("ANYR_TEST_SLEEP_CHILD", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = OwnedChild::new(
+            command.spawn().expect("spawn portable child"),
+            CHILD_CLEANUP_TIMEOUT,
+        )
+        .await
+        .expect("own portable child tree");
+
+        let error = stop_child_after_failure(
+            child,
+            CommandKind::CreateAccount,
+            "failed to read child output",
+            Duration::ZERO,
+        )
+        .await
+        .to_string();
+        assert!(error.contains("cleanup exceeded"));
+        assert!(error.contains("mutation outcome is indeterminate"));
+        assert!(error.contains("termination or reaping failed"));
+        assert!(!error.contains(executable.to_string_lossy().as_ref()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_reaper_survives_immediate_outer_runtime_drop() {
+        let runtime = tokio::runtime::Runtime::new().expect("outer runtime");
+        let pid = runtime.block_on(async {
+            let executable = std::env::current_exe().expect("current test executable");
+            let mut command = Command::new(&executable);
+            command
+                .args([
+                    "--exact",
+                    "cli::init_cli::tests::portable_sleep_child_helper",
+                    "--nocapture",
+                ])
+                .env("ANYR_TEST_SLEEP_CHILD", "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .process_group(0);
+            let child = command.spawn().expect("spawn portable child");
+            let pid = child.id().expect("child pid");
+            let child = OwnedChild::new(child, CHILD_CLEANUP_TIMEOUT)
+                .await
+                .expect("own portable child group");
+            stop_child(child, Duration::ZERO)
+                .await
+                .expect_err("zero cleanup transfers to durable reaper");
+            pid
+        });
+        drop(runtime);
+
+        let pid = libc::pid_t::try_from(pid).expect("pid fits platform type");
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("durable reaper did not reap the child after runtime shutdown");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_children_are_created_suspended_before_job_setup() {
+        assert_ne!(
+            WINDOWS_CHILD_CREATION_FLAGS & windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
+            0
+        );
     }
 
     #[cfg(unix)]
@@ -1253,12 +1763,36 @@ esac
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn outer_workflow_timeout_terminates_and_reaps_child() {
+        let temp = TestDir::new();
+        let executable = temp.path().join("outer-timeout-anytype");
+        let pid_file = temp.path().join("outer-timeout.pid");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 60\n",
+            pid_file.display()
+        );
+        write_executable(&executable, &script);
+        let process = test_process(&executable)
+            .with_timeout(Duration::from_secs(2))
+            .with_workflow_timeout(Duration::from_millis(50));
+
+        let failure = process
+            .run_capture(CommandKind::CreateAccount, &[OsStr::new("auth")])
+            .await
+            .expect_err("outer workflow must time out");
+        let error = format!("{failure:#}");
+        assert!(error.contains("mutation outcome is indeterminate"));
+        assert_process_reaped(&pid_file);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn child_that_closes_stdout_then_hangs_is_terminated_and_reaped() {
         let temp = TestDir::new();
         let executable = temp.path().join("closed-stdout-anytype");
         let pid_file = temp.path().join("closed-stdout.pid");
         let script = format!(
-            "#!/bin/sh\nexec 1>&-\nprintf '%s' \"$$\" > '{}'\nexec sleep 60\n",
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec 1>&-\nexec sleep 60\n",
             pid_file.display()
         );
         write_executable(&executable, &script);
@@ -1271,6 +1805,30 @@ esac
         let error = format!("{failure:#}");
         assert!(error.contains("timed out"), "unexpected error: {error}");
         assert_process_reaped(&pid_file);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn descendant_holding_stdout_is_terminated_with_owned_process_group() {
+        let temp = TestDir::new();
+        let executable = temp.path().join("descendant-stdout-anytype");
+        let parent_pid = temp.path().join("parent.pid");
+        let descendant_pid = temp.path().join("descendant.pid");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nsleep 60 &\nprintf '%s' \"$!\" > '{}'\nwait\n",
+            parent_pid.display(),
+            descendant_pid.display()
+        );
+        write_executable(&executable, &script);
+        let process = test_process(&executable).with_timeout(Duration::from_millis(100));
+
+        let failure = process
+            .run_capture(CommandKind::CreateAccount, &[OsStr::new("auth")])
+            .await
+            .expect_err("descendant-held stdout must reach child deadline");
+        assert!(format!("{failure:#}").contains("mutation outcome is indeterminate"));
+        assert_process_reaped(&parent_pid);
+        assert_process_reaped_eventually(&descendant_pid);
     }
 
     #[cfg(unix)]
@@ -1598,6 +2156,7 @@ esac
             OsString::from("/bin/sh"),
             http_endpoint.to_owned(),
             grpc_endpoint.to_owned(),
+            WorkflowDeadline::after(Some(Duration::from_mins(10))),
         );
         process.script = Some(executable.as_os_str().to_owned());
         process
@@ -1615,19 +2174,34 @@ esac
         fs::set_permissions(path, permissions).expect("make fake executable");
     }
 
-    #[cfg(all(unix, target_os = "linux"))]
+    #[cfg(unix)]
     fn assert_process_reaped(pid_file: &Path) {
         let pid = fs::read_to_string(pid_file).expect("read child pid");
-        assert!(
-            !Path::new("/proc").join(pid).exists(),
+        let pid = pid.parse::<libc::pid_t>().expect("numeric child pid");
+        let result = unsafe { libc::kill(pid, 0) };
+        let error = io::Error::last_os_error();
+        assert_eq!(result, -1, "child process still exists");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(libc::ESRCH),
             "child process was not reaped"
         );
     }
 
-    #[cfg(all(unix, not(target_os = "linux")))]
-    fn assert_process_reaped(_pid_file: &Path) {
-        // `Child::kill` followed by `Child::wait` is the portable Unix reaping
-        // contract; Linux additionally proves PID disappearance through procfs.
+    #[cfg(unix)]
+    fn assert_process_reaped_eventually(pid_file: &Path) {
+        let pid = fs::read_to_string(pid_file)
+            .expect("read descendant pid")
+            .parse::<libc::pid_t>()
+            .expect("numeric descendant pid");
+        for _ in 0..50 {
+            let result = unsafe { libc::kill(pid, 0) };
+            if result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("descendant process was not reaped");
     }
 
     struct TestDir {

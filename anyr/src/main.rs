@@ -39,6 +39,11 @@ fn main() {
 
     #[cfg(feature = "mcp")]
     if let cli::Commands::Mcp(args) = &cli.command {
+        if let Err(err) = cli::validate_output_flags(&cli) {
+            let code = error::exit_code(&err);
+            eprintln!("{}", error::render(&err));
+            std::process::exit(code);
+        }
         let status = cli::run_mcp(args, cli.keystore.clone());
         if status != std::process::ExitCode::SUCCESS {
             std::process::exit(1);

@@ -8,6 +8,39 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Add a non-default, fail-closed benchmark harness core with pinned artifact
+  admission, isolated-arm and credential-descriptor checks, bounded child
+  protocol ownership, layered secret scanning, independent oracle contracts,
+  and closed failure-inclusive statistics. Live catalog, model, scenario, and
+  paired execution remain blocked and the harness cannot publish comparison
+  numbers.
+- Bound Streamable HTTP before authentication with a 128-connection ceiling,
+  five-second and finite-size header parsing, and continuous task reaping. One
+  ingress anchor, concurrency lease, and absolute deadline now cover bounded
+  body collection, exact ordinary-versus-artifact routing, nested Anytype
+  calls, and approved supervisors. Predispatch expiry returns HTTP 408;
+  post-dispatch expiry retains structured mutation-indeterminate guidance. A
+  separate post-drain deadline covers settlement and staging cleanup together
+  on every transport exit.
+- Make `artifact_status` report the session's effective local-root authority as
+  `unavailable`, `configured`, `narrowed`, or `disabled`, with path-free
+  effective root counts. Status and artifact operations now share one
+  cancellation-independent, first-deadline decision that cannot widen on a
+  retry or concurrent caller.
+- Treat `object_create`'s POST response as a validated creation receipt and the
+  bounded independent GET as the authoritative semantic result. A transient
+  response body can converge without a second POST, while a divergent final
+  state remains mutation-indeterminate.
+- Reject Unicode `Bidi_Control` characters in `file_import` and
+  `document_import_create` names before mutation dispatch, using validation
+  diagnostics that do not repeat the rejected name or code point. ZWNJ, ZWJ,
+  ordinary right-to-left text, and non-normalized spelling remain accepted.
+- Keep ignored live-test instructions tied to executable targets and scenario
+  roles without hard-coded suite totals that drift as coverage grows.
+- Document the cross-platform CA trust requirements for private-authority JWKS
+  fetches.
+- Correct artifact staging documentation to include the shipped `429`
+  rate-limit and `416` unsatisfiable-range responses.
 - Run the portable cross-platform contracts and disposable headless live gate
   on pushes to `main` and nightly while retaining manually selected portable,
   live, clean-server, and combined tiers.
@@ -284,6 +317,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Reconcile full stable-session admission against rmcp and reclaim only
+  bindings conclusively reported absent. Live sessions and failed probes retain
+  their slots, so capacity remains fail-closed without evicting active clients.
+- Compile the Unix reviewed-log window limit independently of the optional
+  acceptance harness, keeping the feature-minimal headless stdio test target
+  valid.
 - Make the portable suites deterministic on macOS and Windows: loopback HTTP
   fixtures explicitly restore blocking mode on accepted sockets, Windows test
   roots and selected configuration files receive current-user-only ACLs, and

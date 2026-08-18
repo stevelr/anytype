@@ -3,7 +3,7 @@
 Current status document for test coverage of the `anytype` crate's public
 network-facing surface. Originated as the fixed-scope audit for any-gc5
 (parent any-q1n, review gate any-jzn) dated 2026-07-21; now maintained as a
-living inventory. Status as of 2026-08-15, reconciled from jj change
+living inventory. Status as of 2026-08-18, reconciled from jj change
 `kmnyrwzy` / Git commit `4d76af1e` through the current `main` history, the
 crate and any-mcp CHANGELOG `[Unreleased]` sections, and tracker closures in
 the same interval.
@@ -59,15 +59,15 @@ Coverage classes:
   validation, mutation state machines, deadlines, decoder limits, and
   payload-free counters. `src/attached_discussions.rs` (19) covers discovery,
   ensure, reconciliation, and closed error kinds.
-- **Resource modules (unit):** `src/files.rs` (20), `src/properties.rs` (20),
+- **Resource modules (unit):** `src/files.rs` (21), `src/properties.rs` (20),
   `src/types.rs` (19), `src/spaces.rs` (26), `src/views.rs` (20),
   `src/objects.rs` (9), and `src/members.rs` (5) cover serialization,
   validation, bounded scans, transfer limits, archive counts, collection
   membership, and view paths.
 - **Cross-cutting modules (unit):** `src/auth.rs` (9), `src/verify.rs` (11),
   `src/paged.rs` (12), `src/cache.rs` (3), `src/keystore.rs` (6),
-  `src/error.rs` (3), `src/validation.rs` (4), `src/client.rs` (5),
-  `src/chat_stream.rs` (1), `src/process_watcher.rs` (4), `src/search.rs` (4),
+  `src/error.rs` (3), `src/validation.rs` (4), `src/client.rs` (15),
+  `src/chat_stream.rs` (20), `src/process_watcher.rs` (7), `src/search.rs` (4),
   and `src/filters.rs` (5) cover authentication, verification, pagination,
   cache and keystore behavior, error handling, port discovery, streaming,
   process correlation, search, and filter serialization.
@@ -81,19 +81,20 @@ Coverage classes:
 
 ### Auth and client lifecycle (REST unless noted)
 
-| Surface                                                | Evidence                                                                                                                                                | Status                   |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
-| REST: `create_auth_challenge`                          | Unit: exact wire and API errors                                                                                                                         | covered                  |
-| REST: `create_api_key`                                 | Unit: exact wire and API errors                                                                                                                         | covered                  |
-| REST: `authenticate_interactive`                       | Unit: fast, forced, callback, API, and persistence paths                                                                                                | covered                  |
-| Helper: `auth_status` / `logout`                       | Unit: exact memory and keystore transitions                                                                                                             | covered                  |
-| Mixed: `ping_http` / `ping_grpc`                       | Unit: typed authentication failures<br>Live: every disposable readiness preflight                                                                       | covered                  |
-| gRPC: `grpc_client`                                    | Unit: credential selection, cached/concurrent initialization, typed missing-credential and connection failures<br>Live: indirect through all gRPC tests | covered                  |
-| Helper: `find_grpc`                                    | Unit: lsof absence/failure, process/LISTEN/duplicate filtering, failed probes, first responsive candidate<br>Process: supported-Unix owned listener     | covered                  |
-| REST: `http_metrics`                                   | Live: indirect assertions in `test_cache` and `smoke_test`                                                                                              | partial; `any-upsa` (P3) |
-| REST: HTTP pipeline                                    | Unit: 56 deadline, retry, limit, redirect, diagnostic, and metric tests<br>Live: `test_retry_helpers` (5)                                               | covered                  |
-| Helper: cache enable/disable/clear                     | Unit: `cache.rs` (3)<br>Live: `test_cache` (28)                                                                                                         | covered                  |
-| Helper: keystore save/load/update and modifier parsing | Unit: `keystore.rs` (6)<br>Live: env-only disposable credential setup                                                                                   | covered                  |
+| Surface                                                | Evidence                                                                                                                                                                                                          | Status                   |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| REST: `create_auth_challenge`                          | Unit: exact wire and API errors                                                                                                                                                                                   | covered                  |
+| REST: `create_api_key`                                 | Unit: exact wire and API errors                                                                                                                                                                                   | covered                  |
+| REST: `authenticate_interactive`                       | Unit: fast, forced, callback, API, and persistence paths                                                                                                                                                          | covered                  |
+| Helper: `auth_status` / `logout`                       | Unit: exact memory and keystore transitions                                                                                                                                                                       | covered                  |
+| Mixed: `ping_http` / `ping_grpc`                       | Unit: typed authentication failures<br>Live: every disposable readiness preflight                                                                                                                                 | covered                  |
+| gRPC: `grpc_client`                                    | Unit: credential selection, cached/concurrent initialization, typed missing-credential and connection failures<br>Live: indirect through all gRPC tests                                                           | covered                  |
+| Helper: `find_grpc`                                    | Unit: lsof absence/failure, process/LISTEN/duplicate filtering, two-second connect-plus-RPC probe budget, failed probes, first responsive candidate<br>Process: supported-Unix owned listener                     | covered                  |
+| REST: `http_metrics`                                   | Live: indirect assertions in `test_cache` and `smoke_test`                                                                                                                                                        | partial; `any-upsa` (P3) |
+| REST: HTTP pipeline                                    | Unit: 56 deadline, retry, limit, redirect, diagnostic, and metric tests<br>Live: `test_retry_helpers` (5)                                                                                                         | covered                  |
+| gRPC: policy and generated-client deadline pipeline    | Unit: 32 targeted `anytype-rpc` policy, propagation, readiness, body, stream-progress, discarded-source status classification, and redaction cases (41 tests in the full crate); 15 client lifecycle/config cases | covered                  |
+| Helper: cache enable/disable/clear                     | Unit: `cache.rs` (3)<br>Live: `test_cache` (28)                                                                                                                                                                   | covered                  |
+| Helper: keystore save/load/update and modifier parsing | Unit: `keystore.rs` (6)<br>Live: env-only disposable credential setup                                                                                                                                             | covered                  |
 
 ### Spaces
 
@@ -188,29 +189,30 @@ Coverage classes:
 
 ### Chats
 
-| Surface                                                 | Evidence                                                                                         | Status                                                  |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
-| REST: chat and message CRUD/search/reactions/read state | Unit: route and wire shapes<br>Live: disposable discovery and CRUD; cross-crate restore fidelity | covered                                                 |
-| REST: MCP chat prerequisites                            | Unit: timestamp, history-page, and edit transport cases<br>Live: disposable prerequisite suite   | covered                                                 |
-| REST: SSE `message_stream(..).open`                     | Unit: bounds and robustness<br>Live: initial-message receipt                                     | covered                                                 |
-| gRPC: message CRUD/read operations                      | Unit: block and rich-state conversion<br>Live: `test_chat_message_crud`                          | covered                                                 |
-| gRPC: `send_text` / `toggle_reaction` / `read_all`      | Live: single paths in `test_chats` and `test_chat_discovery`                                     | partial; `any-ih7t` (P3)                                |
-| gRPC: `edit_text`                                       | Live: direct edit with independent REST text/style/mark readback                                 | covered                                                 |
-| gRPC: search/get/resolve chat                           | Unit: resolver cases<br>Live: disposable discovery                                               | covered                                                 |
-| Mixed: global and in-space chat list                    | Unit: resolver and REST wire shapes<br>Live: direct global and scoped assertions                 | covered                                                 |
-| gRPC: default `space_chat`                              | Live: fresh-space `NotFound` semantics and backup fixture                                        | covered                                                 |
-| gRPC: `chat_stream` / `subscribe_chat`                  | Unit: subscription-ID routing<br>Live: receive and shutdown                                      | partial; reconnect chain `any-k6o5.4`–`any-k6o5.6` (P4) |
-| gRPC: `unsubscribe_chat` / `shutdown`                   | Live: selective routing, quiet window, and bounded shutdown                                      | covered                                                 |
+| Surface                                                 | Evidence                                                                                                                                                                                                                                       | Status                                                                   |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| REST: chat and message CRUD/search/reactions/read state | Unit: route and wire shapes<br>Live: disposable discovery and CRUD; cross-crate restore fidelity                                                                                                                                               | covered                                                                  |
+| REST: MCP chat prerequisites                            | Unit: timestamp, history-page, and edit transport cases<br>Live: disposable prerequisite suite                                                                                                                                                 | covered                                                                  |
+| REST: SSE `message_stream(..).open`                     | Unit: bounds and robustness<br>Live: initial-message receipt                                                                                                                                                                                   | covered                                                                  |
+| gRPC: message CRUD/read operations                      | Unit: block and rich-state conversion<br>Live: `test_chat_message_crud`                                                                                                                                                                        | covered                                                                  |
+| gRPC: `send_text` / `toggle_reaction`                   | Unit: validation and typed transport failure<br>Live: direct builders with independent REST text and reaction readback                                                                                                                         | covered                                                                  |
+| gRPC: account-global `read_all`                         | Unit: validation and generated-wire/source audit<br>Live: requires an isolated disposable account and complete before/after inventory                                                                                                          | blocked; the shared-server tier cannot safely supply global evidence     |
+| gRPC: `edit_text`                                       | Live: direct edit with independent REST text/style/mark readback                                                                                                                                                                               | covered                                                                  |
+| gRPC: search/get/resolve chat                           | Unit: resolver cases<br>Live: disposable discovery                                                                                                                                                                                             | covered                                                                  |
+| Mixed: global and in-space chat list                    | Unit: resolver and REST wire shapes<br>Live: direct global and scoped assertions                                                                                                                                                               | covered                                                                  |
+| gRPC: default `space_chat`                              | Live: fresh-space `NotFound` semantics and backup fixture                                                                                                                                                                                      | covered                                                                  |
+| gRPC: `chat_stream` / `subscribe_chat`                  | Unit: 20 routing, absolute lifetime, initial acquisition, two-delivery backoff reset, pending-event backpressure, queued-event/boundary ordering, queue saturation, watermark replay, and control-boundary cases<br>Live: receive and shutdown | partial; external fault injection remains `any-k6o5.4`–`any-k6o5.6` (P4) |
+| gRPC: `unsubscribe_chat` / `shutdown`                   | Live: selective routing, quiet window, and bounded shutdown                                                                                                                                                                                    | covered                                                                  |
 
 ### Cross-cutting helpers
 
-| Surface                                             | Evidence                                                                                                   | Status                                                                         |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Helpers: all `resolve_*` operations                 | Unit: 33 bounded scan, ambiguity, deduplication, and fast-path cases<br>Live: type and template resolution | covered                                                                        |
-| Helpers: `verify_semantic` / `ensure_available`     | Unit: 11 cap, backoff, classification, and drop-safety cases                                               | covered                                                                        |
-| Helpers: `PagedResult::collect_all` / `into_stream` | Unit: 12 cases<br>Live: `test_pagination` (4)                                                              | covered                                                                        |
-| gRPC: `ProcessWatcher` subscribe/wait/unsubscribe   | Unit: reducer and space correlation (4)<br>Live: Markdown import and single-subscription fallback          | covered; connection faults tracked by `any-vvue` (P2), blocked by `any-k6o5.6` |
-| Harness: disposable-space lifecycle                 | Unit: lease, ledger, sweep, readiness, and credential suites<br>Live: every fixture-heavy target           | covered                                                                        |
+| Surface                                             | Evidence                                                                                                                                                  | Status                                                                          |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Helpers: all `resolve_*` operations                 | Unit: 33 bounded scan, ambiguity, deduplication, and fast-path cases<br>Live: type and template resolution                                                | covered                                                                         |
+| Helpers: `verify_semantic` / `ensure_available`     | Unit: 11 cap, backoff, classification, and drop-safety cases                                                                                              | covered                                                                         |
+| Helpers: `PagedResult::collect_all` / `into_stream` | Unit: 12 cases<br>Live: `test_pagination` (4)                                                                                                             | covered                                                                         |
+| gRPC: `ProcessWatcher` subscribe/wait/unsubscribe   | Unit: reducer and space correlation, setup classification, and hostile diagnostic redaction (7)<br>Live: Markdown import and single-subscription fallback | covered; real connection faults remain `any-vvue` (P2), blocked by `any-k6o5.6` |
+| Harness: disposable-space lifecycle                 | Unit: lease, ledger, sweep, readiness, and credential suites<br>Live: every fixture-heavy target                                                          | covered                                                                         |
 
 ## Supplemental any-mcp transport coverage
 
@@ -268,7 +270,7 @@ matrices, repaired CLI output contracts, backup-before-delete archive
 selection, exact ignored-test dispositions, and protected serial live gates
 for anytype-api, any-mcp, and anyr.
 
-The anytype-api manifest now owns 20 required cases, three scheduled
+The anytype-api manifest now owns 21 required cases, three scheduled
 characterization cases, and two explicitly excluded probes. Seven superseded
 filter ignores were removed. The former ambient Set/view probes now create
 cleanup-owned source-backed Sets and collections. These cross-crate gates are
@@ -324,7 +326,7 @@ review.
 | P2       | `any-vvue`                | Real-server `ProcessWatcher` reconnect and fault coverage, blocked by the P4 `any-k6o5.4`–`any-k6o5.6` design/review/harness chain. |
 | P2       | `any-ucd.4`               | Literal all-target and clippy evidence on all five supported platform rows.                                                         |
 | P3       | `any-upsa`                | Direct assertions on the public HTTP metrics snapshot.                                                                              |
-| P3       | `any-ih7t`                | Direct `send_text`, `toggle_reaction`, and `read_all` coverage.                                                                     |
+| P2       | `any-ih7t`                | Isolated-account coverage for the account-global `read_all` mutation.                                                               |
 | P3       | `any-vjj`                 | Direct `delete_all_archived` live coverage.                                                                                         |
 | P3       | `any-gz2k`                | Real-server negative tag-filter pagination.                                                                                         |
 | P4       | `any-k6o5.4`–`any-k6o5.6` | Reviewed external fault injection and chat-stream reconnect coverage.                                                               |

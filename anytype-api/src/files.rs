@@ -16,10 +16,11 @@ use anytype_rpc::{
         file::{discard_preload, download, upload},
         object::search_with_meta,
     },
+    deadline::{GrpcCallOptions, GrpcTimeoutClass, GrpcTimeoutOutcome, with_grpc_call_options},
     model,
 };
 use bytes::Bytes;
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, Utc};
 use prost_types::{ListValue, Struct, Value};
 use reqwest::{
     Method, StatusCode,
@@ -40,7 +41,7 @@ use crate::{
     client::AnytypeClient,
     error::AnytypeError,
     filters::{Filter, Sort, SortDirection},
-    grpc_util::{ensure_error_ok, grpc_status, with_token_request},
+    grpc_util::{ensure_error_ok, grpc_status, grpc_status_for, with_token_request},
     paged::{PagedResult, PaginatedResponse, PaginationMeta},
 };
 
@@ -1542,13 +1543,20 @@ impl FileDownloadRequest<'_> {
             error!("download rpc error: {err}");
             err
         })?;
+        let request = with_grpc_call_options(request, GrpcCallOptions::long_read());
+        let started = std::time::Instant::now();
 
         let response = commands
             .file_download(request)
             .await
             .map_err(|err| {
-                error!("download error grpc_status {err:?}");
-                grpc_status(err)
+                error!(code = %err.code(), "download gRPC request failed");
+                grpc_status_for(
+                    err,
+                    GrpcTimeoutClass::LongUnary,
+                    GrpcTimeoutOutcome::ReadAborted,
+                    started.elapsed(),
+                )
             })?
             .into_inner();
 
@@ -1857,10 +1865,19 @@ impl FileDiscardPreloadRequest<'_> {
             space_id: self.space_id,
         };
         let request = with_token_request(Request::new(request), grpc.token())?;
+        let request = with_grpc_call_options(request, GrpcCallOptions::cleanup());
+        let started = std::time::Instant::now();
         let response = commands
             .file_discard_preload(request)
             .await
-            .map_err(grpc_status)?
+            .map_err(|status| {
+                grpc_status_for(
+                    status,
+                    GrpcTimeoutClass::Cleanup,
+                    GrpcTimeoutOutcome::MutationIndeterminate,
+                    started.elapsed(),
+                )
+            })?
             .into_inner();
         ensure_error_ok(response.error.as_ref(), "file discard preload")?;
         Ok(())
@@ -2259,10 +2276,25 @@ async fn upload_file(
         created_in_context_ref: created_in_context_ref.unwrap_or_default(),
     };
     let request = with_token_request(Request::new(request), grpc.token())?;
+    let request = with_grpc_call_options(
+        request,
+        GrpcCallOptions::new(
+            GrpcTimeoutClass::LongUnary,
+            GrpcTimeoutOutcome::MutationIndeterminate,
+        ),
+    );
+    let started = std::time::Instant::now();
     let response = commands
         .file_upload(request)
         .await
-        .map_err(grpc_status)?
+        .map_err(|status| {
+            grpc_status_for(
+                status,
+                GrpcTimeoutClass::LongUnary,
+                GrpcTimeoutOutcome::MutationIndeterminate,
+                started.elapsed(),
+            )
+        })?
         .into_inner();
     ensure_error_ok(response.error.as_ref(), "file upload")?;
     let details = response.details.unwrap_or_default();
@@ -2485,8 +2517,7 @@ fn file_from_details(space_id: &str, object_id: &str, details: &Struct) -> FileO
     #[allow(clippy::cast_possible_truncation)]
     let size = number_field(details, "sizeInBytes").map(|val| val as i64);
     let mime = string_field(details, "fileMimeType");
-    let added_at = string_field(details, "addedDate")
-        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok());
+    let added_at = added_date(details);
     let target_object_id = string_field(details, "targetObjectId");
     let file_type = mime.as_deref().map(file_type_from_mime).unwrap_or_default();
 
@@ -2502,6 +2533,20 @@ fn file_from_details(space_id: &str, object_id: &str, details: &Struct) -> FileO
         target_object_id,
         details: struct_to_json(details),
     }
+}
+
+fn added_date(details: &Struct) -> Option<DateTime<FixedOffset>> {
+    if let Some(value) = number_field(details, "addedDate") {
+        if !value.is_finite() || value.fract() != 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let seconds = value as i64;
+        return DateTime::<Utc>::from_timestamp(seconds, 0)
+            .map(|timestamp| timestamp.fixed_offset());
+    }
+
+    string_field(details, "addedDate").and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
 }
 
 fn file_type_from_mime(mime: &str) -> FileType {
@@ -2676,7 +2721,7 @@ mod tests {
     };
 
     use super::{
-        ExactLengthReader, FileSource, FileStyle, FileType, FileUploadResponse,
+        ExactLengthReader, FileSource, FileStyle, FileType, FileUploadResponse, file_from_details,
         file_from_http_upload, multipart_body_bytes, upload_uses_rest,
     };
     use crate::{
@@ -2685,6 +2730,74 @@ mod tests {
     };
 
     static NEXT_MOCK_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn detail_value(kind: prost_types::value::Kind) -> prost_types::Value {
+        prost_types::Value { kind: Some(kind) }
+    }
+
+    #[test]
+    fn grpc_file_details_parse_numeric_added_date() {
+        let details = prost_types::Struct {
+            fields: std::collections::BTreeMap::from([(
+                "addedDate".to_owned(),
+                detail_value(prost_types::value::Kind::NumberValue(1_708_689_792.0)),
+            )]),
+        };
+
+        let file = file_from_details("space-id", "file-id", &details);
+        assert_eq!(
+            file.added_at.map(|timestamp| timestamp.timestamp()),
+            Some(1_708_689_792)
+        );
+    }
+
+    #[test]
+    fn grpc_file_details_reject_invalid_numeric_added_dates() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.5, f64::MAX] {
+            let details = prost_types::Struct {
+                fields: std::collections::BTreeMap::from([(
+                    "addedDate".to_owned(),
+                    detail_value(prost_types::value::Kind::NumberValue(value)),
+                )]),
+            };
+
+            assert!(
+                file_from_details("space-id", "file-id", &details)
+                    .added_at
+                    .is_none(),
+                "invalid timestamp {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn grpc_file_target_object_id_is_not_created_in_context() {
+        let context_only = prost_types::Struct {
+            fields: std::collections::BTreeMap::from([(
+                "createdInContext".to_owned(),
+                detail_value(prost_types::value::Kind::StringValue(
+                    "containing-object".to_owned(),
+                )),
+            )]),
+        };
+        assert_eq!(
+            file_from_details("space-id", "file-id", &context_only).target_object_id,
+            None
+        );
+
+        let target = prost_types::Struct {
+            fields: std::collections::BTreeMap::from([(
+                "targetObjectId".to_owned(),
+                detail_value(prost_types::value::Kind::StringValue(
+                    "file-block-target".to_owned(),
+                )),
+            )]),
+        };
+        assert_eq!(
+            file_from_details("space-id", "file-id", &target).target_object_id,
+            Some("file-block-target".to_owned())
+        );
+    }
 
     struct PauseAfterFirstRead {
         bytes: &'static [u8],

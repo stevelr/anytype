@@ -443,7 +443,9 @@ impl ChatMessageAddHandlers {
                     attempt: attempt.clone(),
                     normalized,
                 };
-                tokio::spawn(supervise_chat_add(supervision));
+                runtime.spawn_invocation_controller("chat_add", move || {
+                    supervise_chat_add(supervision)
+                });
                 wait_for_attempt_until(attempt, cancellation, deadline).await
             }
         }
@@ -574,9 +576,10 @@ async fn supervise_chat_add(supervision: ChatAddSupervision) {
     };
     let task_progress = progress.clone();
     let task_candidates = candidates.clone();
-    let task = tokio::spawn(async move {
+    let task_runtime = runtime.clone();
+    let task = runtime.spawn_invocation_supervisor(async move {
         execute_chat_add(
-            &runtime,
+            &task_runtime,
             &contract,
             normalized,
             &CancellationToken::new(),
@@ -642,7 +645,7 @@ async fn execute_chat_add(
             if let Some(reply_id) = input.reply_to_message_id.as_ref() {
                 request = request.reply_to(reply_id.as_str());
             }
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             let assigned = match request.send().await {
                 Ok(assigned) => assigned,
                 Err(error) if mutation_rejection_is_definitive(&error) => {
@@ -1291,7 +1294,7 @@ mod tests {
             let contract = chat_message_add_tool().unwrap();
             let progress = MutationProgress::new();
             if dispatched {
-                progress.mark_dispatched();
+                progress.mark_dispatched_for_test();
             }
             let started = Instant::now();
             let result = execute_mutation_handler_until(

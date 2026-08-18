@@ -194,6 +194,164 @@ async fn direct_grpc_chat_listing_space_chat_and_edit_text_read_back() {
 }
 
 #[tokio::test]
+#[ignore = "requires configured real server and disposable test admission"]
+#[serial_test::serial(disposable_anytype_api)]
+async fn direct_grpc_send_text_and_toggle_reaction_have_independent_readback() {
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let callback_flag = callback_ran.clone();
+    let outcome = Box::pin(with_disposable_space_context(
+        "grpc-chat-direct-mutations",
+        move |ctx| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                let chat_name = format!("grpc-chat-direct-mutations-{}", unique_suffix());
+                let chat = retry_definitive_rate_limit("direct gRPC chat setup", || async {
+                    ctx.client
+                        .chats()
+                        .in_space(&ctx.space_id)
+                        .create(
+                            &chat_name,
+                            Icon::Emoji {
+                                emoji: "🧪".to_owned(),
+                            },
+                        )
+                        .create()
+                        .await
+                })
+                .await?;
+                ctx.register_object(&chat.id);
+
+                let expected_text = format!("direct gRPC text {}", unique_suffix());
+                let message_id = bounded_api(
+                    "direct gRPC send_text",
+                    ctx.client
+                        .chats()
+                        .send_text(&chat.id, &expected_text)
+                        .send(),
+                )
+                .await?;
+                ctx.register_chat_message(&chat.id, &message_id)?;
+
+                let chats = ctx.client.chats().in_space(&ctx.space_id);
+                let text_deadline = Instant::now() + LIVE_OPERATION_TIMEOUT;
+                loop {
+                    let message = bounded_api(
+                        "independent REST send_text read",
+                        chats.get_message(&chat.id, &message_id).get(),
+                    )
+                    .await?;
+                    if message.content.text == expected_text {
+                        break;
+                    }
+                    if Instant::now() >= text_deadline {
+                        return Err(TestError::Assertion {
+                            message: "direct gRPC send_text did not converge through the independent REST read within the fixed deadline"
+                                .to_owned(),
+                        });
+                    }
+                    sleep(Duration::from_millis(250)).await;
+                }
+
+                let primary = "👍";
+                let unrelated = "🎯";
+                assert!(
+                    bounded_api(
+                        "direct gRPC primary reaction add",
+                        ctx.client
+                            .chats()
+                            .toggle_reaction(&chat.id, &message_id, primary)
+                            .send(),
+                    )
+                    .await?
+                );
+                assert!(
+                    bounded_api(
+                        "direct gRPC unrelated reaction add",
+                        ctx.client
+                            .chats()
+                            .toggle_reaction(&chat.id, &message_id, unrelated)
+                            .send(),
+                    )
+                    .await?
+                );
+
+                let add_deadline = Instant::now() + LIVE_OPERATION_TIMEOUT;
+                loop {
+                    let message = bounded_api(
+                        "independent REST reaction-add read",
+                        chats.get_message(&chat.id, &message_id).get(),
+                    )
+                    .await?;
+                    let primary_present = message
+                        .reactions
+                        .iter()
+                        .any(|reaction| reaction.emoji == primary);
+                    let unrelated_present = message
+                        .reactions
+                        .iter()
+                        .any(|reaction| reaction.emoji == unrelated);
+                    if primary_present && unrelated_present {
+                        break;
+                    }
+                    if Instant::now() >= add_deadline {
+                        return Err(TestError::Assertion {
+                            message: "direct gRPC reaction additions did not converge through the independent REST read within the fixed deadline"
+                                .to_owned(),
+                        });
+                    }
+                    sleep(Duration::from_millis(250)).await;
+                }
+
+                assert!(
+                    !bounded_api(
+                        "direct gRPC primary reaction remove",
+                        ctx.client
+                            .chats()
+                            .toggle_reaction(&chat.id, &message_id, primary)
+                            .send(),
+                    )
+                    .await?
+                );
+                let remove_deadline = Instant::now() + LIVE_OPERATION_TIMEOUT;
+                loop {
+                    let message = bounded_api(
+                        "independent REST reaction-remove read",
+                        chats.get_message(&chat.id, &message_id).get(),
+                    )
+                    .await?;
+                    let primary_present = message
+                        .reactions
+                        .iter()
+                        .any(|reaction| reaction.emoji == primary);
+                    let unrelated_present = message
+                        .reactions
+                        .iter()
+                        .any(|reaction| reaction.emoji == unrelated);
+                    if !primary_present && unrelated_present {
+                        break;
+                    }
+                    if Instant::now() >= remove_deadline {
+                        return Err(TestError::Assertion {
+                            message: "direct gRPC reaction removal did not preserve the unrelated reaction through the independent REST read within the fixed deadline"
+                                .to_owned(),
+                        });
+                    }
+                    sleep(Duration::from_millis(250)).await;
+                }
+                Ok(())
+            })
+        },
+    ))
+    .await
+    .expect("cleanup-safe direct gRPC chat mutation live harness");
+    assert_disposable_completed(
+        outcome,
+        &callback_ran,
+        "direct gRPC chat mutation live suite",
+    );
+}
+
+#[tokio::test]
 async fn test_chat_message_crud() -> TestResult<()> {
     with_test_context(|ctx| async move {
         let chat_name = format!("chat-crud-{}", unique_suffix());

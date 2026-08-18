@@ -272,7 +272,7 @@ pub async fn object_edit(
     let input = input.clone();
     let progress = MutationProgress::new();
     let operation_progress = progress.clone();
-    execute_mutation_handler(
+    let operation = execute_mutation_handler(
         runtime,
         contract,
         OperationContext::new("object_edit"),
@@ -313,7 +313,7 @@ pub async fn object_edit(
                 .update_object(space_id.as_str(), object_id.as_str())
                 .body(write_body)
                 .no_verify();
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             let patch_anomaly = match request.update().await {
                 Ok(returned) => {
                     !edited_state_matches(&returned, &space_id, &object_id, &expected_hash)
@@ -358,8 +358,15 @@ pub async fn object_edit(
                 body_sha256: execution.body_sha256,
             })
         },
-    )
-    .await
+    );
+    let routed = runtime
+        .run_routed_invocation("object_edit", cancellation, Box::pin(operation))
+        .await;
+    match routed {
+        Ok(result) => result,
+        Err(failure) if failure.dispatched => tool_error(&ToolError::mutation_indeterminate()),
+        Err(_) => tool_error(&ToolError::upstream()),
+    }
 }
 
 fn validate_fragment(value: &str) -> Result<(), EditInputError> {

@@ -580,6 +580,7 @@ mod tests {
             snippet: Some("secret snippet".to_owned()),
             space_id: "space-1".to_owned(),
             r#type: Some(Type {
+                object: DataModel::Type,
                 archived: false,
                 icon: None,
                 id: "type-id".to_owned(),
@@ -678,6 +679,7 @@ mod tests {
     #[test]
     fn all_property_variants_have_closed_bounded_wire_forms() {
         let tag = Tag {
+            object: DataModel::Tag,
             id: "tag-1".to_owned(),
             name: "Urgent".to_owned(),
             key: "urgent".to_owned(),

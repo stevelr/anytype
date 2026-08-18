@@ -297,16 +297,28 @@ impl ObjectCreateHandlers {
         };
         let Some(key) = normalized.idempotency_key.clone() else {
             let progress = MutationProgress::new();
-            return execute_create(
-                &self.runtime,
-                &self.contract,
-                normalized,
-                cancellation,
-                &progress,
-                &self.verify_config,
-            )
-            .await
-            .result;
+            let execution = self
+                .runtime
+                .run_routed_invocation(
+                    "object_create",
+                    cancellation,
+                    Box::pin(execute_create(
+                        &self.runtime,
+                        &self.contract,
+                        normalized,
+                        cancellation,
+                        &progress,
+                        &self.verify_config,
+                    )),
+                )
+                .await;
+            return match execution {
+                Ok(execution) => execution.result,
+                Err(failure) if failure.dispatched => {
+                    tool_error(&ToolError::mutation_indeterminate())
+                }
+                Err(_) => tool_error(&ToolError::upstream()),
+            };
         };
 
         let fingerprint = normalized.fingerprint();
@@ -323,18 +335,19 @@ impl ObjectCreateHandlers {
                 let store = self.idempotency.clone();
                 let task_attempt = attempt.clone();
                 let verify_config = self.verify_config.clone();
-                tokio::spawn(async move {
-                    supervise_create(
-                        runtime,
-                        contract,
-                        store,
-                        key,
-                        task_attempt,
-                        normalized,
-                        verify_config,
-                    )
-                    .await;
-                });
+                self.runtime
+                    .spawn_invocation_controller("object_create", move || async move {
+                        supervise_create(
+                            runtime,
+                            contract,
+                            store,
+                            key,
+                            task_attempt,
+                            normalized,
+                            verify_config,
+                        )
+                        .await;
+                    });
                 wait_for_attempt(attempt, cancellation).await
             }
         }
@@ -353,15 +366,16 @@ async fn supervise_create(
     let progress = attempt.progress();
     let supervisor_cancellation = CancellationToken::new();
     let execution_progress = progress.clone();
-    let execution_task = tokio::spawn(async move {
-        execute_create(
-            &runtime,
+    let execution_runtime = runtime.clone();
+    let execution_task = runtime.spawn_invocation_supervisor(async move {
+        Box::pin(execute_create(
+            &execution_runtime,
             &contract,
             input,
             &supervisor_cancellation,
             &execution_progress,
             &verify_config,
-        )
+        ))
         .await
     });
     let execution = finish_supervised_execution(execution_task, &progress).await;
@@ -534,7 +548,7 @@ async fn execute_create(
 
             // This is immediately before the first poll of the one and only
             // non-idempotent POST future.
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             let created = match request.create().await {
                 Ok(created) => created,
                 Err(error) => {
@@ -549,10 +563,6 @@ async fn execute_create(
                 .map_err(|_| indeterminate_operation())?;
             let object_id =
                 ObjectId::new(created.id.clone()).map_err(|_| indeterminate_operation())?;
-            let created_matches = verify_object_semantics(
-                &created, &object_id, &space_id, &type_id, &type_key, &input,
-            )
-            .map_err(|_| indeterminate_operation())?;
             let verified = verify_semantic(
                 &verify_config,
                 "object",
@@ -567,9 +577,6 @@ async fn execute_create(
             )
             .await
             .map_err(|_| indeterminate_operation())?;
-            if !created_matches {
-                return Err(indeterminate_operation());
-            }
             let object = object_summary(&verified).map_err(|_| indeterminate_operation())?;
             Ok::<_, HandlerOperationError>(ObjectCreateOutput { object })
         },
@@ -1435,6 +1442,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plain_body_uses_independent_read_when_create_response_is_not_canonical_yet() {
+        let requested = "alpha stable body";
+        let canonical = "alpha stable body   \n";
+        let replies = vec![
+            FixtureReply::json(type_value()),
+            FixtureReply::json(object_value(OBJECT_ID, requested, "Q3")),
+            FixtureReply::json(object_value(OBJECT_ID, canonical, "Q3")),
+        ];
+        let (base_url, server) = fixture(replies).await;
+        let handlers = ObjectCreateHandlers::with_verify_config(
+            runtime(base_url, Duration::from_secs(2)),
+            test_verify_config(),
+        )
+        .unwrap();
+
+        let result = handlers
+            .object_create(
+                MutationAccess::Allowed,
+                input_with_body(None, requested),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(result.is_error, Some(false));
+        let requests = server.await.expect("plain create response fixture");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(request_body(&requests[1])["body"], requested);
+        assert!(requests[2].starts_with(&format!(
+            "GET /v1/spaces/{SPACE_ID}/objects/{OBJECT_ID} HTTP/1.1\r\n"
+        )));
+    }
+
+    #[tokio::test]
     async fn underscore_plain_body_replay_uses_one_unescaped_wire_form() {
         let raw = "alpha unique_0";
         let canonical = "alpha unique\\_0   \n";
@@ -1527,7 +1567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_response_and_final_get_must_both_match_normalized_semantics() {
+    async fn independent_final_get_is_authoritative_over_transient_create_representation() {
         let replies = vec![
             FixtureReply::json(type_value()),
             FixtureReply::json(object_value(OBJECT_ID, "# changed", "Q3")),
@@ -1547,7 +1587,7 @@ mod tests {
             )
             .await;
 
-        assert_eq!(result_code(&result), "conflict");
+        assert_eq!(result.is_error, Some(false));
         let requests = server.await.expect("response/final semantic fixture");
         assert_eq!(requests.len(), 3);
         assert_eq!(
@@ -2169,7 +2209,7 @@ mod tests {
         let waiter = tokio::spawn(async move {
             wait_for_attempt(waiter_attempt, &CancellationToken::new()).await
         });
-        attempt.progress().mark_dispatched();
+        attempt.progress().mark_dispatched_for_test();
         let panic_task: tokio::task::JoinHandle<CreateExecution> =
             tokio::spawn(async { panic!("injected create panic") });
         let execution = finish_supervised_execution(panic_task, &attempt.progress()).await;

@@ -5,7 +5,13 @@ use chrono::{DateTime, FixedOffset, Utc};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
+use std::{
+    fmt::Write as _,
+    fs::File,
+    io::{self, Read, Seek},
+    path::{Path, PathBuf},
+};
 
 pub const MANIFEST_NAME: &str = "manifest.json";
 pub const MANIFEST_SIDECAR_SUFFIX: &str = ".manifest.json";
@@ -44,6 +50,10 @@ pub struct Manifest {
     pub until_display: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -438,7 +448,10 @@ pub fn read_manifest_from_sidecar(archive_path: &Path) -> (Option<Manifest>, Opt
         }
     };
     match serde_json::from_slice::<Manifest>(&bytes) {
-        Ok(manifest) => (Some(manifest), None),
+        Ok(manifest) => match validate_archive_binding(archive_path, &manifest) {
+            Ok(()) => (Some(manifest), None),
+            Err(error) => (None, Some(error)),
+        },
         Err(err) => (
             None,
             Some(format!(
@@ -446,6 +459,57 @@ pub fn read_manifest_from_sidecar(archive_path: &Path) -> (Option<Manifest>, Opt
                 sidecar.display()
             )),
         ),
+    }
+}
+
+pub fn archive_binding(path: &Path) -> io::Result<(u64, String)> {
+    let mut file = File::open(path)?;
+    archive_binding_from_file(&mut file)
+}
+
+pub fn archive_binding_from_file(file: &mut File) -> io::Result<(u64, String)> {
+    file.rewind()?;
+    let mut size = 0_u64;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let read = u64::try_from(read).map_err(|_| io::Error::other("archive size overflow"))?;
+        size = size
+            .checked_add(read)
+            .ok_or_else(|| io::Error::other("archive size overflow"))?;
+        let read = usize::try_from(read).map_err(|_| io::Error::other("archive size overflow"))?;
+        digest.update(&buffer[..read]);
+    }
+    let mut encoded = String::with_capacity(64);
+    for byte in digest.finalize() {
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|_| io::Error::other("archive digest encoding failed"))?;
+    }
+    file.rewind()?;
+    Ok((size, encoded))
+}
+
+fn validate_archive_binding(
+    archive_path: &Path,
+    manifest: &Manifest,
+) -> std::result::Result<(), String> {
+    match (&manifest.archive_size, &manifest.archive_sha256) {
+        (None, None) => Ok(()),
+        (Some(expected_size), Some(expected_digest)) => {
+            let (actual_size, actual_digest) = archive_binding(archive_path)
+                .map_err(|_| "sidecar archive binding could not be verified".to_string())?;
+            if actual_size != *expected_size || actual_digest != *expected_digest {
+                return Err(
+                    "sidecar archive binding does not match the selected archive".to_string(),
+                );
+            }
+            Ok(())
+        }
+        _ => Err("sidecar archive binding is incomplete".to_string()),
     }
 }
 
@@ -639,6 +703,8 @@ mod tests {
             until: None,
             until_display: None,
             type_ids: None,
+            archive_size: None,
+            archive_sha256: None,
         };
         fs::write(&sidecar, serde_json::to_vec(&manifest).unwrap()).unwrap();
 

@@ -6,7 +6,11 @@
 //! Subscribe to process events, wait for a specific process kind to complete,
 //! and collect progress details.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    fmt,
+    time::{Duration, Instant},
+};
 
 use anytype_rpc::{
     anytype::{
@@ -16,7 +20,9 @@ use anytype_rpc::{
         rpc::process::{subscribe as process_subscribe, unsubscribe as process_unsubscribe},
     },
     client::AnytypeGrpcClient,
+    deadline::{GrpcCallOptions, with_grpc_call_options},
 };
+use futures::FutureExt as _;
 use tokio::sync::mpsc;
 use tonic::Request;
 use tracing::debug;
@@ -72,7 +78,7 @@ pub enum ProcessCompletionFallback {
 }
 
 /// Process matching policy used by [`ProcessWatcher::wait_for_process`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[allow(clippy::struct_field_names)]
 pub struct ProcessWatchRequest {
     pub kind: ProcessKind,
@@ -81,6 +87,20 @@ pub struct ProcessWatchRequest {
     pub completion_fallback: ProcessCompletionFallback,
     pub cancel_message: String,
     pub log_progress: bool,
+}
+
+impl fmt::Debug for ProcessWatchRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessWatchRequest")
+            .field("kind", &self.kind)
+            .field("space_id", &"redacted")
+            .field("allow_empty_space_id", &self.allow_empty_space_id)
+            .field("completion_fallback", &self.completion_fallback)
+            .field("cancel_message", &"redacted")
+            .field("log_progress", &self.log_progress)
+            .finish()
+    }
 }
 
 impl ProcessWatchRequest {
@@ -129,7 +149,7 @@ pub enum ProcessWatchCancelToken {
 }
 
 /// Summary of process events observed by [`ProcessWatcher`].
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ProcessWatchProgress {
     pub processes_started: usize,
     pub processes_done: usize,
@@ -144,13 +164,83 @@ pub struct ProcessWatchProgress {
     pub last_process_error: Option<String>,
 }
 
+impl fmt::Debug for ProcessWatchProgress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessWatchProgress")
+            .field("processes_started", &self.processes_started)
+            .field("processes_done", &self.processes_done)
+            .field("process_updates", &self.process_updates)
+            .field("import_finish_events", &self.import_finish_events)
+            .field("import_finish_objects", &self.import_finish_objects)
+            .field(
+                "last_process_id",
+                &self.last_process_id.as_ref().map(|_| "redacted"),
+            )
+            .field("last_process_state", &self.last_process_state)
+            .field("last_progress_done", &self.last_progress_done)
+            .field("last_progress_total", &self.last_progress_total)
+            .field(
+                "last_progress_message",
+                &self.last_progress_message.as_ref().map(|_| "redacted"),
+            )
+            .field(
+                "last_process_error",
+                &self.last_process_error.as_ref().map(|_| "redacted"),
+            )
+            .finish()
+    }
+}
+
+/// Opaque dispatch barrier for one process-producing request.
+///
+/// Create this immediately before dispatch with
+/// [`ProcessWatcher::begin_generation`], then pass it to
+/// [`ProcessWatcher::wait_for_generation`]. Events already queued at the
+/// barrier cannot complete the new request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessWatchGeneration(u64);
+
+/// Server-issued correlation for one dispatched process generation.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProcessWatchCorrelation {
+    generation: ProcessWatchGeneration,
+    root_collection_id: String,
+}
+
+impl fmt::Debug for ProcessWatchCorrelation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessWatchCorrelation")
+            .field("generation", &self.generation)
+            .field("root_collection_id", &"redacted")
+            .finish()
+    }
+}
+
 /// Watches process lifecycle events over gRPC session events.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ProcessWatcher {
     stream: Option<tonic::Streaming<Event>>,
     process_id: Option<String>,
     progress: ProcessWatchProgress,
     timeouts: ProcessWatcherTimeouts,
+    generation: u64,
+    used_correlations: HashSet<String>,
+}
+
+impl fmt::Debug for ProcessWatcher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessWatcher")
+            .field("stream_active", &self.stream.is_some())
+            .field("process_id", &self.process_id.as_ref().map(|_| "redacted"))
+            .field("progress", &self.progress)
+            .field("timeouts", &self.timeouts)
+            .field("generation", &self.generation)
+            .field("used_correlation_count", &self.used_correlations.len())
+            .finish()
+    }
 }
 
 impl ProcessWatcher {
@@ -178,6 +268,68 @@ impl ProcessWatcher {
         })
     }
 
+    /// Drain events already queued on the subscription and establish a new
+    /// dispatch generation. Call this immediately before the request that
+    /// starts the process being watched.
+    pub fn begin_generation(&mut self) -> Result<ProcessWatchGeneration> {
+        loop {
+            let stream = self.stream.as_mut().ok_or_else(|| AnytypeError::Other {
+                message: "session event stream is not active".to_string(),
+            })?;
+            match stream.message().now_or_never() {
+                None => break,
+                Some(Ok(Some(_))) => {}
+                Some(Ok(None)) => {
+                    return Err(AnytypeError::Other {
+                        message: "session event stream ended while establishing dispatch barrier"
+                            .to_string(),
+                    });
+                }
+                Some(Err(error)) => return Err(grpc_status(error)),
+            }
+        }
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| AnytypeError::Other {
+                message: "process watch generation limit exceeded".to_string(),
+            })?;
+        self.process_id = None;
+        Ok(ProcessWatchGeneration(self.generation))
+    }
+
+    /// Bind a generation to the non-empty server correlation returned by the
+    /// dispatch RPC. Reuse is rejected so an event from an earlier batch
+    /// cannot complete a later batch.
+    pub fn correlate_generation(
+        &mut self,
+        generation: ProcessWatchGeneration,
+        root_collection_id: &str,
+    ) -> Result<ProcessWatchCorrelation> {
+        if generation.0 != self.generation {
+            return Err(AnytypeError::Other {
+                message: "stale process watch generation".to_string(),
+            });
+        }
+        if root_collection_id.is_empty() {
+            return Err(AnytypeError::Other {
+                message: "dispatch response omitted process correlation".to_string(),
+            });
+        }
+        if !self
+            .used_correlations
+            .insert(root_collection_id.to_string())
+        {
+            return Err(AnytypeError::Other {
+                message: "dispatch response reused process correlation".to_string(),
+            });
+        }
+        Ok(ProcessWatchCorrelation {
+            generation,
+            root_collection_id: root_collection_id.to_string(),
+        })
+    }
+
     /// Wait for a matching process to complete.
     pub async fn wait_for_process(
         &mut self,
@@ -185,7 +337,54 @@ impl ProcessWatcher {
         request: &ProcessWatchRequest,
         cancel_rx: Option<&mut mpsc::UnboundedReceiver<ProcessWatchCancelToken>>,
     ) -> Result<()> {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| AnytypeError::Other {
+                message: "process watch generation limit exceeded".to_string(),
+            })?;
         self.process_id = None;
+        self.wait(
+            grpc,
+            request,
+            ProcessWatchGeneration(self.generation),
+            None,
+            cancel_rx,
+        )
+        .await
+    }
+
+    /// Wait for a process started after `generation` was established.
+    pub async fn wait_for_generation(
+        &mut self,
+        _grpc: &AnytypeGrpcClient,
+        request: &ProcessWatchRequest,
+        correlation: ProcessWatchCorrelation,
+        cancel_rx: Option<&mut mpsc::UnboundedReceiver<ProcessWatchCancelToken>>,
+    ) -> Result<()> {
+        self.wait(
+            _grpc,
+            request,
+            correlation.generation,
+            Some(correlation.root_collection_id.as_str()),
+            cancel_rx,
+        )
+        .await
+    }
+
+    async fn wait(
+        &mut self,
+        _grpc: &AnytypeGrpcClient,
+        request: &ProcessWatchRequest,
+        generation: ProcessWatchGeneration,
+        root_collection_id: Option<&str>,
+        cancel_rx: Option<&mut mpsc::UnboundedReceiver<ProcessWatchCancelToken>>,
+    ) -> Result<()> {
+        if generation.0 != self.generation {
+            return Err(AnytypeError::Other {
+                message: "stale process watch generation".to_string(),
+            });
+        }
         let import_finish_at_start = self.progress.import_finish_events;
         let started_at = Instant::now();
         let start_deadline = started_at + self.timeouts.process_start_timeout;
@@ -239,17 +438,27 @@ impl ProcessWatcher {
             )
             .await?;
             let Some(event) = next else {
-                self.reconnect_stream(grpc).await?;
-                continue;
+                return Err(AnytypeError::Other {
+                    message:
+                        "session event stream disconnected during the active dispatch generation"
+                            .to_string(),
+                });
             };
-            let (completed, observed) = self.process_event(&event, request)?;
+            let correlated_completion = root_collection_id
+                .is_some_and(|expected| event_completes_correlation(&event, request, expected));
+            let (completed, observed) =
+                self.process_event_for_generation(&event, request, generation)?;
             if observed {
                 last_update = Instant::now();
             }
-            if completed {
+            if root_collection_id.is_some() && correlated_completion {
                 return Ok(());
             }
-            if self.process_id.is_none()
+            if root_collection_id.is_none() && completed {
+                return Ok(());
+            }
+            if root_collection_id.is_none()
+                && self.process_id.is_none()
                 && request.kind == ProcessKind::Import
                 && request.completion_fallback == ProcessCompletionFallback::ImportFinishEvent
                 && self.progress.import_finish_events > import_finish_at_start
@@ -265,6 +474,7 @@ impl ProcessWatcher {
         let mut request =
             with_token_request(Request::new(process_unsubscribe::Request {}), grpc.token())?;
         request.set_timeout(self.timeouts.event_stream_connect_timeout);
+        let request = with_grpc_call_options(request, GrpcCallOptions::cleanup());
         let response = commands
             .process_unsubscribe(request)
             .await
@@ -285,17 +495,36 @@ impl ProcessWatcher {
         self.progress
     }
 
-    async fn reconnect_stream(&mut self, grpc: &AnytypeGrpcClient) -> Result<()> {
-        let stream = open_session_events(grpc, self.timeouts.event_stream_connect_timeout).await?;
-        self.stream = Some(stream);
-        Ok(())
-    }
-
     fn process_event(
         &mut self,
         event: &Event,
         request: &ProcessWatchRequest,
     ) -> Result<(bool, bool)> {
+        let mut started_id = self.process_id.as_deref();
+        for message in &event.messages {
+            let Some(EventValue::ProcessNew(new)) = &message.value else {
+                continue;
+            };
+            let Some(process) = new.process.as_ref() else {
+                continue;
+            };
+            if matches_process_kind(process, request.kind)
+                && space_matches(
+                    process.space_id.as_str(),
+                    request.space_id.as_str(),
+                    request.allow_empty_space_id,
+                )
+            {
+                if started_id.is_some_and(|id| id != process.id) {
+                    return Err(AnytypeError::Other {
+                        message:
+                            "multiple matching processes started during one dispatch generation"
+                                .to_string(),
+                    });
+                }
+                started_id = Some(process.id.as_str());
+            }
+        }
         let mut observed = false;
         for message in &event.messages {
             if let Some(EventValue::ImportFinish(finish)) = &message.value {
@@ -350,14 +579,14 @@ impl ProcessWatcher {
                 continue;
             }
             observed = true;
-            self.progress.last_process_id = Some(process.id.clone());
-            self.progress.last_process_state = State::try_from(process.state)
-                .ok()
-                .map(|state| state.as_str_name().to_string());
+            self.progress.last_process_id = Some("redacted".to_string());
+            let process_state = State::try_from(process.state).ok();
+            self.progress.last_process_state =
+                process_state.map(|state| state.as_str_name().to_string());
             self.progress.last_process_error = if process.error.is_empty() {
                 None
             } else {
-                Some(process.error.clone())
+                Some("reported".to_string())
             };
             if let Some(progress) = &process.progress {
                 self.progress.last_progress_done = Some(progress.done);
@@ -365,12 +594,14 @@ impl ProcessWatcher {
                 self.progress.last_progress_message = if progress.message.is_empty() {
                     None
                 } else {
-                    Some(progress.message.clone())
+                    Some("reported".to_string())
                 };
                 if request.log_progress {
                     debug!(
-                        "process event progress: process={} done={} total={} message={}",
-                        process.id, progress.done, progress.total, progress.message
+                        class = "process_progress",
+                        done = progress.done,
+                        total = progress.total,
+                        "process event progress observed"
                     );
                 }
             }
@@ -381,9 +612,9 @@ impl ProcessWatcher {
                 }
                 "processDone" => {
                     self.progress.processes_done = self.progress.processes_done.saturating_add(1);
-                    if !process.error.is_empty() {
+                    if !process.error.is_empty() || process_state != Some(State::Done) {
                         return Err(AnytypeError::Other {
-                            message: format!("process {} failed: {}", process.id, process.error),
+                            message: terminal_failure_category(process_state).to_string(),
                         });
                     }
                     return Ok((true, true));
@@ -392,12 +623,14 @@ impl ProcessWatcher {
             }
 
             if matches!(
-                State::try_from(process.state),
-                Ok(State::Done | State::Canceled | State::Error)
+                process_state,
+                Some(State::Done | State::Canceled | State::Error)
             ) {
-                if !process.error.is_empty() {
+                if !process.error.is_empty()
+                    || matches!(process_state, Some(State::Canceled | State::Error))
+                {
                     return Err(AnytypeError::Other {
-                        message: format!("process {} failed: {}", process.id, process.error),
+                        message: terminal_failure_category(process_state).to_string(),
                     });
                 }
                 self.progress.processes_done = self.progress.processes_done.saturating_add(1);
@@ -405,6 +638,46 @@ impl ProcessWatcher {
             }
         }
         Ok((false, observed))
+    }
+
+    fn process_event_for_generation(
+        &mut self,
+        event: &Event,
+        request: &ProcessWatchRequest,
+        generation: ProcessWatchGeneration,
+    ) -> Result<(bool, bool)> {
+        if generation.0 != self.generation {
+            return Err(AnytypeError::Other {
+                message: "stale process watch generation".to_string(),
+            });
+        }
+        self.process_event(event, request)
+    }
+}
+
+fn event_completes_correlation(
+    event: &Event,
+    request: &ProcessWatchRequest,
+    expected: &str,
+) -> bool {
+    event.messages.iter().any(|message| {
+        space_matches(
+            message.space_id.as_str(),
+            request.space_id.as_str(),
+            request.allow_empty_space_id,
+        ) && matches!(
+            &message.value,
+            Some(EventValue::ImportFinish(finish)) if finish.root_collection_id == expected
+        )
+    })
+}
+
+fn terminal_failure_category(state: Option<State>) -> &'static str {
+    match state {
+        Some(State::Canceled) => "process watch observed terminal state=canceled",
+        Some(State::Error) => "process watch observed terminal state=error",
+        Some(State::Done) => "process watch observed terminal state=done with reported error",
+        _ => "process watch observed invalid processDone state",
     }
 }
 
@@ -429,10 +702,7 @@ async fn open_session_events(
     grpc: &AnytypeGrpcClient,
     connect_timeout: Duration,
 ) -> Result<tonic::Streaming<Event>> {
-    let request = StreamRequest {
-        token: grpc.token().to_string(),
-    };
-    let request = with_token_request(Request::new(request), grpc.token())?;
+    let request = session_event_request(grpc.token())?;
     let response = tokio::time::timeout(
         connect_timeout,
         grpc.client_commands().listen_session_events(request),
@@ -447,6 +717,17 @@ async fn open_session_events(
     .map_err(grpc_status)?
     .into_inner();
     Ok(response)
+}
+
+fn session_event_request(token: &str) -> Result<Request<StreamRequest>> {
+    let request = StreamRequest {
+        token: token.to_owned(),
+    };
+    let request = with_token_request(Request::new(request), token)?;
+    Ok(with_grpc_call_options(
+        request,
+        GrpcCallOptions::stream_setup(),
+    ))
 }
 
 async fn wait_for_next_event(
@@ -492,28 +773,410 @@ async fn wait_for_next_event(
         Ok(Some(event)) => Ok(Some(event)),
         Ok(None) => Ok(None),
         Err(err) => {
-            debug!("session event stream read failed; reconnecting: {err:#}");
+            log_stream_read_failure(&err);
             Ok(None)
         }
     }
 }
 
+fn log_stream_read_failure(error: &tonic::Status) {
+    debug!(
+        code = %error.code(),
+        class = "stream_read",
+        "session event stream read failed; reconnecting"
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex, Once},
+    };
+
     use anytype_rpc::anytype::{
         Event, event::Message as EventMessage, event::message::Value as EventValue,
     };
+    use tracing::Dispatch;
+    use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt};
 
     use super::*;
 
+    static TRACE_TEST_INTEREST: Once = Once::new();
+
+    fn ensure_trace_interest() {
+        TRACE_TEST_INTEREST.call_once(|| {
+            let subscriber =
+                tracing_subscriber::registry().with(tracing_subscriber::filter::LevelFilter::TRACE);
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Capture {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("capture lock").clone())
+                .expect("diagnostics are UTF-8")
+        }
+    }
+
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::writer::MakeWriter<'writer> for Capture {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture() -> (Dispatch, Capture) {
+        ensure_trace_interest();
+        let output = Capture::default();
+        let layer = tracing_fmt::layer()
+            .with_writer(output.clone())
+            .with_target(true)
+            .with_ansi(false);
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(layer);
+        (Dispatch::new(subscriber), output)
+    }
+
+    fn import_process_event(kind: &str, process_id: &str) -> Event {
+        use anytype_rpc::anytype::{event::process, model, model::process as model_process};
+
+        let process = model::Process {
+            id: process_id.to_owned(),
+            state: if kind == "done" {
+                model_process::State::Done as i32
+            } else {
+                model_process::State::Running as i32
+            },
+            progress: None,
+            space_id: "space-test".to_owned(),
+            error: String::new(),
+            message: Some(model_process::Message::Import(model_process::Import {})),
+        };
+        let value = if kind == "done" {
+            EventValue::ProcessDone(process::Done {
+                process: Some(process),
+            })
+        } else {
+            EventValue::ProcessNew(process::New {
+                process: Some(process),
+            })
+        };
+        Event {
+            messages: vec![EventMessage {
+                space_id: "space-test".to_owned(),
+                value: Some(value),
+            }],
+            context_id: String::new(),
+            initiator: None,
+            trace_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn stale_generation_cannot_consume_a_later_batch_event() {
+        let request = ProcessWatchRequest::new(ProcessKind::Import, "space-test");
+        let mut watcher = ProcessWatcher {
+            generation: 2,
+            ..ProcessWatcher::default()
+        };
+        let error = watcher
+            .process_event_for_generation(
+                &import_process_event("new", "second"),
+                &request,
+                ProcessWatchGeneration(1),
+            )
+            .expect_err("stale generation must fail");
+        assert!(matches!(
+            error,
+            AnytypeError::Other { message } if message == "stale process watch generation"
+        ));
+        assert!(watcher.process_id.is_none());
+    }
+
+    #[test]
+    fn concurrent_matching_processes_are_ambiguous() {
+        let request = ProcessWatchRequest::new(ProcessKind::Import, "space-test");
+        let mut event = import_process_event("new", "first");
+        event
+            .messages
+            .extend(import_process_event("new", "second").messages);
+        let mut watcher = ProcessWatcher::default();
+        let error = watcher
+            .process_event(&event, &request)
+            .expect_err("two starts in one generation must fail");
+        assert!(matches!(
+            error,
+            AnytypeError::Other { message }
+                if message.contains("multiple matching processes")
+        ));
+    }
+
+    #[test]
+    fn server_correlations_must_be_nonempty_and_unique_per_batch() {
+        let mut watcher = ProcessWatcher {
+            generation: 1,
+            ..ProcessWatcher::default()
+        };
+        assert!(
+            watcher
+                .correlate_generation(ProcessWatchGeneration(1), "")
+                .is_err()
+        );
+        watcher
+            .correlate_generation(ProcessWatchGeneration(1), "collection-one")
+            .expect("first server correlation");
+        watcher.generation = 2;
+        assert!(
+            watcher
+                .correlate_generation(ProcessWatchGeneration(2), "collection-one")
+                .is_err(),
+            "a prior batch correlation must never be reused"
+        );
+    }
+
+    #[test]
+    fn public_watcher_debug_redacts_process_and_correlation_ids() {
+        let hostile = "HOSTILE_ID\nC:\\secret\\token";
+        let correlation = ProcessWatchCorrelation {
+            generation: ProcessWatchGeneration(7),
+            root_collection_id: hostile.to_string(),
+        };
+        let mut watcher = ProcessWatcher {
+            process_id: Some(hostile.to_string()),
+            generation: 7,
+            ..ProcessWatcher::default()
+        };
+        watcher.used_correlations.insert(hostile.to_string());
+        let request = ProcessWatchRequest::new(ProcessKind::Import, hostile)
+            .cancel_message(hostile.to_string());
+        let progress = ProcessWatchProgress {
+            last_process_id: Some(hostile.to_string()),
+            last_progress_message: Some(hostile.to_string()),
+            last_process_error: Some(hostile.to_string()),
+            ..ProcessWatchProgress::default()
+        };
+
+        let diagnostics = format!("{correlation:?} {watcher:?} {request:?} {progress:?}");
+        assert!(diagnostics.contains("redacted"));
+        assert!(!diagnostics.contains("HOSTILE_ID"));
+        assert!(!diagnostics.contains("secret"));
+        assert!(!diagnostics.contains("token"));
+    }
+
+    #[test]
+    fn empty_error_terminal_states_fail_with_fixed_redacted_categories() {
+        use anytype_rpc::anytype::{event::process, model::process::State};
+
+        let request = ProcessWatchRequest::new(ProcessKind::Import, "space-test");
+        for state in [State::Canceled, State::Error] {
+            let mut watcher = ProcessWatcher::default();
+            watcher
+                .process_event(
+                    &import_process_event("new", "HOSTILE_ID\n/tmp/token"),
+                    &request,
+                )
+                .expect("process start");
+            let mut event = import_process_event("done", "HOSTILE_ID\n/tmp/token");
+            let Some(EventValue::ProcessDone(process::Done {
+                process: Some(process),
+            })) = event.messages[0].value.as_mut()
+            else {
+                unreachable!("constructed processDone")
+            };
+            process.state = state as i32;
+            process.error = String::new();
+            let error = watcher
+                .process_event(&event, &request)
+                .expect_err("canceled/error state must fail");
+            let diagnostics = format!("{error} {error:?} {}", error.diagnostic());
+            assert!(diagnostics.contains("other"));
+            assert!(!diagnostics.contains("HOSTILE_ID"));
+            assert!(!diagnostics.contains("/tmp/token"));
+            assert!(std::error::Error::source(&error).is_none());
+        }
+    }
+
+    #[test]
+    fn process_done_error_payload_is_never_echoed() {
+        use anytype_rpc::anytype::event::process;
+
+        let request = ProcessWatchRequest::new(ProcessKind::Import, "space-test");
+        let mut watcher = ProcessWatcher::default();
+        watcher
+            .process_event(&import_process_event("new", "HOSTILE_ID"), &request)
+            .expect("process start");
+        let mut event = import_process_event("done", "HOSTILE_ID");
+        let Some(EventValue::ProcessDone(process::Done {
+            process: Some(process),
+        })) = event.messages[0].value.as_mut()
+        else {
+            unreachable!("constructed processDone")
+        };
+        process.error = "HOSTILE_ERROR\nC:\\secret\\token".to_string();
+        let error = watcher
+            .process_event(&event, &request)
+            .expect_err("reported process error must fail");
+        let diagnostics = format!("{error} {error:?} {}", error.diagnostic());
+        assert!(!diagnostics.contains("HOSTILE_ID"));
+        assert!(!diagnostics.contains("HOSTILE_ERROR"));
+        assert!(!diagnostics.contains("secret"));
+    }
+
+    #[test]
+    fn successive_batches_require_their_own_generation_and_process() {
+        let request = ProcessWatchRequest::new(ProcessKind::Import, "space-test");
+        let mut watcher = ProcessWatcher {
+            generation: 1,
+            ..ProcessWatcher::default()
+        };
+        watcher
+            .process_event_for_generation(
+                &import_process_event("new", "first"),
+                &request,
+                ProcessWatchGeneration(1),
+            )
+            .expect("first start");
+        let (complete, _) = watcher
+            .process_event_for_generation(
+                &import_process_event("done", "first"),
+                &request,
+                ProcessWatchGeneration(1),
+            )
+            .expect("first done");
+        assert!(complete);
+
+        watcher.generation = 2;
+        watcher.process_id = None;
+        assert!(
+            watcher
+                .process_event_for_generation(
+                    &import_process_event("done", "first"),
+                    &request,
+                    ProcessWatchGeneration(2),
+                )
+                .is_ok_and(|(complete, observed)| !complete && !observed)
+        );
+        watcher
+            .process_event_for_generation(
+                &import_process_event("new", "second"),
+                &request,
+                ProcessWatchGeneration(2),
+            )
+            .expect("second start");
+        assert!(
+            watcher
+                .process_event_for_generation(
+                    &import_process_event("done", "second"),
+                    &request,
+                    ProcessWatchGeneration(2),
+                )
+                .is_ok_and(|(complete, _)| complete)
+        );
+    }
+
+    #[test]
+    fn stream_read_failure_log_redacts_hostile_status_details() {
+        let (dispatch, output) = capture();
+        tracing::dispatcher::with_default(&dispatch, || {
+            log_stream_read_failure(&tonic::Status::internal("HOSTILE_WATCHER_SECRET"));
+        });
+        let output = output.contents();
+        assert!(output.contains("Internal"));
+        assert!(output.contains("stream_read"));
+        assert!(!output.contains("HOSTILE_WATCHER_SECRET"));
+    }
+
+    #[test]
+    fn progress_log_redacts_hostile_process_id_and_message() {
+        use anytype_rpc::anytype::{event::process, model, model::process as model_process};
+
+        let hostile_id = "HOSTILE_PROCESS_ID\n\u{1b}[31m";
+        let hostile_message = "HOSTILE_PROGRESS_MESSAGE\r\n\t\u{7}";
+        let event = Event {
+            messages: vec![EventMessage {
+                space_id: "space-test".to_owned(),
+                value: Some(EventValue::ProcessNew(process::New {
+                    process: Some(model::Process {
+                        id: hostile_id.to_owned(),
+                        state: model_process::State::Running as i32,
+                        progress: Some(model_process::Progress {
+                            total: 10,
+                            done: 4,
+                            message: hostile_message.to_owned(),
+                        }),
+                        space_id: "space-test".to_owned(),
+                        error: String::new(),
+                        message: Some(model_process::Message::Import(model_process::Import {})),
+                    }),
+                })),
+            }],
+            context_id: String::new(),
+            initiator: None,
+            trace_id: String::new(),
+        };
+        let request =
+            ProcessWatchRequest::new(ProcessKind::Import, "space-test").log_progress(true);
+        let mut watcher = ProcessWatcher::default();
+        let (dispatch, output) = capture();
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            watcher
+                .process_event(&event, &request)
+                .expect("hostile progress event reduces");
+        });
+
+        let output = output.contents();
+        assert!(output.contains("process_progress"));
+        assert!(output.contains("done=4"));
+        assert!(output.contains("total=10"));
+        assert!(!output.contains("HOSTILE_PROCESS_ID"));
+        assert!(!output.contains("HOSTILE_PROGRESS_MESSAGE"));
+        assert_eq!(
+            watcher.progress().last_process_id.as_deref(),
+            Some("redacted")
+        );
+        assert_eq!(
+            watcher.progress().last_progress_message.as_deref(),
+            Some("reported")
+        );
+    }
+
     fn import_finish_event(space_id: &str, objects_count: i64) -> Event {
+        import_finish_event_with_root(space_id, objects_count, "")
+    }
+
+    fn import_finish_event_with_root(
+        space_id: &str,
+        objects_count: i64,
+        root_collection_id: &str,
+    ) -> Event {
         Event {
             messages: vec![EventMessage {
                 space_id: space_id.to_owned(),
                 value: Some(EventValue::ImportFinish(
                     anytype_rpc::anytype::event::import::Finish {
                         objects_count,
-                        root_collection_id: String::new(),
+                        root_collection_id: root_collection_id.to_string(),
                         import_type: 0,
                     },
                 )),
@@ -522,6 +1185,24 @@ mod tests {
             initiator: None,
             trace_id: String::new(),
         }
+    }
+
+    #[test]
+    fn only_current_server_correlation_can_complete_a_batch() {
+        let request = ProcessWatchRequest::new(ProcessKind::Import, "space-test")
+            .completion_fallback(ProcessCompletionFallback::ImportFinishEvent);
+        let stale = import_finish_event_with_root("space-test", 1, "collection-prior");
+        let current = import_finish_event_with_root("space-test", 1, "collection-current");
+        assert!(!event_completes_correlation(
+            &stale,
+            &request,
+            "collection-current"
+        ));
+        assert!(event_completes_correlation(
+            &current,
+            &request,
+            "collection-current"
+        ));
     }
 
     #[test]
@@ -591,5 +1272,16 @@ mod tests {
         assert!(!observed);
         assert_eq!(watcher.progress().import_finish_events, 0);
         assert_eq!(watcher.progress().import_finish_objects, 0);
+    }
+
+    #[test]
+    fn session_event_setup_uses_only_the_local_setup_budget() {
+        let request = session_event_request("test-token").expect("valid session event request");
+
+        assert!(request.metadata().get("grpc-timeout").is_none());
+        assert_eq!(
+            request.extensions().get::<GrpcCallOptions>(),
+            Some(&GrpcCallOptions::stream_setup())
+        );
     }
 }

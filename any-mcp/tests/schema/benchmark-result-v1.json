@@ -1,0 +1,387 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anytype-toolbox.invalid/schema/benchmark-result-v1.json",
+  "title": "any-mcp benchmark JSONL event",
+  "oneOf": [
+    { "$ref": "#/$defs/header" },
+    { "$ref": "#/$defs/pair" },
+    { "$ref": "#/$defs/summary" },
+    { "$ref": "#/$defs/blocked" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["schema_version", "event", "run_id", "mode", "track"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "event": { "type": "string" },
+        "run_id": { "$ref": "#/$defs/identifier" },
+        "mode": {
+          "enum": ["production-verified-official", "controlled-fixed-spec-warm"]
+        },
+        "track": { "enum": ["protocol", "agent"] }
+      }
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_ns", "first_byte_ns", "end_ns"],
+      "properties": {
+        "start_ns": { "type": "integer", "minimum": 0 },
+        "first_byte_ns": { "type": "integer", "minimum": 0 },
+        "end_ns": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "jsonMeasures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wire_bytes", "canonical_bytes", "canonical_tokens"],
+      "properties": {
+        "wire_bytes": { "type": "integer", "minimum": 0 },
+        "canonical_bytes": { "type": "integer", "minimum": 0 },
+        "canonical_tokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "response",
+        "tools_subtree_wire_bytes",
+        "tools_subtree_canonical_bytes",
+        "tools_subtree_tokens"
+      ],
+      "properties": {
+        "response": { "$ref": "#/$defs/jsonMeasures" },
+        "tools_subtree_wire_bytes": { "type": "integer", "minimum": 0 },
+        "tools_subtree_canonical_bytes": { "type": "integer", "minimum": 0 },
+        "tools_subtree_tokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "stderr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "lines", "truncated", "summary_sha256"],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 0 },
+        "lines": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "summary_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "arm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "implementation",
+        "success",
+        "timeout",
+        "environmental_invalid",
+        "failure_category",
+        "startup",
+        "catalog",
+        "calls",
+        "ttft_ns",
+        "end_to_end_ns",
+        "stderr",
+        "answer_sha256"
+      ],
+      "properties": {
+        "implementation": { "enum": ["local", "upstream"] },
+        "success": { "type": "boolean" },
+        "timeout": { "type": "boolean" },
+        "environmental_invalid": { "type": "boolean" },
+        "failure_category": {
+          "type": ["string", "null"],
+          "enum": [
+            null,
+            "spawn",
+            "timeout",
+            "protocol",
+            "tool-error",
+            "oracle",
+            "answer-mismatch",
+            "cleanup",
+            "agent-contract",
+            "environment"
+          ]
+        },
+        "startup": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["spawn", "initialize", "list"],
+              "properties": {
+                "spawn": { "$ref": "#/$defs/interval" },
+                "initialize": { "$ref": "#/$defs/interval" },
+                "list": { "$ref": "#/$defs/interval" }
+              }
+            }
+          ]
+        },
+        "catalog": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/catalog" }]
+        },
+        "calls": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["interval", "response"],
+            "properties": {
+              "interval": { "$ref": "#/$defs/interval" },
+              "response": { "$ref": "#/$defs/jsonMeasures" }
+            }
+          }
+        },
+        "ttft_ns": { "type": ["integer", "null"], "minimum": 0 },
+        "end_to_end_ns": { "type": ["integer", "null"], "minimum": 0 },
+        "stderr": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/stderr" }]
+        },
+        "answer_sha256": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        }
+      }
+    },
+    "armSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "successes",
+        "failures",
+        "timeouts",
+        "success_rate",
+        "success_rate_wilson_ci95",
+        "success_latency_p50_ns",
+        "success_latency_p95_ns",
+        "success_adjusted_p50_ns",
+        "success_adjusted_p95_ns"
+      ],
+      "properties": {
+        "successes": { "type": "integer", "minimum": 0, "maximum": 120 },
+        "failures": { "type": "integer", "minimum": 0, "maximum": 120 },
+        "timeouts": { "type": "integer", "minimum": 0, "maximum": 120 },
+        "success_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "success_rate_wilson_ci95": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "number", "minimum": 0, "maximum": 1 }
+        },
+        "success_latency_p50_ns": { "type": ["integer", "null"], "minimum": 0 },
+        "success_latency_p95_ns": { "type": ["integer", "null"], "minimum": 0 },
+        "success_adjusted_p50_ns": { "type": "integer", "minimum": 0 },
+        "success_adjusted_p95_ns": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete_pairs",
+        "environmental_invalid_local",
+        "environmental_invalid_upstream",
+        "valid",
+        "invalid_reason",
+        "local",
+        "upstream",
+        "paired_success_difference",
+        "paired_success_ci95",
+        "paired_latency_ratio",
+        "paired_latency_ratio_ci95",
+        "mcnemar_exact_p",
+        "local_noninferior_at_five_points",
+        "latency_ranking_provisional",
+        "p95_is_descriptive"
+      ],
+      "properties": {
+        "complete_pairs": { "const": 120 },
+        "environmental_invalid_local": { "type": "integer", "minimum": 0 },
+        "environmental_invalid_upstream": { "type": "integer", "minimum": 0 },
+        "valid": { "type": "boolean" },
+        "invalid_reason": { "type": ["string", "null"] },
+        "local": { "$ref": "#/$defs/armSummary" },
+        "upstream": { "$ref": "#/$defs/armSummary" },
+        "paired_success_difference": { "type": "number", "minimum": -1, "maximum": 1 },
+        "paired_success_ci95": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "number", "minimum": -1, "maximum": 1 }
+        },
+        "paired_latency_ratio": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "paired_latency_ratio_ci95": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": { "type": "number", "exclusiveMinimum": 0 }
+            }
+          ]
+        },
+        "mcnemar_exact_p": { "type": "number", "minimum": 0, "maximum": 1 },
+        "local_noninferior_at_five_points": { "type": "boolean" },
+        "latency_ranking_provisional": { "type": "boolean" },
+        "p95_is_descriptive": { "type": "boolean" }
+      }
+    },
+    "header": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "event", "run_id", "mode", "track", "manifest"],
+          "properties": {
+            "schema_version": { "const": 1 },
+            "event": { "const": "header" },
+            "run_id": { "$ref": "#/$defs/identifier" },
+            "mode": {
+              "enum": ["production-verified-official", "controlled-fixed-spec-warm"]
+            },
+            "track": { "enum": ["protocol", "agent"] },
+            "manifest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "local_revision",
+                "local_features",
+                "rust_toolchain",
+                "local_binary_sha256",
+                "node_runtime",
+                "node_binary_sha256",
+                "anytype_cli_version",
+                "anytype_cli_sha256",
+                "heart_version",
+                "heart_sha256",
+                "openapi_sha256",
+                "npm_package",
+                "npm_version",
+                "npm_integrity",
+                "npm_tarball_sha256",
+                "npm_bundle_sha256"
+              ],
+              "properties": {
+                "local_revision": { "type": "string", "minLength": 12 },
+                "local_features": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": { "type": "string" }
+                },
+                "rust_toolchain": { "type": "string", "minLength": 1 },
+                "local_binary_sha256": { "$ref": "#/$defs/sha256" },
+                "node_runtime": { "type": "string", "minLength": 1 },
+                "node_binary_sha256": { "$ref": "#/$defs/sha256" },
+                "anytype_cli_version": { "type": "string", "minLength": 1 },
+                "anytype_cli_sha256": { "$ref": "#/$defs/sha256" },
+                "heart_version": { "type": "string", "minLength": 1 },
+                "heart_sha256": { "$ref": "#/$defs/sha256" },
+                "openapi_sha256": { "$ref": "#/$defs/sha256" },
+                "npm_package": { "const": "@anyproto/anytype-mcp" },
+                "npm_version": { "const": "1.2.10" },
+                "npm_integrity": { "type": "string", "pattern": "^sha512-" },
+                "npm_tarball_sha256": { "$ref": "#/$defs/sha256" },
+                "npm_bundle_sha256": { "$ref": "#/$defs/sha256" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "pair": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "event",
+            "run_id",
+            "mode",
+            "track",
+            "scenario",
+            "attempt",
+            "pair_index",
+            "order",
+            "local",
+            "upstream"
+          ],
+          "properties": {
+            "schema_version": { "const": 1 },
+            "event": { "const": "pair" },
+            "run_id": { "$ref": "#/$defs/identifier" },
+            "mode": {
+              "enum": ["production-verified-official", "controlled-fixed-spec-warm"]
+            },
+            "track": { "enum": ["protocol", "agent"] },
+            "scenario": { "$ref": "#/$defs/identifier" },
+            "attempt": { "type": "integer", "minimum": 0 },
+            "pair_index": { "type": ["integer", "null"], "minimum": 0, "maximum": 119 },
+            "order": { "enum": ["local-upstream", "upstream-local"] },
+            "local": { "$ref": "#/$defs/arm" },
+            "upstream": { "$ref": "#/$defs/arm" }
+          }
+        }
+      ]
+    },
+    "summary": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "event", "run_id", "mode", "track", "scenario", "statistics"],
+          "properties": {
+            "schema_version": { "const": 1 },
+            "event": { "const": "summary" },
+            "run_id": { "$ref": "#/$defs/identifier" },
+            "mode": {
+              "enum": ["production-verified-official", "controlled-fixed-spec-warm"]
+            },
+            "track": { "enum": ["protocol", "agent"] },
+            "scenario": { "$ref": "#/$defs/identifier" },
+            "statistics": { "$ref": "#/$defs/statistics" }
+          }
+        }
+      ]
+    },
+    "blocked": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "event", "run_id", "mode", "track", "reason", "run_root"],
+          "properties": {
+            "schema_version": { "const": 1 },
+            "event": { "const": "blocked" },
+            "run_id": { "$ref": "#/$defs/identifier" },
+            "mode": {
+              "enum": ["production-verified-official", "controlled-fixed-spec-warm"]
+            },
+            "track": { "enum": ["protocol", "agent"] },
+            "reason": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "run_root": { "$ref": "#/$defs/identifier" }
+          }
+        }
+      ]
+    }
+  }
+}

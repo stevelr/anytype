@@ -31,8 +31,9 @@ The first `grpc_client()` call selects a nonempty stored session token before
 falling back to an account key and initializes one cached channel. Concurrent
 first callers share that initialization. `find_grpc()` discovers a local
 Anytype listener on Linux and macOS by filtering `lsof` listeners and probing
-candidate ports in order; unsupported platforms and unavailable discovery
-return `None`.
+candidate ports in order. Each candidate gets one two-second local budget for
+both connection and the unauthenticated `AppGetVersion` probe; unsupported
+platforms and unavailable discovery return `None`.
 
 ### Features
 
@@ -70,6 +71,18 @@ strings to numbers or booleans, accept checkbox `1`/`0` aliases, or emulate
 server filtering after pagination. When typed list filters include one positive
 type filter, the client maps it to search's dedicated type selector instead of
 sending it as a generic property condition.
+
+### REST model fidelity
+
+`Type`, `Property`, `Tag`, and `Member` retain the REST response's `object`
+discriminator. Responses that omit it use the model's expected discriminator
+for compatibility, while an observed value is preserved. `Member.icon` uses
+the typed `Icon` model.
+
+gRPC file details accept an integral numeric `addedDate` as Unix seconds as
+well as the established RFC 3339 string form. `FileObject::target_object_id`
+is populated only from `targetObjectId`. `createdInContext` remains upload
+context.
 
 ### Bounded HTTP responses
 
@@ -205,6 +218,72 @@ It advances whenever the in-memory HTTP key is set or cleared, allowing
 principal-bound caches to invalidate entries without reading, retaining, or
 hashing the credential itself. Credential replacement and generation advance
 share one synchronization boundary; no observer can see a mixed pair.
+
+### gRPC deadlines
+
+`ClientConfig::grpc_timeouts` configures the logical gRPC policy used by the
+client's cached `AnytypeGrpcClient`; the fluent `grpc_timeouts(...)` builder
+sets an explicit policy. With no explicit policy,
+`ANYTYPE_GRPC_TIMEOUT_SECS=1..3600` supplies one inherited credential,
+ordinary, long-operation, and stream-setup value, while `0` disables those
+four. The environment does not enable established-stream idle or lifetime
+limits and does not alter the five-second cleanup default. Without either
+setting, the defaults are 120 seconds for credential, ordinary, and stream
+setup, 30 minutes for long operations, and five seconds for cleanup.
+
+An explicit policy ignores the environment. `None` disables an individual
+boundary; finite values are validated before keystore or network side effects.
+Credential, ordinary, setup, idle, and lifetime values may be at most one
+hour, long operations two hours, and cleanup 30 seconds. Invalid programmatic
+or environment policy rejects client construction with `AnytypeError::Validation`.
+
+Ordinary and long reads return an aborted-read outcome on expiry. A mutation
+that may have been dispatched returns `mutation_indeterminate`; inspect fresh
+server state before deciding whether retry is safe. Cleanup uses its own short
+bound and is also indeterminate after possible dispatch. Runtime deadline and
+stream-control failures remain structurally available below
+`AnytypeError::Grpc` without placing peer status text in standard diagnostics.
+Deadline-service transport failures consume and discard the original error
+value after deriving a closed tonic status code. The generic error-type marker
+remains for source compatibility, while standard source traversal exposes only
+a synthetic status with that code and fixed redacted text.
+
+Each request uses the earliest policy duration, absolute enclosing workflow
+deadline, or existing tighter `grpc-timeout`, including time spent waiting for
+service readiness. The library's `StreamSetup` profile stops at successful
+response headers and is deliberately not propagated as `grpc-timeout`, which
+tonic treats as a whole-stream limit. For this class, only an explicit caller
+whole-call timeout is propagated, reduced to its remaining absolute budget
+after readiness; the library setup and enclosing budgets remain local.
+
+Applications that compose several client operations can call
+`scope_grpc_deadline` with one absolute Tokio instant. Every nested generated
+gRPC call observes the remaining budget and propagates only that remainder
+where the method profile permits it. Channel connection keeps its separate
+fixed 30-second boundary. The scope does not change the one-way dependency:
+callers use the public `anytype` API rather than depending on `anytype-rpc`
+directly.
+
+Configured stream idle is reset by raw nonempty transport progress before
+message decoding; total lifetime and enclosing deadlines never reset.
+`chat_stream` keeps capped exponential reconnect backoff, resubscription, and
+watermark catch-up inside those bounds. Once a raw event has been decoded, its
+chat events enter a private pending queue and are delivered before an
+already-ready close, transport, or saturation boundary is handled. Output
+backpressure therefore does not discard them. An idle expiry can interrupt
+delivery; retained items drain first after reconnect, while a lifetime or
+enclosing expiry terminates the workflow. Watermarks advance only for delivered
+items. The reconnect-attempt counter resets after exactly two delivered decoded
+events. An interrupted control mutation is not replayed and may be
+indeterminate. `ProcessWatcher` logs only the status code for stream-read
+failures and numeric progress counters, not peer status text, process IDs, or
+progress messages.
+
+`grpc_client().client_commands()` is deadline-aware. Callers that deliberately
+obtain the underlying raw `channel()` bypass these logical boundaries; use
+`deadline_channel()` when constructing another generated tonic client. The
+dependency direction is unchanged: `anytype` uses `anytype-rpc`, while
+`anytype-rpc` remains independent of this crate.
 
 ### Secret-safe HTTP diagnostics
 
@@ -556,6 +635,12 @@ while let Some(event) = events.next().await {
 Structured message blocks, full-fidelity reads, cross-chat previews, reconnect
 watermarks, and dynamic subscription control remain available as gRPC
 extensions because the REST representation omits blocks and per-user state.
+
+`ChatClient::read_all` is account-global. Heart's `ChatReadAll` request has no
+space or chat field, and its handler traverses every chat known to the current
+session. The legacy `space_id` argument is validated but is not sent on the
+wire. Only run this operation when the account's complete chat inventory is
+safe to mark read; the shared-server live suite deliberately does not call it.
 
 Older REST history uses a typed page with a 1 through 12 item limit. Its
 `next_before` value is an equality-only opaque server token limited to 256

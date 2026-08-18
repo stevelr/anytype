@@ -3,7 +3,11 @@
 
 //! Shared gRPC helpers used across the crate.
 
-use anytype_rpc::auth::with_token;
+use anytype_rpc::{
+    auth::with_token,
+    deadline::{GrpcDeadlineError, GrpcTimeoutClass, GrpcTimeoutOutcome},
+    error::AnytypeGrpcError,
+};
 use tonic::Request;
 
 use crate::{Result, error::AnytypeError};
@@ -28,8 +32,28 @@ pub(crate) fn ensure_error_ok<T: GrpcError>(error: Option<&T>, action: &str) -> 
 /// Convert a tonic status into an [`AnytypeError`].
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn grpc_status(status: tonic::Status) -> AnytypeError {
+    grpc_status_for(
+        status,
+        GrpcTimeoutClass::OrdinaryUnary,
+        GrpcTimeoutOutcome::MutationIndeterminate,
+        std::time::Duration::ZERO,
+    )
+}
+
+/// Convert a tonic status with explicit deadline semantics.
+pub(crate) fn grpc_status_for(
+    status: tonic::Status,
+    class: GrpcTimeoutClass,
+    outcome: GrpcTimeoutOutcome,
+    elapsed: std::time::Duration,
+) -> AnytypeError {
+    if let Some(source) = GrpcDeadlineError::from_status(&status, class, outcome, elapsed) {
+        return AnytypeError::Grpc {
+            source: AnytypeGrpcError::Deadline { source },
+        };
+    }
     AnytypeError::Other {
-        message: format!("gRPC request failed: {status}"),
+        message: format!("gRPC request failed with code {}", status.code()),
     }
 }
 

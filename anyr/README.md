@@ -65,7 +65,7 @@ anyr file upload "Personal" -f ./path/to/file.png
 
 # Create a chat in a regular space
 anyr chat create "Work" "Ops"
-# Get chat messages from a chat in a space
+# Get chat messages from a chat in a space (gRPC credentials required)
 anyr chat messages list "Work" "Ops" -t
 # Post message
 anyr chat messages send "Work" "Ops" --text "hello world?"
@@ -86,15 +86,15 @@ anyr mcp init
 anyr mcp check
 ```
 
-Backup commands honor the same global output contract as the rest of anyr:
-compact JSON by default, `--pretty` for indented JSON, `--table` for the
-human-readable summaries, `--quiet` to suppress the result document, and
-`-o FILE` to route it to a file instead of stdout. Progress spinners and
-diagnostics always stay on stderr, so stdout holds only the result document.
-Combinations that cannot be honored are rejected rather than silently
-downgraded: more than one format flag, `--quiet` together with `-o FILE`, any
-output flag applied to the interactive `anyr backup inspect`, and a backup
-result path that aliases a command input or generated artifact.
+The global output contract applies to every anyr command: compact JSON by
+default, `--pretty` for indented JSON, `--table` for human-readable output,
+`--quiet` to suppress the result document, and `-o FILE` to route it to a file
+instead of stdout. Progress spinners and diagnostics always stay on stderr, so
+stdout holds only the result document. Every invocation rejects more than one
+of `--json`, `--pretty`, `--table`, and `--quiet`, as well as `--quiet` together
+with `-o FILE`. Backup commands additionally reject output flags on the
+interactive `anyr backup inspect` and result paths that alias a command input
+or generated artifact.
 
 The consolidated binary owns shared endpoint, keystore, output, and
 verbosity options. Use `-v`, `-vv`, or `RUST_LOG` for diagnostics; diagnostics
@@ -409,14 +409,16 @@ Chat commands accept `anyr chat --transport auto|rest|grpc <command>` (default
 `--grpc URL` endpoint option. It selects which backend each operation runs over.
 
 - `auto` resolves each operation to its policy backend: REST for single-space
-  `list` and `create`, plain message `list`/`get`/`send`/`edit`/`delete`,
-  message `search` and `react`, `read`/`read-reactions`/`read-all` in one space,
-  and a single-chat `listen` (REST SSE); gRPC for cross-space list, chat text
-  search, rich chat-object `get`, `unread`, structured `--blocks-json` sends and
-  edits, and multi-chat, `--previews`, or `--buffer` `listen`.
+  `list` and `create`, plain message `send` and `edit`, message `search` and
+  `react`, `read`/`read-reactions`/`read-all` in one space, and a single-chat
+  `listen` (REST SSE); gRPC for cross-space list, chat text search, rich
+  chat-object `get`, message `list`/`get`/`delete`, `unread`, structured
+  `--blocks-json` sends and edits, and multi-chat, `--previews`, or `--buffer`
+  `listen`.
 - `rest` rejects gRPC-only operations and options with an actionable error (for
   example `anyr chat --transport rest get ...` explains that rich chat-object
-  lookup requires gRPC, and `--blocks-json` cannot be combined with it).
+  lookup requires gRPC, message `list`/`get`/`delete` report their gRPC
+  requirement, and `--blocks-json` cannot be combined with it).
 - `grpc` selects the gRPC backend, which carries the full-fidelity 0.4 message
   reply shape. REST-only operations such as message `search` reject it.
 
@@ -430,6 +432,12 @@ script needs the full reply shape.
 - `anyr chat list --space SPACE [--filter FILTER]...` applies property filters to
   a single-space REST listing. `--filter` requires `--space` and is rejected
   alongside `--text` (text search uses the gRPC discovery API).
+- `anyr chat list ... --all` and `anyr chat messages search ... --all` exhaust
+  the server's pages. Pagination that claims another page without usable
+  progress fails closed. All `--all` requests share one 30-minute workflow
+  deadline, including page requests and retry waits. Set
+  `ANYR_WORKFLOW_TIMEOUT_SECS` to canonical decimal seconds up to 3600, or to
+  exactly `0` to disable only this aggregate boundary.
 - `anyr chat create SPACE NAME [--icon-emoji EMOJI | --icon-file FILE]` attaches
   an icon; the two icon options are mutually exclusive. With an icon under REST
   the dedicated chat builder is used; otherwise the generic object create is.
@@ -592,6 +600,18 @@ anyr ARGS ...
   withheld, while platform-specific exit-status text is diagnostic detail.
   Credential-bearing output is captured under a fixed byte limit.
 
+  Initialization shares one 120-second deadline across account setup, token
+  creation, verification, and an optional join. Each owned child process has a
+  30-second safety limit that includes output collection and exit waiting. A
+  timeout terminates and reaps the direct child. On Unix it also signals
+  descendants that remain in the child's owned process group; descendants that
+  deliberately call `setsid` or `setpgid` after spawn are outside that boundary.
+  On Windows the child starts suspended and is assigned to a kill-on-close Job
+  Object before its code runs, so its descendants remain in the owned job. A
+  dispatched operation has an indeterminate server outcome. Set
+  `ANYR_INIT_CLI_TIMEOUT_SECS` to canonical
+  decimal seconds from 1 through 600. This deadline cannot be disabled.
+
 The global `--keystore` and `--keystore-service` options (or their environment
 variables) select where `init-cli` stores credentials. See
 [anytype README.md](../anytype-api/README.md#keystore) for more information.
@@ -636,12 +656,12 @@ first require healthy HTTP and gRPC pings, then cover prompted cancellation and
 exact-name confirmation, non-interactive backup-before-delete to an exact path,
 archive validation through `anyr backup list`, and backup-failure preservation.
 
-The real-operation case creates its own uniquely named, prefix-owned disposable
-space rather than selecting an ambient prefix match. Mutation cases do not
-consider cleanup complete until `space get` returns the explicit not-found
-outcome. Transport and server failures fail cleanup instead of being treated as
-proof of deletion, and diagnostic lines from `RUST_LOG` may precede the
-not-found message.
+The real-operation case uses the shared disposable-space guard for its uniquely
+named, prefix-owned space, so setup and assertion failures still enter cleanup.
+Mutation cases do not consider cleanup complete until `space get` returns the
+explicit not-found outcome. Transport and server failures fail cleanup instead
+of being treated as proof of deletion, and diagnostic lines from `RUST_LOG` may
+precede the not-found message.
 
 The protected `anyr-anyback-live` workflow installs `anyr` and serializes three
 required subgates: the exact ignored type-property test, the manifest-pinned

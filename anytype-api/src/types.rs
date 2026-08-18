@@ -178,6 +178,10 @@ pub struct CreateTypeProperty {
 /// include Page, Note, Task, and Bookmark.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Type {
+    /// Data model type returned by the REST API.
+    #[serde(default = "type_data_model")]
+    pub object: DataModel,
+
     /// Whether the type is archived
     pub archived: bool,
 
@@ -206,6 +210,10 @@ pub struct Type {
     /// Properties linked to the type
     #[serde(default, deserialize_with = "deserialize_vec_properties_or_null")]
     pub properties: Vec<Property>,
+}
+
+fn type_data_model() -> DataModel {
+    DataModel::Type
 }
 
 /// Source-backed classification of the properties linked to a type.
@@ -1722,12 +1730,54 @@ mod tests {
 
     fn property(id: &str, key: &str) -> Property {
         serde_json::from_value(serde_json::json!({
+            "object": "property",
             "name": key,
             "key": key,
             "id": id,
             "format": "text"
         }))
         .expect("property fixture")
+    }
+
+    #[test]
+    fn type_schema_preserves_discriminator() {
+        let response: TypeResponse = serde_json::from_value(serde_json::json!({
+            "type": {
+                "object": "type",
+                "archived": false,
+                "id": "type-id",
+                "key": "page",
+                "layout": "basic",
+                "name": "Page",
+                "plural_name": "Pages",
+                "properties": []
+            }
+        }))
+        .expect("type response schema");
+
+        assert_eq!(response.type_.object, DataModel::Type);
+        let serialized = serde_json::to_value(response.type_).expect("serialize type");
+        assert_eq!(serialized["object"], "type");
+    }
+
+    #[test]
+    fn type_discriminator_defaults_when_omitted_and_preserves_present_value() {
+        let type_without_discriminator: Type = serde_json::from_value(serde_json::json!({
+            "archived": false,
+            "id": "type-id",
+            "key": "page"
+        }))
+        .expect("type without discriminator");
+        assert_eq!(type_without_discriminator.object, DataModel::Type);
+
+        let type_with_observed_member: Type = serde_json::from_value(serde_json::json!({
+            "object": "member",
+            "archived": false,
+            "id": "type-id",
+            "key": "page"
+        }))
+        .expect("type with observed discriminator");
+        assert_eq!(type_with_observed_member.object, DataModel::Member);
     }
 
     fn string_list(ids: &[String]) -> prost_types::Value {
@@ -2151,6 +2201,7 @@ mod tests {
     #[test]
     fn test_type_is_system_type() {
         let page_type = Type {
+            object: DataModel::Type,
             archived: false,
             id: "id".to_string(),
             key: "page".to_string(),
@@ -2163,6 +2214,7 @@ mod tests {
         assert!(page_type.is_system_type());
 
         let custom_type = Type {
+            object: DataModel::Type,
             archived: false,
             id: "id".to_string(),
             key: "project".to_string(),
@@ -2178,6 +2230,7 @@ mod tests {
     #[test]
     fn test_type_display_name() {
         let with_name = Type {
+            object: DataModel::Type,
             archived: false,
             id: "id".to_string(),
             key: "page".to_string(),
@@ -2190,6 +2243,7 @@ mod tests {
         assert_eq!(with_name.display_name(), "Page");
 
         let without_name = Type {
+            object: DataModel::Type,
             archived: false,
             id: "id".to_string(),
             key: "custom_type".to_string(),

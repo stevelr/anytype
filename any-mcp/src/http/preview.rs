@@ -65,6 +65,7 @@ impl PreviewBackend {
             parts,
             body,
             principal,
+            invocation: _,
         } = admitted;
 
         // The preview has no initialize session or server stream.
@@ -177,11 +178,18 @@ mod tests {
     use super::*;
     use crate::{
         config::ApplicationProfile,
-        http::auth::AuthorizedPrincipal,
+        http::{
+            auth::{Authenticator, AuthorizedPrincipal},
+            listener::{ListenerState, McpService, handle_request},
+        },
         runtime::{RuntimeContext, StartupStatus},
     };
 
     fn test_runtime() -> RuntimeContext {
+        test_runtime_with_timeout(Duration::from_secs(5))
+    }
+
+    fn test_runtime_with_timeout(timeout: Duration) -> RuntimeContext {
         let config = ClientConfig {
             base_url: Some("http://127.0.0.1:1".to_string()),
             keystore: Some("env".to_string()),
@@ -193,7 +201,7 @@ mod tests {
         RuntimeContext::from_parts_with_profile(
             client,
             4,
-            Duration::from_secs(5),
+            timeout,
             StartupStatus {
                 http_available: true,
                 grpc_available: false,
@@ -231,6 +239,10 @@ mod tests {
             parts,
             body: Bytes::copy_from_slice(body.as_bytes()),
             principal: principal.clone(),
+            invocation: crate::runtime::InvocationAnchor::capture_durations(
+                Duration::from_secs(5),
+                Duration::from_secs(300),
+            ),
         }
     }
 
@@ -254,6 +266,141 @@ mod tests {
             "params": params,
         })
         .to_string()
+    }
+
+    fn preview_listener_with_claim_barrier(
+        timeout: Duration,
+        claimed: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) -> (
+        Arc<ListenerState>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::runtime::InvocationAnchor>,
+    ) {
+        let runtime = test_runtime_with_timeout(timeout);
+        let backend = Arc::new(PreviewBackend::new(runtime.clone()));
+        let config = crate::http::listener::tests::test_config(&[]);
+        let (anchor_sender, anchor_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let ingress_runtime = runtime.clone();
+        let service: McpService = Arc::new(move |admitted| {
+            let backend = Arc::clone(&backend);
+            let runtime = ingress_runtime.clone();
+            admitted
+                .invocation
+                .arm_dispatch_claim_barrier(Arc::clone(&claimed), Arc::clone(&release));
+            let _ = anchor_sender.send(admitted.invocation.clone());
+            Box::pin(async move {
+                let invocation = admitted.invocation.clone();
+                runtime
+                    .scope_ingress(invocation, backend.call(admitted))
+                    .await
+            })
+        });
+        let state = ListenerState::new_with_runtime(
+            &config,
+            Authenticator::SyntheticAllow,
+            None,
+            service,
+            &runtime,
+        );
+        (Arc::new(state), anchor_receiver)
+    }
+
+    fn preview_listener_request(body: String) -> Request<Full<Bytes>> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header("host", "localhost:8000")
+            .header("authorization", "Bearer synthetic-token")
+            .header("accept", "application/json")
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(body)))
+            .expect("preview listener request")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preview_http_terminal_wins_a_claiming_deadline_without_dispatch() {
+        let claimed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let (state, mut anchors) = preview_listener_with_claim_barrier(
+            Duration::from_millis(250),
+            Arc::clone(&claimed),
+            Arc::clone(&release),
+        );
+        let running = tokio::spawn(async move {
+            handle_request(
+                &state,
+                preview_listener_request(preview_request(
+                    50,
+                    "tools/call",
+                    json!({"name": "__test_deadline_mutation", "arguments": {}}),
+                )),
+            )
+            .await
+        });
+        let anchor = anchors.recv().await.expect("claiming anchor");
+        tokio::task::spawn_blocking(move || claimed.wait())
+            .await
+            .expect("claim barrier");
+        tokio::time::sleep_until(anchor.deadline()).await;
+        let response = tokio::time::timeout(Duration::from_secs(1), running).await;
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release barrier");
+        let response = response
+            .expect("listener terminal response")
+            .expect("request join");
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(!anchor.dispatched());
+        tokio::task::yield_now().await;
+        assert!(!anchor.dispatched());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preview_http_dispatch_wins_before_deadline_and_returns_structured_outcome() {
+        let claimed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let (state, mut anchors) = preview_listener_with_claim_barrier(
+            Duration::from_millis(250),
+            Arc::clone(&claimed),
+            Arc::clone(&release),
+        );
+        let running = tokio::spawn(async move {
+            handle_request(
+                &state,
+                preview_listener_request(preview_request(
+                    51,
+                    "tools/call",
+                    json!({"name": "__test_deadline_mutation", "arguments": {}}),
+                )),
+            )
+            .await
+        });
+        let anchor = anchors.recv().await.expect("claiming anchor");
+        tokio::task::spawn_blocking(move || claimed.wait())
+            .await
+            .expect("claim barrier");
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release barrier");
+        tokio::time::timeout_at(anchor.deadline(), async {
+            while !anchor.dispatched() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatch claim commits before deadline");
+        let response = tokio::time::timeout(Duration::from_secs(1), running)
+            .await
+            .expect("structured terminal response")
+            .expect("request join");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["id"], 51);
+        assert_eq!(body["result"]["isError"], true);
+        assert!(
+            body.to_string().contains("mutation may have applied"),
+            "{body}"
+        );
     }
 
     async fn json_body(response: Response<HttpBody>) -> Value {

@@ -292,7 +292,7 @@ impl BodyRpcConfig {
     pub(crate) fn mutation_commands(
         &self,
         grpc: &AnytypeGrpcClient,
-    ) -> anytype_rpc::anytype::ClientCommandsClient<tonic::transport::Channel> {
+    ) -> anytype_rpc::anytype::ClientCommandsClient<anytype_rpc::client::AnytypeGrpcService> {
         grpc.client_commands()
             .max_decoding_message_size(self.non_show_response_limit)
     }

@@ -20,6 +20,7 @@ use anytype::{
     files::FileObject,
     objects::{Object, plain_markdown_representation},
 };
+use icu_properties::{CodePointSetData, props::BidiControl};
 use rmcp::{
     model::{
         CallToolRequestMethod, CallToolRequestParams, CallToolResult, ErrorData, ProtocolVersion,
@@ -36,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 use crate::artifact_acceptance_gates::{ArtifactAcceptanceGatePoint, FirstChunkGateReader};
 
 use crate::{
+    artifact_client_roots::LocalRootAuthority,
     artifact_config::RelativeNativePath,
     artifact_roots::{
         AnchoredImport, AtomicExport, EffectiveRootRegistry, PositionalReader,
@@ -84,6 +86,7 @@ const MULTIPART_ALLOWANCE: u64 = 1024 * 1024;
 const RESPONSE_BYTES: u64 = 256 * 1024;
 const ERROR_BYTES: u64 = 64 * 1024;
 const HEADER_BYTES: u64 = 64 * 1024;
+const ROOT_AUTHORITY_CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(any(test, feature = "acceptance-harness"))]
 fn artifact_upload_reader(
@@ -544,8 +547,8 @@ fn artifact_offset_schema(_: &mut SchemaGenerator) -> Schema {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ArtifactStatusOutput {
-    /// Whether local root capabilities were activated for this process.
-    local_roots_active: bool,
+    /// Effective local-root authority for this session.
+    local_root_authority: ArtifactLocalRootAuthority,
     /// Number of effective local import roots, without revealing their IDs.
     #[schemars(schema_with = "root_count_schema")]
     import_root_count: u32,
@@ -568,6 +571,31 @@ struct ArtifactStatusOutput {
     /// Number of validators whose executable and platform boundary were admitted.
     #[schemars(schema_with = "root_count_schema")]
     validator_available_count: u32,
+}
+
+/// Closed, path-free local-root authority categories.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ArtifactLocalRootAuthority {
+    /// No local roots were activated for this process.
+    Unavailable,
+    /// Every configured local root remains effective.
+    Configured,
+    /// A valid client snapshot narrowed the configured roots.
+    Narrowed,
+    /// Client-root resolution failed closed for this session.
+    Disabled,
+}
+
+impl From<LocalRootAuthority> for ArtifactLocalRootAuthority {
+    fn from(authority: LocalRootAuthority) -> Self {
+        match authority {
+            LocalRootAuthority::Unavailable => Self::Unavailable,
+            LocalRootAuthority::Configured => Self::Configured,
+            LocalRootAuthority::Narrowed => Self::Narrowed,
+            LocalRootAuthority::Disabled => Self::Disabled,
+        }
+    }
 }
 
 fn root_count_schema(_: &mut SchemaGenerator) -> Schema {
@@ -1192,12 +1220,31 @@ fn validate_name(name: &str) -> Result<(), ArtifactToolError> {
     if name.is_empty()
         || name.len() > 255
         || name.chars().any(char::is_control)
+        || contains_bidi_control(name)
         || name.contains(['/', '\\'])
         || matches!(name, "." | "..")
     {
         return Err(ArtifactToolError::Validation);
     }
     Ok(())
+}
+
+fn validate_document_name(name: &str) -> Result<(), ArtifactToolError> {
+    if name.is_empty()
+        || name.chars().count() > 512
+        || name.chars().any(char::is_control)
+        || contains_bidi_control(name)
+    {
+        return Err(ArtifactToolError::Validation);
+    }
+    Ok(())
+}
+
+fn contains_bidi_control(value: &str) -> bool {
+    let bidi_control = CodePointSetData::new::<BidiControl>();
+    value
+        .chars()
+        .any(|character| bidi_control.contains(character))
 }
 
 fn normalize_media_type(value: Option<&str>) -> Result<Option<String>, ArtifactToolError> {
@@ -1240,14 +1287,21 @@ fn stored_media_type(value: Option<&str>) -> Result<Option<String>, ArtifactTool
 /// be securely frozen disables local roots for the session instead of falling
 /// back to the broader static policy.
 async fn roots(runtime: &RuntimeContext) -> Result<EffectiveRootRegistry, ArtifactToolError> {
+    let control_deadline = root_authority_control_deadline();
     let registry = runtime
         .artifact_roots()
         .ok_or(ArtifactToolError::MissingRoots)?;
     runtime
         .client_roots()
-        .effective(registry, runtime.request_timeout())
+        .effective_scoped(runtime, registry, control_deadline)
         .await
         .map_err(|error| classify_root_error(&error))
+}
+
+fn root_authority_control_deadline() -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now.checked_add(ROOT_AUTHORITY_CONTROL_TIMEOUT)
+        .unwrap_or(now)
 }
 
 fn classify_root_error(error: &RootAccessError) -> ArtifactToolError {
@@ -1936,10 +1990,10 @@ async fn file_import(
     }
     let owned_runtime = runtime.clone();
     let owned_cancellation = CancellationToken::new();
-    let operation_timeout = runtime.artifact_config().limits.operation_timeout;
+    let operation_deadline = runtime.invocation_deadline();
     let receiver = runtime.supervise_import_settlement(key, settlement_permit, async move {
-        match tokio::time::timeout(
-            operation_timeout,
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(operation_deadline),
             settle_reserved_import(
                 owned_runtime.clone(),
                 source,
@@ -2018,10 +2072,7 @@ async fn settle_reserved_import(
     if let Some(media_type) = declared_media_type.as_ref() {
         request = request.mime(media_type);
     }
-    if let Err(error) = source.mark_import_dispatched(&runtime).await {
-        runtime.artifact_operations().remove(key).await;
-        return Err(error);
-    }
+    begin_durable_artifact_dispatch(&runtime, key, source.mark_import_dispatched(&runtime)).await?;
     let uploaded = match request.upload().await {
         Ok(uploaded) => uploaded,
         Err(error) if mutation_rejection_is_definitive(&error) => {
@@ -2513,6 +2564,8 @@ async fn file_export(
                     return Err(error);
                 }
             };
+            crate::runtime::mark_invocation_dispatched(runtime)
+                .map_err(|_| ArtifactToolError::Upstream)?;
             let allocation = match staging
                 .allocate_export(
                     space_id.clone(),
@@ -2800,6 +2853,28 @@ impl PreparedDocument {
             .map_err(classify_staging_error)?;
         Ok(true)
     }
+}
+
+async fn begin_durable_artifact_dispatch<F>(
+    runtime: &RuntimeContext,
+    key: [u8; 32],
+    local_transition: F,
+) -> Result<(), ArtifactToolError>
+where
+    F: Future<Output = Result<(), ArtifactToolError>>,
+{
+    if crate::runtime::mark_invocation_dispatched(runtime).is_err() {
+        runtime.artifact_operations().remove(key).await;
+        return Err(ArtifactToolError::Upstream);
+    }
+    if local_transition.await.is_err() {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::Indeterminate)
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
+    Ok(())
 }
 
 async fn verify_document_source_before_dispatch(
@@ -3109,12 +3184,7 @@ async fn document_import_create(
     if runtime.is_read_only() {
         return Err(ArtifactToolError::ReadOnly);
     }
-    if input.name.is_empty()
-        || input.name.chars().count() > 512
-        || input.name.chars().any(char::is_control)
-    {
-        return Err(ArtifactToolError::Validation);
-    }
+    validate_document_name(&input.name)?;
     let space_id = resolve_space(runtime.client(), &input.space).await?;
     let typ = runtime
         .client()
@@ -3228,10 +3298,7 @@ async fn document_import_create(
         &source,
     )
     .await?;
-    if let Err(error) = source.mark_staged_dispatched(runtime).await {
-        runtime.artifact_operations().remove(key).await;
-        return Err(error);
-    }
+    begin_durable_artifact_dispatch(runtime, key, source.mark_staged_dispatched(runtime)).await?;
     let created = match request.create().await {
         Ok(created) => created,
         Err(error) if mutation_rejection_is_definitive(&error) => {
@@ -3470,10 +3537,7 @@ async fn document_import_update(
         &source,
     )
     .await?;
-    if let Err(error) = source.mark_staged_dispatched(runtime).await {
-        runtime.artifact_operations().remove(key).await;
-        return Err(error);
-    }
+    begin_durable_artifact_dispatch(runtime, key, source.mark_staged_dispatched(runtime)).await?;
     let updated = match runtime
         .client()
         .update_object(space_id.as_str(), object_id.as_str())
@@ -3790,6 +3854,8 @@ async fn document_export(
                     return Err(error);
                 }
             };
+            crate::runtime::mark_invocation_dispatched(runtime)
+                .map_err(|_| ArtifactToolError::Upstream)?;
             let allocation = match staging
                 .allocate_export(space_id.clone(), size, Some("text/markdown".to_owned()))
                 .await
@@ -3901,6 +3967,7 @@ async fn stage_allocate(
     }
     let media_type = normalize_media_type(input.media_type.as_ref().map(String::as_str))?;
     let space_id = resolve_space(runtime.client(), &input.space).await?;
+    crate::runtime::mark_invocation_dispatched(runtime).map_err(|_| ArtifactToolError::Upstream)?;
     let allocation = staging(runtime)?
         .allocate_import(
             space_id,
@@ -3927,6 +3994,7 @@ async fn stage_release(
     if runtime.is_read_only() {
         return Err(ArtifactToolError::ReadOnly);
     }
+    crate::runtime::mark_invocation_dispatched(runtime).map_err(|_| ArtifactToolError::Upstream)?;
     staging(runtime)?
         .release(&input.handle)
         .await
@@ -3935,18 +4003,35 @@ async fn stage_release(
 }
 
 async fn artifact_status(runtime: &RuntimeContext) -> ArtifactStatusOutput {
+    // Resolve local-root authority first. Stable stdio must begin or join its
+    // one terminal client-roots decision before unrelated staging awaits can
+    // delay the snapshot's absolute deadline.
+    let root_authority_deadline = root_authority_control_deadline();
+    let root_authority = match runtime.artifact_roots() {
+        Some(roots) => Some(
+            runtime
+                .client_roots()
+                .authority_scoped(runtime, roots, root_authority_deadline)
+                .await,
+        ),
+        None => None,
+    };
     let (staging_available_bytes, staging_available_entries) = match runtime.artifact_staging() {
         Some(staging) => staging.available_quota().await,
         None => (0, 0),
     };
     ArtifactStatusOutput {
-        local_roots_active: runtime.artifact_roots().is_some(),
-        import_root_count: runtime
-            .artifact_roots()
-            .map_or(0, |roots| bounded_root_count(roots.import_root_count())),
-        export_root_count: runtime
-            .artifact_roots()
-            .map_or(0, |roots| bounded_root_count(roots.export_root_count())),
+        local_root_authority: root_authority
+            .as_ref()
+            .map_or(ArtifactLocalRootAuthority::Unavailable, |decision| {
+                decision.authority().into()
+            }),
+        import_root_count: root_authority.as_ref().map_or(0, |decision| {
+            bounded_root_count(decision.import_root_count())
+        }),
+        export_root_count: root_authority.as_ref().map_or(0, |decision| {
+            bounded_root_count(decision.export_root_count())
+        }),
         staging_configured: runtime
             .artifact_config()
             .staging()
@@ -4170,8 +4255,8 @@ where
             );
             Err(ArtifactToolError::Indeterminate)
         },
-        result = tokio::time::timeout(
-            runtime.artifact_config().limits.operation_timeout,
+        result = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(runtime.invocation_deadline()),
             operation,
         ) => match result {
             Ok(result) => result,
@@ -4214,7 +4299,201 @@ fn decode_arguments<T: for<'de> Deserialize<'de>>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use anytype::prelude::{AnytypeClient, ClientConfig};
+
     use super::*;
+    use crate::runtime::{InvocationAnchor, StartupStatus};
+
+    fn dispatch_test_runtime(timeout: std::time::Duration) -> RuntimeContext {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("any-mcp-artifact-dispatch-test".to_owned()),
+            app_name: "any-mcp-artifact-dispatch-test".to_owned(),
+            ..ClientConfig::default()
+        })
+        .expect("test client");
+        RuntimeContext::from_parts(
+            client,
+            1,
+            timeout,
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+        )
+    }
+
+    async fn admit_artifact_test_invocation(
+        runtime: &RuntimeContext,
+        tool_name: &str,
+        cancellation: &CancellationToken,
+        timeout: std::time::Duration,
+    ) -> crate::runtime::InvocationCapability {
+        runtime
+            .scope_ingress(
+                InvocationAnchor::capture_durations(timeout, timeout),
+                runtime.admit_invocation(tool_name, cancellation),
+            )
+            .await
+            .expect("artifact invocation admission")
+    }
+
+    async fn run_between_dispatch_transition_race(tool_name: &'static str, cancel: bool) {
+        let timeout = std::time::Duration::from_millis(50);
+        let runtime = dispatch_test_runtime(timeout);
+        let cancellation = CancellationToken::new();
+        let capability =
+            admit_artifact_test_invocation(&runtime, tool_name, &cancellation, timeout).await;
+        let deadline = capability.deadline();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let local_transition_ran = Arc::new(AtomicBool::new(false));
+        let supervisor_runtime = runtime.clone();
+        let operation_runtime = runtime.clone();
+        let operation_cancellation = cancellation.clone();
+        let transition_entered = Arc::clone(&entered);
+        let transition_release = Arc::clone(&release);
+        let transition_ran = Arc::clone(&local_transition_ran);
+        let key = digest_fields(b"dispatch-transition-test", &[tool_name.as_bytes()]);
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import(key, [91; 32])
+                .await,
+            Ok(ImportIdempotency::Dispatch)
+        ));
+        let (supervisor_sender, supervisor_receiver) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(async move {
+            operation_runtime
+                .run_invocation(
+                    capability,
+                    &operation_cancellation,
+                    Box::pin(async move {
+                        let durable_runtime = supervisor_runtime.clone();
+                        let supervisor =
+                            supervisor_runtime.spawn_invocation_supervisor(async move {
+                                begin_durable_artifact_dispatch(&durable_runtime, key, async move {
+                                    transition_entered.notify_one();
+                                    transition_release.notified().await;
+                                    transition_ran.store(true, Ordering::SeqCst);
+                                    Ok(())
+                                })
+                                .await
+                            });
+                        let _ = supervisor_sender.send(supervisor);
+                        std::future::pending::<()>().await;
+                    }),
+                )
+                .await
+        });
+        let supervisor = supervisor_receiver.await.expect("supervisor handle");
+        entered.notified().await;
+        if cancel {
+            cancellation.cancel();
+        } else {
+            tokio::time::sleep_until(deadline).await;
+        }
+        let failure = running
+            .await
+            .expect("invocation join")
+            .expect_err("parent terminal event wins");
+        assert_eq!(
+            failure.kind,
+            if cancel {
+                ControlledFailureKind::Cancelled
+            } else {
+                ControlledFailureKind::TimedOut
+            }
+        );
+        assert!(failure.dispatched);
+        assert!(!local_transition_ran.load(Ordering::SeqCst));
+        release.notify_one();
+        assert_eq!(
+            supervisor.await.expect("supervisor join"),
+            Ok(()),
+            "{tool_name} local durable transition"
+        );
+        assert!(local_transition_ran.load(Ordering::SeqCst));
+        let recovery_cancellation = CancellationToken::new();
+        let recovery = runtime
+            .admit_invocation("server_status", &recovery_cancellation)
+            .await
+            .expect("invocation capacity recovered");
+        drop(recovery);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn artifact_deadline_between_global_and_local_dispatch_is_indeterminate() {
+        for tool_name in [FILE_IMPORT, DOCUMENT_IMPORT_CREATE, DOCUMENT_IMPORT_UPDATE] {
+            run_between_dispatch_transition_race(tool_name, false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn artifact_cancellation_between_global_and_local_dispatch_is_indeterminate() {
+        for tool_name in [FILE_IMPORT, DOCUMENT_IMPORT_CREATE, DOCUMENT_IMPORT_UPDATE] {
+            run_between_dispatch_transition_race(tool_name, true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn local_dispatch_failure_after_global_claim_is_indeterminate() {
+        for tool_name in [FILE_IMPORT, DOCUMENT_IMPORT_CREATE, DOCUMENT_IMPORT_UPDATE] {
+            let runtime = dispatch_test_runtime(std::time::Duration::from_secs(1));
+            let cancellation = CancellationToken::new();
+            let capability = admit_artifact_test_invocation(
+                &runtime,
+                tool_name,
+                &cancellation,
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+            let key = digest_fields(b"dispatch-local-failure", &[tool_name.as_bytes()]);
+            assert!(matches!(
+                runtime
+                    .artifact_operations()
+                    .reserve_import(key, [92; 32])
+                    .await,
+                Ok(ImportIdempotency::Dispatch)
+            ));
+            let result = runtime
+                .run_invocation(
+                    capability,
+                    &cancellation,
+                    Box::pin(begin_durable_artifact_dispatch(&runtime, key, async {
+                        Err(ArtifactToolError::NotFound)
+                    })),
+                )
+                .await
+                .expect("operation result");
+            assert_eq!(result, Err(ArtifactToolError::Indeterminate));
+            assert!(matches!(
+                runtime
+                    .artifact_operations()
+                    .reserve_import(key, [92; 32])
+                    .await,
+                Err(ArtifactToolError::Indeterminate)
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn root_authority_control_deadline_is_fixed_at_thirty_seconds() {
+        let runtime = dispatch_test_runtime(std::time::Duration::from_secs(300));
+        let started = tokio::time::Instant::now();
+
+        assert_eq!(
+            root_authority_control_deadline(),
+            started + std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            runtime.request_timeout(),
+            std::time::Duration::from_secs(300)
+        );
+    }
 
     #[test]
     fn contracts_are_closed_and_payload_free() {
@@ -4248,6 +4527,50 @@ mod tests {
             Some("application/octet-stream".to_owned())
         );
         assert!(normalize_media_type(Some("text/plain; charset=utf-8")).is_err());
+    }
+
+    #[test]
+    fn bidi_controls_are_rejected_from_file_and_document_import_names() {
+        let bidi_controls = [
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}',
+            '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ];
+
+        for control in bidi_controls {
+            let name = format!("safe{control}name");
+            assert!(
+                validate_name(&name).is_err(),
+                "file_import accepted U+{:04X}",
+                u32::from(control)
+            );
+            assert!(
+                validate_document_name(&name).is_err(),
+                "document_import_create accepted U+{:04X}",
+                u32::from(control)
+            );
+        }
+    }
+
+    #[test]
+    fn import_names_preserve_safe_unicode_and_distinct_bounds() {
+        for name in [
+            "join\u{200c}control.bin",
+            "join\u{200d}control.bin",
+            "ملف-עברית.bin",
+            "cafe\u{0301}.bin",
+        ] {
+            assert!(validate_name(name).is_ok(), "file_import rejected {name:?}");
+            assert!(
+                validate_document_name(name).is_ok(),
+                "document_import_create rejected {name:?}"
+            );
+        }
+
+        assert!(validate_name("path/name").is_err());
+        assert!(validate_document_name("path/name").is_ok());
+        assert!(validate_name(&"n".repeat(256)).is_err());
+        assert!(validate_document_name(&"n".repeat(512)).is_ok());
+        assert!(validate_document_name(&"n".repeat(513)).is_err());
     }
 
     #[test]

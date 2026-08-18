@@ -131,8 +131,19 @@ and `FileObject`. Important conveniences include:
   multipart REST requests use the long profile; each paginated page uses the
   standard profile. REST SSE keeps open, error-body, established-idle, and
   established-lifetime boundaries separate.
+- One gRPC deadline service classifies credential, ordinary, long-operation,
+  stream-setup, and cleanup calls, then applies the earliest configured,
+  enclosing, or caller boundary. Stream setup is local through response
+  headers so it does not accidentally become a whole-stream tonic timeout;
+  optional established idle and lifetime controllers cover raw transport
+  progress and reconnect work. `AnytypeGrpcClient::channel()` is the explicit
+  raw compatibility bypass; `client_commands()` and `deadline_channel()` use
+  the policy-aware service.
 - Authentication helpers combine challenge creation, user-code exchange,
   in-memory credential installation, and optional keystore persistence.
+
+The dependency direction remains `anytype` to `anytype-rpc`. Deadline policy
+does not introduce a reverse `anytype-rpc` dependency on this crate.
 
 ## gRPC-only extensions
 

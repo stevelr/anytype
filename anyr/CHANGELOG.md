@@ -46,6 +46,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Bound aggregate `--all` operations with one 30-minute workflow deadline and
+  `init-cli` with one 120-second deadline across its subprocess, verification,
+  and join phases. Timeout overrides use strict finite ranges; child failures
+  terminate and reap the direct child plus its owned Windows Job or Unix process
+  group, and report dispatched mutations as indeterminate. Unix descendants can
+  escape that boundary with `setsid` or `setpgid`. Cleanup that exceeds its bound
+  transfers ownership to a durable OS-thread reaper rather than abandoning the
+  child when the command runtime shuts down.
 - Sort subcommand lists alphabetically throughout the `anyr` help tree.
 - Let disposable headless live workflows select the Anytype CLI through
   `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.
@@ -63,6 +71,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Reject conflicting global output requests for every command: any pair of
+  `--json`, `--pretty`, `--table`, and `--quiet`, or `--quiet` with
+  `-o`/`--output`, now fails before dispatch.
+- Keep chat transport and pagination truthful: message list, get, and delete
+  are gRPC-only and reject `--transport rest`, while `--all` chat listings and
+  message searches exhaust checked server pages.
+- Run the real-operations live case inside the shared cleanup-owned disposable
+  space guard so failures during setup or assertions cannot strand its space.
 - Make the `init-cli` child-failure regression assert its stable operation and
   redaction contract instead of requiring platform-specific exit-status text.
 - Make the oversized `init-cli` output regression emit its limit-crossing

@@ -10,6 +10,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 **Changed:**
 
+- Add a task-scoped absolute enclosing deadline that generated calls merge
+  with method policy and explicit request options, preserving the remaining
+  local and `grpc-timeout` budget across composed workflows.
+- Apply validated logical deadlines to generated gRPC clients, including
+  finite credential, ordinary, long-operation, stream-setup, and cleanup
+  profiles; absolute enclosing and caller bounds; typed, payload-free timeout
+  outcomes; status-code-preserving transport failures that discard their
+  original payload; and bounded established-stream reconnect work. Raw
+  `channel()` calls remain an explicit compatibility bypass.
 - Tier 2 builds, tests, and documents the crate from its packaged tarball so
   workspace feature unification cannot hide a missing published dependency or
   packaged source file.
@@ -26,6 +35,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   source instead of being encoded as an API response with numeric code zero.
 
 **Added:**
+
+- Add `GrpcTimeoutPolicy`, `GrpcCallOptions`, `GrpcEnclosingDeadline`,
+  `GrpcStreamDeadline`, and the deadline-aware `deadline_channel()` service;
+  `ANYTYPE_GRPC_TIMEOUT_SECS` supplies inherited process policy.
 
 | Name                                        | --                         |
 | ------------------------------------------- | -------------------------- |

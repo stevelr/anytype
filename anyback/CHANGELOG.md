@@ -4,6 +4,15 @@
 
 ### Changed
 
+- Compose backup and restore under one absolute workflow deadline, including
+  selection, export/import, process watching, verification, and local result
+  publication. Timeout environment values now use strict finite ranges, and
+  restore timeouts identify the dispatched mutation outcome as indeterminate.
+  Local publication uses a revocable prepare/commit handshake. A manifest binds
+  the staged archive's exact byte length and SHA-256 digest before the archive is
+  the final commit record; failed publication conditionally removes only its own
+  manifest identity. Restore completion is
+  bound to a unique server-issued collection correlation for every import batch.
 - Run the installed anyr backup/create/restore live gate on pushes to `main`
   and nightly while retaining manual dispatch.
 - Sort the embedded backup command help alphabetically.
@@ -35,9 +44,10 @@
 
 - Document validation of direct pre-delete archives through
   `anyr backup list --files`.
-- The standalone `anyback` executable is replaced by the `anyr backup`
-  command. Archive operations are available through the reusable CLI library;
-  authentication is provided by `anyr auth`.
+- The standalone `anyback` executable and its orphaned top-level parser are
+  retired in favor of `anyr backup`. Archive operations remain available
+  through the reusable embedded CLI library; authentication is provided by
+  `anyr auth`.
 - Markdown conversion unit tests now build self-contained protobuf and
   `pb.json` archive fixtures in test code instead of depending on an external
   `samples/` tree, so heading, list-whitespace, table, and `save_archive_object`
@@ -49,6 +59,12 @@
 
 ### Fixed
 
+- Treat raw archive layouts 8 through 12 consistently as file payloads and
+  return `MissingRawPayloadError` when a file-layout snapshot has no matching
+  bytes, without writing a destination.
+- Share one secret-safe `anyr` harness across live backup suites. It validates
+  every retry attempt and reports only status, byte counts, and terminal-control
+  categories for malformed output or archive-path failures.
 - Compare installed-binary live-gate bodies using the API's canonical Markdown
   representation, so server-added escaping and trailing paragraph whitespace
   do not masquerade as backup loss. Directory-archive listings and protobuf

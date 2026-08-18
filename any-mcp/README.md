@@ -326,11 +326,12 @@ on its own, so an incomplete setup refuses work instead of widening access.
 3. **Select the policy.** `--config ABSOLUTE_PATH` or `ANY_MCP_CONFIG` chooses
    the strict TOML file. Validate it before starting a client with
    `anyr mcp check --config FILE`.
-4. **Verify at run time.** Call `artifact_status`. It reports
-   `local_roots_active`, `import_root_count`, `export_root_count`,
-   `staging_configured`, `staging_active`, remaining staging bytes and entries,
-   and the validator counts, so an operator can confirm the authority a client
-   actually received without exposing record metadata.
+4. **Verify at run time.** Call `artifact_status`. It reports the path-free
+   `local_root_authority` state (`unavailable`, `configured`, `narrowed`, or
+   `disabled`), effective import and export root counts, staging posture and
+   remaining capacity, and validator counts. The result describes the
+   authority this session actually received without exposing root identities
+   or record metadata.
 
 #### Local clients (stdio)
 
@@ -393,6 +394,13 @@ alias, or a URI that is not a canonical local `file:` directory) disables local
 root operations for the rest of the session rather than falling back to the
 broader configured policy. Staged operations are unaffected. Client root URIs
 and display names never appear in diagnostics or receipts.
+
+`artifact_status` and local operations share that one terminal decision.
+`configured` reports the complete static policy, `narrowed` reports only the
+effective intersection, `disabled` reports zero effective roots after a
+fail-closed resolution, and `unavailable` reports zero roots when no local-root
+plane exists. Concurrent or cancelled callers cannot restart resolution or
+extend its first absolute deadline.
 
 #### Remote clients (HTTP staging)
 
@@ -534,6 +542,16 @@ putting their bytes in MCP messages:
   transfer strict UTF-8 Markdown or plain text and return identities, counts,
   hashes, and bounded receipts. Document creation can also apply up to 50 typed
   properties validated against the resolved Anytype type.
+
+`file_import` and `document_import_create` validate their requested names
+before resolving the source or dispatching a mutation. Names containing a
+Unicode `Bidi_Control` character are rejected to prevent directional display
+spoofing; the validation diagnostic does not echo the name or code point.
+Zero-width non-joiner and joiner (ZWNJ and ZWJ), ordinary right-to-left text,
+and exact non-normalized Unicode spelling remain accepted, subject to each
+tool's existing length and control-character rules. This check is specific to
+bidirectional controls; it is not general protection against homographs or
+every invisible character.
 
 Local paths contain a logical root ID and relative path. If no roots are
 declared, root-based calls explain that you must select a policy file with
@@ -1448,11 +1466,14 @@ success. Space and full non-archived type references use the bounded
 `anytype-api` resolvers. Optional templates use the public direct-id or exact
 1,000-row resolver and are fetched by id to revalidate archive, space, and type
 id/key for the generic template object; the endpoint path scopes the owning
-object type. The immediate POST response and final verification GET are both
-revalidated. A success requires safe matching object, space, and type id/key
-plus semantic agreement for each caller-supplied name, Markdown body, icon,
-and typed property in both representations. The MCP result contains only a
-bounded object summary and canonical resource link.
+object type. The immediate POST response is treated as a creation receipt: it
+must contain a safe object ID in the resolved space and type and must not report
+an archived object. The independent verification GET is authoritative for the
+completed state and must match the receipt identity plus every caller-supplied
+name, Markdown body, icon, and typed property. This permits a transient or
+noncanonical create response to converge without sending a second POST; a
+missing or divergent final read remains mutation-indeterminate. The MCP result
+contains only a bounded object summary and canonical resource link.
 
 All optional fields reject explicit JSON `null`; omission means that the field
 is absent from the create payload. Names are nonempty, while an explicitly
@@ -1854,9 +1875,9 @@ failure artifact.
 The selectable `headless_direct_standard_*` and
 `headless_stdio_standard_*` cases cover discovery, document/resource access,
 views, mutations, exported-Markdown no-op replacement, and archive through
-both entry paths. They execute all 14
-standard tools and `resources/list`, `resources/templates/list`, and
-`resources/read`, including bounded cursor terminality and binding,
+both entry paths. They execute the standard tools and `resources/list`,
+`resources/templates/list`, and `resources/read`, including bounded cursor
+terminality and binding,
 ambiguity, explicit view selection, idempotent create, independent
 read-after-write visibility, stale/count edit conflicts, and active/archive
 evidence. Discovery additionally proves exact identities for a forwarded flat
@@ -2149,6 +2170,22 @@ explicitly through `view_object_list`, preserving the selected-view path. The
 required heart RPCs stay inside `anytype-api`, so `any-mcp` retains its
 `anytype-api`-only dependency boundary.
 
+## Benchmark harness status
+
+The non-default `benchmark-harness` feature builds a protected, fail-closed
+benchmark core for comparing this server with the official npm server. It
+validates pinned artifacts, isolated arm configuration, credential descriptor
+handling, bounded JSON-RPC process I/O, secret-free diagnostics, independent
+oracle inputs, and a closed result/statistics schema. The Linux launcher owns
+its transient service and network namespaces and refuses uncertain setup or
+cleanup.
+
+This core does not run or publish a comparison. The live catalog, scenario,
+model, and 120-pair execution loop are not implemented, and the command records
+a blocked result instead of producing benchmark numbers. Live work also
+requires operator-approved immutable upstream artifacts, isolated credentials,
+the reviewed implementation ancestry, and fixed model and cost settings.
+
 ## Build
 
 ```sh
@@ -2191,11 +2228,29 @@ Every request passes fixed gates in order (exact `Host` allowlist, exact
 `Origin` allowlist with fail-closed CORS, a process-global request-rate
 window, bearer authentication, a 64-request concurrency bound, and 2 MiB
 bounded body collection) before any JSON decoding or handler work.
-Authentication is required on every request and is separate from the Anytype
-keystore:
+
+The listener also admits at most 128 TCP connections before parsing headers,
+allows five seconds, 64 headers, and 64 KiB of buffered header data per
+connection, and continuously reaps completed connection tasks. Authenticated
+requests capture their ordinary and artifact deadline candidates before body
+collection. Only a fully decoded call to `file_import`, `file_export`,
+`document_import_create`, `document_import_update`, or `document_export`
+selects the artifact deadline; every other request keeps the ordinary
+deadline. The 2 MiB body has a 30-second no-progress bound that resets only on
+nonempty data and never resets the selected absolute deadline.
+
+One admitted deadline and concurrency lease cover permit waits, nested Anytype
+HTTP and gRPC calls, verification, and approved settlement supervisors. A
+deadline that wins before mutation dispatch returns HTTP 408; after dispatch,
+the protocol result remains `mutation_indeterminate` and the caller must
+reconcile state before retrying. Shutdown applies one absolute cleanup budget
+across artifact settlement and staging on every transport exit.
 
 On Windows, private runtime paths require ownership and every access-granting
 ACL entry to name the process user, LocalSystem, or Built-in Administrators.
+
+Authentication is required on every request and is separate from the Anytype
+keystore:
 
 - `ANY_MCP_HTTP_AUTH=static-token` reads one 43..512-byte base64url token
   from the owner-only regular file named by `ANY_MCP_HTTP_TOKEN_FILE` and
@@ -2211,6 +2266,21 @@ ACL entry to name the process user, LocalSystem, or Built-in Administrators.
   `ANY_MCP_HTTP_AUDIENCE`; `ANY_MCP_HTTP_REQUIRED_SCOPE` defaults to
   `anytype.mcp`.
 
+On supported non-Apple Unix targets, reqwest's rustls platform verifier uses
+`SSL_CERT_FILE` as a replacement for native CA discovery for every reqwest
+client in the process, including the startup JWKS fetch. These anchors protect
+authentication integrity because they determine which TLS issuer may supply
+the verification keys. Use the reviewed issuing private CA or a tightly
+controlled CA bundle containing that issuer and only other roots the process
+requires. Omitting a required root can make other HTTPS operations unavailable;
+an arbitrary or broad bundle expands trust across every reqwest call. A
+self-signed server leaf is not a CA trust anchor, and rustls rejects it even
+when `curl` accepts the same file.
+
+macOS and Windows use OS-native trust. Without explicitly configured roots,
+they do not honor `SSL_CERT_FILE`. Install the reviewed issuing CA through the
+platform trust store or a process deployment mechanism limited to that CA.
+
 Stable mode accepts protocol revisions `2025-03-26`, `2025-06-18`, and
 `2025-11-25` over stateful sessions with optional SSE; revision `2024-11-05`
 remains stdio-only. Sessions are bound to the authenticated principal.
@@ -2222,6 +2292,12 @@ retry an uncertain create after re-initializing. With
 `ANY_MCP_PROTOCOL=experimental-2026-07-28`, `/mcp` instead serves the
 stateless preview: one bounded POST per request returning
 `application/json`, with GET and DELETE rejected.
+
+When stable-session admission reaches its ceiling, the server reconciles its
+bindings with the `rmcp` session manager. It releases only bindings that `rmcp`
+conclusively reports absent; live sessions and failed probes retain their
+slots, so unresolved capacity continues to fail closed with `503 Service
+Unavailable` and `Retry-After: 60`.
 
 Browser clients require `ANY_MCP_HTTP_ALLOWED_ORIGINS` (exact serialized
 origins; absent means every Origin-bearing request is rejected) and must use

@@ -717,9 +717,14 @@ fn grpc_error_is_authentication(error: &AnytypeGrpcError) -> bool {
             | BackupError::SpaceNameLookup { .. }
             | BackupError::MissingExportPath
             | BackupError::BackupIo { .. }
-            | BackupError::BackupMove { .. } => false,
+            | BackupError::BackupMove { .. }
+            | BackupError::Deadline { .. } => false,
         },
-        AnytypeGrpcError::Config { .. } | AnytypeGrpcError::Transport { .. } => false,
+        AnytypeGrpcError::Config { .. }
+        | AnytypeGrpcError::Transport { .. }
+        | AnytypeGrpcError::TimeoutConfig { .. }
+        | AnytypeGrpcError::Deadline { .. }
+        | AnytypeGrpcError::ControlBoundary { .. } => false,
     }
 }
 

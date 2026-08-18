@@ -805,7 +805,9 @@ impl SchemaTypeHandlers {
                         verify_config: self.verify_config.clone(),
                         observer: self.create_observer.clone(),
                     };
-                    tokio::spawn(async move { supervise_type_create(supervision).await });
+                    runtime.spawn_invocation_controller("schema_type_create", move || {
+                        supervise_type_create(supervision)
+                    });
                     wait_for_attempt(attempt, cancellation).await
                 }
             }
@@ -896,7 +898,7 @@ impl SchemaTypeHandlers {
                     if operation_cancellation.is_cancelled() {
                         return Err(HandlerError::new(ToolError::upstream()).into());
                     }
-                    operation_progress.mark_dispatched();
+                    operation_progress.mark_dispatched(runtime)?;
                     let response_anomaly = match request.update().await {
                         Ok(returned) => !type_matches_update_metadata(&returned, &type_id, &input),
                         Err(error) if type_patch_rejection_is_definitive(&error) => {
@@ -1050,9 +1052,10 @@ async fn supervise_type_create(supervision: TypeCreateSupervision) {
     } = supervision;
     let progress = attempt.progress();
     let task_progress = progress.clone();
-    let task = tokio::spawn(async move {
+    let task_runtime = runtime.clone();
+    let task = runtime.spawn_invocation_supervisor(async move {
         execute_type_create(
-            &runtime,
+            &task_runtime,
             &contract,
             normalized,
             &CancellationToken::new(),
@@ -1101,7 +1104,7 @@ async fn execute_type_create(
                 request = request.key(key.as_str());
             }
 
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             let created = match request.create().await {
                 Ok(created) => created,
                 Err(error) => {

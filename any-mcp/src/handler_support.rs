@@ -170,7 +170,18 @@ impl MutationProgress {
     /// Marks that the first write future is about to be polled.
     ///
     /// This transition is idempotent and cannot be reset.
-    pub fn mark_dispatched(&self) {
+    pub(crate) fn mark_dispatched(
+        &self,
+        runtime: &RuntimeContext,
+    ) -> Result<(), HandlerOperationError> {
+        crate::runtime::mark_invocation_dispatched(runtime)
+            .map_err(|_| HandlerError::new(ToolError::upstream()))?;
+        self.stage.store(Self::DISPATCHED, Ordering::SeqCst);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_dispatched_for_test(&self) {
         self.stage.store(Self::DISPATCHED, Ordering::SeqCst);
     }
 
@@ -315,7 +326,7 @@ where
 /// Existing execution helpers do not opt into this policy and are unchanged.
 ///
 /// A handler should use a fresh marker and place
-/// `progress.mark_dispatched()` directly before awaiting its write builder.
+/// `progress.mark_dispatched(runtime)` directly before awaiting its write builder.
 pub async fn execute_mutation_handler<U, O, F, C, CF, E>(
     runtime: &RuntimeContext,
     contract: &WorkflowTool<O>,
@@ -1210,7 +1221,7 @@ mod tests {
             &cancellation,
             &pre_dispatch,
             async move {
-                operation_marker.mark_dispatched();
+                operation_marker.mark_dispatched_for_test();
                 std::future::pending::<Result<(), HandlerOperationError>>().await
             },
             |_| async {
@@ -1235,7 +1246,7 @@ mod tests {
             &cancellation,
             &progress,
             async move {
-                operation_progress.mark_dispatched();
+                operation_progress.mark_dispatched_for_test();
                 operation_cancellation.cancel();
                 std::future::pending::<Result<(), HandlerOperationError>>().await
             },
@@ -1282,7 +1293,7 @@ mod tests {
             &CancellationToken::new(),
             &progress,
             async move {
-                operation_progress.mark_dispatched();
+                operation_progress.mark_dispatched_for_test();
                 std::future::pending::<Result<(), HandlerOperationError>>().await
             },
             |_| async {
@@ -1329,7 +1340,7 @@ mod tests {
             &CancellationToken::new(),
             &progress,
             async move {
-                operation_progress.mark_dispatched();
+                operation_progress.mark_dispatched_for_test();
                 operation_runtime.begin_shutdown();
                 std::future::pending::<Result<(), HandlerOperationError>>().await
             },
@@ -1357,7 +1368,7 @@ mod tests {
             &cancellation,
             &progress,
             async move {
-                operation_progress.mark_dispatched();
+                operation_progress.mark_dispatched_for_test();
                 Err::<(), _>(HandlerOperationError::from(HandlerError::new(
                     ToolError::validation(),
                 )))
@@ -1381,8 +1392,8 @@ mod tests {
         let progress = MutationProgress::new();
         let clone = progress.clone();
         assert_eq!(progress.stage(), MutationStage::PreDispatch);
-        clone.mark_dispatched();
-        clone.mark_dispatched();
+        clone.mark_dispatched_for_test();
+        clone.mark_dispatched_for_test();
         assert_eq!(progress.stage(), MutationStage::Dispatched);
 
         let cancellation = CancellationToken::new();
@@ -1423,7 +1434,7 @@ mod tests {
                 &progress,
                 async move {
                     let _payload = secret;
-                    operation_progress.mark_dispatched();
+                    operation_progress.mark_dispatched_for_test();
                     operation_cancellation.cancel();
                     std::future::pending::<Result<(), HandlerOperationError>>().await
                 },

@@ -5,7 +5,8 @@ use std::convert::TryFrom;
 
 use prost_types::value::Kind;
 use tonic::Request;
-use tonic::transport::Channel;
+use tonic::body::Body;
+use tonic::codegen::{Bytes, StdError};
 
 use crate::anytype::ClientCommandsClient;
 use crate::anytype::rpc::object::show::Request as ObjectShowRequest;
@@ -37,13 +38,19 @@ pub struct GridViewInfo {
 }
 
 /// Fetch table/list view column metadata for a type object.
-pub async fn fetch_grid_view_columns(
-    client: &mut ClientCommandsClient<Channel>,
+pub async fn fetch_grid_view_columns<S>(
+    client: &mut ClientCommandsClient<S>,
     token: &str,
     space_id: &str,
     type_id: &str,
     view_id: &str,
-) -> Result<GridViewInfo, ViewError> {
+) -> Result<GridViewInfo, ViewError>
+where
+    S: tonic::client::GrpcService<Body>,
+    S::Error: Into<StdError>,
+    S::ResponseBody: http_body::Body<Data = Bytes> + Send + 'static,
+    <S::ResponseBody as http_body::Body>::Error: Into<StdError> + Send,
+{
     let request = ObjectShowRequest {
         object_id: type_id.to_string(),
         space_id: space_id.to_string(),

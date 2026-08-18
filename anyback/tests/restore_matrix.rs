@@ -6,14 +6,7 @@
 //! Run with:
 //!   `cargo test -p anyback --test restore_matrix -- --nocapture`
 
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-    thread,
-    time::Duration,
-};
+use std::{collections::BTreeSet, fs, path::Path, thread, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, FixedOffset, Utc};
@@ -21,6 +14,8 @@ use serde_json::Value;
 use tokio::time::sleep;
 
 mod support;
+
+use support::anyr::{assert_non_tty_output_clean, parse_archive_path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ObjKind {
@@ -558,8 +553,7 @@ async fn e2e_matrix_p0_full_restore_simple_object() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let modified_name = format!("anyback-matrix-p0-full-modified-{unique}");
     let modified_body = format!("modified after backup {unique}");
@@ -622,12 +616,12 @@ async fn e2e_matrix_p0_incremental_since_restore_simple_object() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let inc_archive = parse_archive_path(&inc_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {inc_output}"))?;
+    let inc_archive = parse_archive_path(&inc_output)?;
     let selected_ids = backup_selected_ids(&inc_archive)?;
     assert!(
         selected_ids.contains(&object_id),
-        "incremental manifest missing expected object {object_id}; selected={selected_ids:?}"
+        "incremental manifest missing expected object; selected_count={}",
+        selected_ids.len()
     );
 
     let v3_name = format!("anyback-matrix-p0-inc-v3-{unique}");
@@ -675,8 +669,7 @@ async fn e2e_matrix_p0_recovers_permanently_deleted_object() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     delete_object(&space, &object_id)?;
     sleep(Duration::from_millis(600)).await;
@@ -753,8 +746,7 @@ async fn e2e_matrix_p0_file_recreate_preserves_dates() -> Result<()> {
         "--dir",
         &temp_dir.path().display().to_string(),
     ])?;
-    let archive_path = parse_archive_path(&backup_output)
-        .ok_or_else(|| anyhow!("could not parse archive path from output: {backup_output}"))?;
+    let archive_path = parse_archive_path(&backup_output)?;
 
     let _ = run_anyback([
         "restore",
@@ -827,38 +819,9 @@ fn run_anyback<const N: usize>(args: [&str; N]) -> Result<String> {
     let mut full = Vec::with_capacity(args.len() + 1);
     full.push("backup");
     full.extend_from_slice(&args);
-    run_anyr_dyn(&full)
-}
-
-/// Parses the structured (compact JSON) result document written by `anyr`.
-fn parse_json_output(output: &str) -> Result<Value> {
-    serde_json::from_str(output.trim())
-        .with_context(|| format!("expected structured anyr output, got: {output}"))
-}
-
-/// Resolves the `anyr` executable under test.
-///
-/// `ANYR_BIN` wins when set; otherwise the binary built alongside this test
-/// harness is required. The harness never falls back to `PATH`.
-fn anyr_binary() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("ANYR_BIN") {
-        let path = PathBuf::from(path);
-        if !path.is_file() {
-            return Err(anyhow!("ANYR_BIN is not a file: {}", path.display()));
-        }
-        return Ok(path);
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(target_dir) = exe.parent().and_then(Path::parent)
-    {
-        let candidate = target_dir.join(format!("anyr{}", std::env::consts::EXE_SUFFIX));
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(anyhow!(
-        "anyr test binary not found; run `cargo build -p anyr` first or set ANYR_BIN"
-    ))
+    let (stdout, stderr) = run_anyr_parts(&full)?;
+    assert_non_tty_output_clean(&stderr);
+    Ok(stdout)
 }
 
 fn run_anyr<const N: usize>(args: [&str; N]) -> Result<String> {
@@ -866,25 +829,13 @@ fn run_anyr<const N: usize>(args: [&str; N]) -> Result<String> {
 }
 
 fn run_anyr_dyn(args: &[&str]) -> Result<String> {
-    let output = run_with_lock_retry(|| {
-        let mut command = Command::new(anyr_binary()?);
-        command.args(args);
-        let _keystore = support::keystore::configure_test_keystore(&mut command)?;
-        command.output().context("failed to execute anyr command")
-    })?;
+    Ok(run_anyr_parts(args)?.0)
+}
 
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "anyr command failed (status={}):\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            stdout,
-            stderr
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+fn run_anyr_parts(args: &[&str]) -> Result<(String, String)> {
+    support::anyr::run_anyr_parts(args, |args| {
+        run_with_lock_retry(|| support::anyr::run_once_checked(args))
+    })
 }
 
 fn resolve_space_id(space_name: &str) -> Result<String> {
@@ -946,14 +897,6 @@ fn looks_like_transient_anytype_error(output: &std::process::Output) -> bool {
         || haystack.contains("failed to export markdown")
         || haystack.contains("context deadline exceeded")
         || haystack.contains("sqlite: step: disk I/O error")
-}
-
-fn parse_archive_path(output: &str) -> Option<PathBuf> {
-    parse_json_output(output)
-        .ok()?
-        .get("archive")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
 }
 
 fn backup_selected_ids(archive_path: &Path) -> Result<Vec<String>> {
@@ -1087,14 +1030,13 @@ async fn wait_object_name_eq(space_name: &str, object_id: &str, expected: &str) 
         }
         sleep(Duration::from_millis(750)).await;
     }
-    let actual = get_object_json(space_name, object_id)
+    let actual_metadata = get_object_json(space_name, object_id)
         .ok()
         .and_then(|v| v.get("name").and_then(Value::as_str).map(String::from))
-        .unwrap_or_else(|| "<unavailable>".to_string());
+        .map(|actual| support::anyr::stream_metadata(actual.as_bytes()))
+        .unwrap_or_else(|| "unavailable".to_string());
     bail!(
-        "object {object_id} name expected '{}' but got '{}' in space {space_name}",
-        expected,
-        actual
+        "object {object_id} did not reach expected name in space {space_name}; actual={actual_metadata}"
     )
 }
 
@@ -1110,14 +1052,13 @@ async fn wait_object_body_contains(space_name: &str, object_id: &str, token: &st
         }
         sleep(Duration::from_millis(750)).await;
     }
-    let actual = get_object_json(space_name, object_id)
+    let actual_metadata = get_object_json(space_name, object_id)
         .ok()
         .and_then(|v| v.get("markdown").and_then(Value::as_str).map(String::from))
-        .unwrap_or_else(|| "<unavailable>".to_string());
+        .map(|actual| support::anyr::stream_metadata(actual.as_bytes()))
+        .unwrap_or_else(|| "unavailable".to_string());
     bail!(
-        "object {object_id} body does not contain '{}' (actual: '{}') in space {space_name}",
-        token,
-        actual
+        "object {object_id} body did not contain expected token in space {space_name}; actual={actual_metadata}"
     )
 }
 

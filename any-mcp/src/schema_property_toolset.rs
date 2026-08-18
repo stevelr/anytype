@@ -532,15 +532,16 @@ impl SchemaPropertyHandlers {
             BeginAttempt::Wait(attempt) => wait_for_attempt(attempt, cancellation).await,
             BeginAttempt::Lead(attempt) => {
                 let runtime = runtime.clone();
+                let supervisor_runtime = runtime.clone();
                 let contract = self.create_contract.clone();
                 let store = self.idempotency.clone();
                 let task_attempt = attempt.clone();
                 let verify_config = self.verify_config.clone();
                 let observer = self.create_observer.clone();
                 let before_post = self.before_post.clone();
-                tokio::spawn(async move {
+                runtime.spawn_invocation_controller("schema_property_create", move || async move {
                     supervise_property_create(PropertyCreateSupervision {
-                        runtime,
+                        runtime: supervisor_runtime,
                         contract,
                         store,
                         key,
@@ -608,7 +609,7 @@ impl SchemaPropertyHandlers {
                 if operation_cancellation.is_cancelled() {
                     return Err(HandlerError::new(ToolError::upstream()).into());
                 }
-                operation_progress.mark_dispatched();
+                operation_progress.mark_dispatched(runtime)?;
                 let response_anomaly = match request.update().await {
                     Ok(returned) => {
                         !property_matches_update(&returned, &property_id, &input, current.format())
@@ -716,9 +717,10 @@ async fn supervise_property_create(supervision: PropertyCreateSupervision) {
     } = supervision;
     let progress = attempt.progress();
     let task_progress = progress.clone();
-    let task = tokio::spawn(async move {
+    let task_runtime = runtime.clone();
+    let task = runtime.spawn_invocation_supervisor(async move {
         execute_property_create(
-            &runtime,
+            &task_runtime,
             &contract,
             normalized,
             &CancellationToken::new(),
@@ -773,7 +775,7 @@ async fn execute_property_create(
             if cancellation.is_cancelled() {
                 return Err(HandlerError::new(ToolError::upstream()).into());
             }
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             let created = match request.create().await {
                 Ok(created) => created,
                 Err(error) => {

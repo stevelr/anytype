@@ -67,8 +67,8 @@ use tracing::debug;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use anytype_rpc::anytype::rpc;
 use anytype_rpc::anytype::rpc::object::list_delete;
-use anytype_rpc::anytype::{ClientCommandsClient, rpc};
 pub use anytype_rpc::backup::SpaceBackupResult;
 use anytype_rpc::backup::{ExportFormat, SpaceBackupOptions};
 use anytype_rpc::{anytype::rpc::object::search_with_meta, model};
@@ -1220,7 +1220,8 @@ impl AnytypeClient {
         let grpc = self.grpc_client().await?;
         let request = chat_space_create_request(name.clone());
         let request = with_token_request(Request::new(request), grpc.token())?;
-        let response = ClientCommandsClient::new(grpc.channel())
+        let response = grpc
+            .client_commands()
             .workspace_create(request)
             .await
             .map_err(grpc_status)?
@@ -1270,7 +1271,8 @@ impl AnytypeClient {
             space_id: space_id.to_owned(),
         };
         let request = with_token_request(Request::new(request), grpc.token())?;
-        let response = ClientCommandsClient::new(grpc.channel())
+        let response = grpc
+            .client_commands()
             .space_delete(request)
             .await
             .map_err(grpc_status)?
@@ -1384,7 +1386,8 @@ impl AnytypeClient {
             permissions: permissions.as_rpc(),
         };
         let request = with_token_request(Request::new(request), grpc.token())?;
-        let response = ClientCommandsClient::new(grpc.channel())
+        let response = grpc
+            .client_commands()
             .space_invite_generate(request)
             .await
             .map_err(grpc_status)?
@@ -1427,7 +1430,8 @@ impl AnytypeClient {
             space_id: space_id.to_owned(),
         };
         let request = with_token_request(Request::new(request), grpc.token())?;
-        let response = ClientCommandsClient::new(grpc.channel())
+        let response = grpc
+            .client_commands()
             .space_invite_revoke(request)
             .await
             .map_err(grpc_status)?
@@ -1476,7 +1480,8 @@ impl AnytypeClient {
                     space_id: space_id.to_owned(),
                 };
                 let request = with_token_request(Request::new(request), grpc.token())?;
-                let response = ClientCommandsClient::new(grpc.channel())
+                let response = grpc
+                    .client_commands()
                     .space_make_shareable(request)
                     .await
                     .map_err(grpc_status)?
@@ -1500,7 +1505,8 @@ impl AnytypeClient {
                 space_id: space_id.to_owned(),
             };
             let request = with_token_request(Request::new(request), grpc.token())?;
-            let response = ClientCommandsClient::new(grpc.channel())
+            let response = grpc
+                .client_commands()
                 .space_stop_sharing(request)
                 .await
                 .map_err(grpc_status)?

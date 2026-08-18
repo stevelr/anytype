@@ -82,11 +82,15 @@ pub enum MemberStatus {
 /// Represents a member of an Anytype space.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Member {
+    /// Data model type returned by the REST API.
+    #[serde(default = "member_data_model")]
+    pub object: DataModel,
+
     /// Global name in the network (e.g., "john.any")
     pub global_name: Option<String>,
 
     /// Member's icon
-    pub icon: Option<serde_json::Value>,
+    pub icon: Option<Icon>,
 
     /// Profile object ID of the member
     pub id: String,
@@ -102,6 +106,10 @@ pub struct Member {
 
     /// Member's status (Active, Joining, etc.)
     pub status: MemberStatus,
+}
+
+fn member_data_model() -> DataModel {
+    DataModel::Member
 }
 
 impl Member {
@@ -311,6 +319,7 @@ mod tests {
 
     fn make_member(role: MemberRole, status: MemberStatus) -> Member {
         Member {
+            object: DataModel::Member,
             global_name: None,
             icon: None,
             id: "test".to_string(),
@@ -366,5 +375,66 @@ mod tests {
         }
         assert!(validate_member_reference(&"x".repeat(MAX_MEMBER_REFERENCE_BYTES)).is_ok());
         assert!(validate_member_reference(&"x".repeat(MAX_MEMBER_REFERENCE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn member_schema_preserves_discriminator_and_typed_icon() {
+        let response: MemberResponse = serde_json::from_value(serde_json::json!({
+            "member": {
+                "object": "member",
+                "global_name": "john.any",
+                "icon": {
+                    "format": "icon",
+                    "name": "person",
+                    "color": "blue"
+                },
+                "id": "member-id",
+                "identity": "identity-id",
+                "name": "John",
+                "role": "owner",
+                "status": "active"
+            }
+        }))
+        .expect("member response schema");
+
+        assert_eq!(response.member.object, DataModel::Member);
+        assert_eq!(
+            response.member.icon,
+            Some(Icon::Icon {
+                name: "person".to_owned(),
+                color: Color::Blue,
+            })
+        );
+        let serialized = serde_json::to_value(response.member).expect("serialize member");
+        assert_eq!(serialized["object"], "member");
+        assert_eq!(serialized["icon"]["format"], "icon");
+    }
+
+    #[test]
+    fn member_discriminator_defaults_when_omitted_and_preserves_present_value() {
+        let member_without_discriminator: Member = serde_json::from_value(serde_json::json!({
+            "global_name": null,
+            "icon": null,
+            "id": "member-id",
+            "identity": null,
+            "name": null,
+            "role": "viewer",
+            "status": "active"
+        }))
+        .expect("member without discriminator");
+        assert_eq!(member_without_discriminator.object, DataModel::Member);
+
+        let member_with_observed_type: Member = serde_json::from_value(serde_json::json!({
+            "object": "type",
+            "global_name": null,
+            "icon": null,
+            "id": "member-id",
+            "identity": null,
+            "name": null,
+            "role": "viewer",
+            "status": "active"
+        }))
+        .expect("member with observed discriminator");
+        assert_eq!(member_with_observed_type.object, DataModel::Type);
     }
 }

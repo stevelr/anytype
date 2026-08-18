@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::Read, str::FromStr};
+use std::{collections::HashMap, future::Future, io::Read, str::FromStr};
 
 use anyhow::{Result, anyhow, bail};
 use anytype::{prelude::*, validation::looks_like_object_id};
@@ -16,15 +16,18 @@ use crate::{
     output::{OutputFormat, render_table_dynamic},
 };
 
+const ALL_CHAT_PAGE_SIZE: u32 = 1000;
+
 #[allow(clippy::too_many_lines, clippy::large_stack_frames)]
 pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
     // Resolve the transport backend for this operation before touching the
     // network. `resolve_transport` both enforces the rejection guards
     // (`--transport rest` on gRPC-only operations, `--transport grpc` on
     // REST-only ones) and returns the backend each handler dispatches on:
-    // REST-capable operations run through `SpaceChatsClient` when the resolved
-    // backend is `Rest`/`RestSse`, and gRPC otherwise. The backend is also
-    // surfaced in verbose diagnostics.
+    // Operations classified for REST run through `SpaceChatsClient` when the
+    // resolved backend is `Rest`/`RestSse`, and gRPC-only operations are
+    // rejected before any network access. The backend is also surfaced in
+    // verbose diagnostics.
     let op = classify(&args.command);
     let backend = resolve_transport(args.transport, &op)?;
     info!(
@@ -48,17 +51,20 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                             "--filter cannot be combined with --text; chat text search uses the gRPC discovery API"
                         );
                     }
-                    let mut request = ctx
-                        .client
-                        .chats()
-                        .search_chats_in(&space_id)
-                        .text(text)
-                        .limit(pagination_limit(&pagination))
-                        .offset(pagination_offset(&pagination));
-                    if pagination.all {
-                        request = request.limit(1000).offset(0);
-                    }
-                    (Some(space_id), request.search().await?)
+                    let result = if pagination.all {
+                        ctx.collect_all(collect_all_grpc_chats(ctx, Some(&space_id), Some(&text)))
+                            .await?
+                    } else {
+                        ctx.client
+                            .chats()
+                            .search_chats_in(&space_id)
+                            .text(text)
+                            .limit(pagination_limit(&pagination))
+                            .offset(pagination_offset(&pagination))
+                            .search()
+                            .await?
+                    };
+                    (Some(space_id), result)
                 } else {
                     // Space-scoped plain listing routes through the REST chat
                     // builder so `--filter` can be applied server-side.
@@ -73,7 +79,8 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                         request = request.filter(filter);
                     }
                     let items = if pagination.all {
-                        request.list().await?.collect_all().await?
+                        ctx.collect_all(async { request.list().await?.collect_all().await })
+                            .await?
                     } else {
                         request.list().await?.into_response().items
                     };
@@ -83,31 +90,37 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                 if !filters.is_empty() {
                     bail!("--filter requires --space (single-space REST listing)");
                 }
-                let mut request = ctx
-                    .client
-                    .chats()
-                    .search_chats()
-                    .text(text)
-                    .limit(pagination_limit(&pagination))
-                    .offset(pagination_offset(&pagination));
-                if pagination.all {
-                    request = request.limit(1000).offset(0);
-                }
-                (None, request.search().await?)
+                let result = if pagination.all {
+                    ctx.collect_all(collect_all_grpc_chats(ctx, None, Some(&text)))
+                        .await?
+                } else {
+                    ctx.client
+                        .chats()
+                        .search_chats()
+                        .text(text)
+                        .limit(pagination_limit(&pagination))
+                        .offset(pagination_offset(&pagination))
+                        .search()
+                        .await?
+                };
+                (None, result)
             } else {
                 if !filters.is_empty() {
                     bail!("--filter requires --space (single-space REST listing)");
                 }
-                let mut request = ctx
-                    .client
-                    .chats()
-                    .list_chats()
-                    .limit(pagination_limit(&pagination))
-                    .offset(pagination_offset(&pagination));
-                if pagination.all {
-                    request = request.limit(1000).offset(0);
-                }
-                (None, request.list().await?)
+                let result = if pagination.all {
+                    ctx.collect_all(collect_all_grpc_chats(ctx, None, None))
+                        .await?
+                } else {
+                    ctx.client
+                        .chats()
+                        .list_chats()
+                        .limit(pagination_limit(&pagination))
+                        .offset(pagination_offset(&pagination))
+                        .list()
+                        .await?
+                };
+                (None, result)
             };
 
             match ctx.output.format() {
@@ -494,17 +507,21 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                     .resolve_chat_target(Some(&space_id), &chat)
                     .await?
                     .chat_id;
-                let mut request = ctx
-                    .client
-                    .chats()
-                    .in_space(&space_id)
-                    .search_messages(&chat_id, query)
-                    .limit(pagination_limit(&pagination))
-                    .offset(pagination_offset(&pagination));
-                if pagination.all {
-                    request = request.limit(1000).offset(0);
-                }
-                let mut page = request.search().await?;
+                let mut page = if pagination.all {
+                    ctx.collect_all(collect_all_message_search_results(
+                        ctx, &space_id, &chat_id, &query,
+                    ))
+                    .await?
+                } else {
+                    ctx.client
+                        .chats()
+                        .in_space(&space_id)
+                        .search_messages(&chat_id, query)
+                        .limit(pagination_limit(&pagination))
+                        .offset(pagination_offset(&pagination))
+                        .search()
+                        .await?
+                };
                 for result in &mut page.items {
                     result.message.order_id = encode_order_id_hex(&result.message.order_id);
                 }
@@ -1075,11 +1092,9 @@ impl ChatReadTypeArg {
 
 /// Transport requested on the command line via `anyr chat --transport ...`.
 ///
-/// The selector currently drives the transport *policy* (which backend each
-/// operation is intended to use, reported in `-v` diagnostics) and the
-/// `rest` rejection guard. Per-operation REST routing for REST-capable message
-/// operations is staged for follow-up work, so `auto`/`grpc` do not yet change
-/// which backend a handler dispatches through.
+/// The selector drives both transport validation and the backend used by each
+/// operation. Commands whose CLI result or option contract is available only
+/// through one transport reject the other transport before network access.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum TransportArg {
     /// Resolve each operation to its policy backend from the documented table.
@@ -1248,8 +1263,14 @@ fn classify_messages(command: &super::ChatMessagesCommands) -> OpTransport {
     use OpTransport as T;
 
     match command {
-        M::List { .. } => T::rest("messages list"),
-        M::Get { .. } => T::rest("messages get"),
+        M::List { .. } => T::grpc(
+            "messages list",
+            "the message-list result and unread controls require gRPC chat state",
+        ),
+        M::Get { .. } => T::grpc(
+            "messages get",
+            "getting multiple messages in one command requires gRPC",
+        ),
         M::Send { blocks_json, .. } => {
             if blocks_json.is_some() {
                 T::grpc("messages send", "structured --blocks-json requires gRPC")
@@ -1264,7 +1285,10 @@ fn classify_messages(command: &super::ChatMessagesCommands) -> OpTransport {
                 T::rest("messages edit")
             }
         }
-        M::Delete { .. } => T::rest("messages delete"),
+        M::Delete { .. } => T::grpc(
+            "messages delete",
+            "the CLI message-delete contract, including order-id resolution, requires gRPC",
+        ),
         M::Search { .. } => T::rest_only(
             "messages search",
             "chat message search is a REST-only operation",
@@ -1525,6 +1549,155 @@ async fn resolve_chat_label(
     Ok(name)
 }
 
+struct OffsetPage<T> {
+    items: Vec<T>,
+    has_more: bool,
+    limit: u32,
+}
+
+async fn collect_offset_pages<T, F, Fut>(
+    operation: &'static str,
+    page_size: u32,
+    mut fetch: F,
+) -> Result<Vec<T>>
+where
+    F: FnMut(u32, u32) -> Fut,
+    Fut: Future<Output = Result<OffsetPage<T>>>,
+{
+    let mut items = Vec::new();
+    let mut offset = 0_u32;
+
+    loop {
+        let mut page = fetch(page_size, offset).await?;
+        if page.has_more && page.items.is_empty() {
+            bail!("{operation} reported more pages but returned no items at offset {offset}");
+        }
+        let next_offset = if page.has_more {
+            if page.limit == 0 {
+                bail!("{operation} reported more pages with a zero page limit");
+            }
+            Some(offset.checked_add(page.limit).ok_or_else(|| {
+                anyhow!("{operation} pagination offset overflowed after {offset}")
+            })?)
+        } else {
+            None
+        };
+        items.append(&mut page.items);
+        match next_offset {
+            Some(next_offset) => offset = next_offset,
+            None => return Ok(items),
+        }
+    }
+}
+
+async fn collect_all_grpc_chats(
+    ctx: &AppContext,
+    space_id: Option<&str>,
+    text: Option<&str>,
+) -> Result<ChatListResult> {
+    let space_ids = match space_id {
+        Some(space_id) => vec![space_id.to_string()],
+        None => ctx
+            .client
+            .spaces()
+            .list()
+            .await?
+            .collect_all()
+            .await?
+            .into_iter()
+            .map(|space| space.id)
+            .collect(),
+    };
+    let mut items = Vec::new();
+
+    for space_id in space_ids {
+        let client = &ctx.client;
+        let scoped_space_id = space_id.clone();
+        let search_text = text.map(str::to_owned);
+        let mut space_items =
+            collect_offset_pages("chat list", ALL_CHAT_PAGE_SIZE, move |limit, offset| {
+                let scoped_space_id = scoped_space_id.clone();
+                let search_text = search_text.clone();
+                async move {
+                    let mut request = client
+                        .chats()
+                        .search_chats_in(scoped_space_id)
+                        .limit(limit)
+                        .offset(offset);
+                    if let Some(search_text) = search_text {
+                        request = request.text(search_text);
+                    }
+                    let result = request.search().await?;
+                    let limit_usize = usize::try_from(limit)
+                        .map_err(|_| anyhow!("chat list page limit does not fit usize"))?;
+                    if result.items.len() > limit_usize {
+                        bail!(
+                            "chat list returned {} items for a page limited to {limit}",
+                            result.items.len()
+                        );
+                    }
+                    Ok(OffsetPage {
+                        has_more: result.items.len() == limit_usize,
+                        items: result.items,
+                        limit,
+                    })
+                }
+            })
+            .await?;
+        items.append(&mut space_items);
+    }
+
+    Ok(ChatListResult { items })
+}
+
+async fn collect_all_message_search_results(
+    ctx: &AppContext,
+    space_id: &str,
+    chat_id: &str,
+    query: &str,
+) -> Result<ChatMessageSearchPage> {
+    let client = &ctx.client;
+    let space_id = space_id.to_string();
+    let chat_id = chat_id.to_string();
+    let query = query.to_string();
+    let items = collect_offset_pages(
+        "chat message search",
+        ALL_CHAT_PAGE_SIZE,
+        move |limit, offset| {
+            let space_id = space_id.clone();
+            let chat_id = chat_id.clone();
+            let query = query.clone();
+            async move {
+                let page = client
+                    .chats()
+                    .in_space(space_id)
+                    .search_messages(chat_id, query)
+                    .limit(limit)
+                    .offset(offset)
+                    .search()
+                    .await?;
+                Ok(OffsetPage {
+                    items: page.items,
+                    has_more: page.pagination.has_more,
+                    limit: page.pagination.limit,
+                })
+            }
+        },
+    )
+    .await?;
+    let total = items.len();
+
+    Ok(ChatMessageSearchPage {
+        items,
+        pagination: PaginationMeta {
+            has_more: false,
+            limit: ALL_CHAT_PAGE_SIZE,
+            offset: 0,
+            total,
+        },
+    })
+}
+
 async fn load_space_names(ctx: &AppContext) -> Result<HashMap<String, String>> {
     let spaces = ctx.client.spaces().list().await?.collect_all().await?;
     Ok(spaces
@@ -1615,13 +1788,10 @@ mod tests {
     #[test]
     fn auto_picks_rest_for_plain_message_crud() {
         for cmd in [
-            vec!["anyr", "chat", "messages", "list", "Work", "Ops"],
-            vec!["anyr", "chat", "messages", "get", "Work", "Ops", "m1"],
             vec!["anyr", "chat", "messages", "send", "Work", "Ops", "hi"],
             vec![
                 "anyr", "chat", "messages", "edit", "Work", "Ops", "m1", "--text", "hi",
             ],
-            vec!["anyr", "chat", "messages", "delete", "Work", "Ops", "m1"],
             vec!["anyr", "chat", "create", "Work", "Ops"],
             vec!["anyr", "chat", "read", "Work", "Ops"],
         ] {
@@ -1630,6 +1800,33 @@ mod tests {
                 ChatBackend::Rest,
                 "expected REST for {cmd:?}"
             );
+        }
+    }
+
+    #[test]
+    fn message_list_get_and_delete_are_grpc_only() {
+        for cmd in [
+            vec!["messages", "list", "Work", "Ops"],
+            vec!["messages", "get", "Work", "Ops", "m1"],
+            vec!["messages", "delete", "Work", "Ops", "m1"],
+        ] {
+            let mut auto = vec!["anyr", "chat"];
+            auto.extend(cmd.iter().copied());
+            assert_eq!(
+                backend_of(&auto).expect("auto transport resolves"),
+                ChatBackend::Grpc,
+                "expected gRPC for {auto:?}"
+            );
+
+            let mut rest = vec!["anyr", "chat", "--transport", "rest"];
+            rest.extend(cmd.iter().copied());
+            let err = backend_of(&rest).expect_err("REST transport must reject");
+            let message = err.to_string();
+            assert!(
+                message.contains("--transport rest"),
+                "unexpected error: {message}"
+            );
+            assert!(message.contains("gRPC"), "unexpected error: {message}");
         }
     }
 
@@ -1750,6 +1947,61 @@ mod tests {
                 "error should mention --transport rest: {err}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn offset_collector_follows_every_reported_page() {
+        use std::{collections::VecDeque, future::ready};
+
+        let mut pages = VecDeque::from([
+            OffsetPage {
+                items: vec![1, 2],
+                has_more: true,
+                limit: 2,
+            },
+            OffsetPage {
+                items: vec![3, 4],
+                has_more: true,
+                limit: 2,
+            },
+            OffsetPage {
+                items: vec![5],
+                has_more: false,
+                limit: 2,
+            },
+        ]);
+        let mut requested_offsets = Vec::new();
+
+        let items = collect_offset_pages("test pagination", 2, |limit, offset| {
+            requested_offsets.push((limit, offset));
+            ready(
+                pages
+                    .pop_front()
+                    .ok_or_else(|| anyhow!("unexpected extra page request")),
+            )
+        })
+        .await
+        .expect("pages collect");
+
+        assert_eq!(items, vec![1, 2, 3, 4, 5]);
+        assert_eq!(requested_offsets, vec![(2, 0), (2, 2), (2, 4)]);
+    }
+
+    #[tokio::test]
+    async fn offset_collector_rejects_non_progressing_page() {
+        use std::future::ready;
+
+        let err = collect_offset_pages::<u8, _, _>("test pagination", 1000, |_, _| {
+            ready(Ok(OffsetPage {
+                items: Vec::new(),
+                has_more: true,
+                limit: 1000,
+            }))
+        })
+        .await
+        .expect_err("empty page with has_more must fail");
+
+        assert!(err.to_string().contains("returned no items"));
     }
 
     #[test]

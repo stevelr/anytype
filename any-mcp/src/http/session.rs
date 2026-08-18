@@ -72,9 +72,6 @@ const INITIALIZE_ACCEPTED_VERSIONS: [&str; 4] =
 const SSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// Reviewed `rmcp` SSE retry hint.
 const SSE_RETRY: Duration = Duration::from_secs(3);
-/// Idle margin added to `rmcp`'s five-minute session keep-alive before the
-/// principal binding and its admission permit are swept.
-const SESSION_SWEEP_AFTER: Duration = Duration::from_secs(300 + 60);
 /// Bounded number of cached per-principal server facades.
 const MAX_PRINCIPAL_SERVERS: usize = 64;
 
@@ -141,14 +138,13 @@ impl PrincipalServers {
 struct SessionEntry {
     principal: AuthorizedPrincipal,
     _permit: OwnedSemaphorePermit,
-    last_seen: Instant,
 }
 
 /// Principal-bound session registry enforcing the process session ceiling.
 ///
 /// Admission is reserved before `rmcp` creates a session and released
 /// exactly once when the binding is dropped: on failed initialize, DELETE,
-/// idle sweep, or process shutdown.
+/// reconciliation with `rmcp`'s session manager, or process shutdown.
 pub(crate) struct SessionRegistry {
     permits: Arc<Semaphore>,
     sessions: Mutex<HashMap<String, SessionEntry>>,
@@ -183,7 +179,6 @@ impl SessionRegistry {
             SessionEntry {
                 principal,
                 _permit: permit,
-                last_seen: Instant::now(),
             },
         );
     }
@@ -193,49 +188,31 @@ impl SessionRegistry {
     /// An unknown session and another principal's session are
     /// indistinguishable: both report absent.
     fn validate(&self, session_id: &str, principal: &AuthorizedPrincipal) -> bool {
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sessions
+            .get(session_id)
+            .is_some_and(|entry| &entry.principal == principal)
+    }
+
+    /// Removes one binding if still present, releasing its slot at most once.
+    fn remove(&self, session_id: &str) -> bool {
         let mut sessions = self
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match sessions.get_mut(session_id) {
-            Some(entry) if &entry.principal == principal => {
-                entry.last_seen = Instant::now();
-                true
-            }
-            _ => false,
-        }
+        sessions.remove(session_id).is_some()
     }
 
-    /// Removes one binding, releasing its session slot exactly once.
-    fn remove(&self, session_id: &str) {
-        let mut sessions = self
+    /// Snapshots bound IDs without holding the registry lock across I/O.
+    fn session_ids(&self) -> Vec<String> {
+        let sessions = self
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        sessions.remove(session_id);
-    }
-
-    /// Sweeps bindings idle past the `rmcp` keep-alive plus margin.
-    fn sweep(&self) -> Vec<String> {
-        self.sweep_at(Instant::now())
-    }
-
-    fn sweep_at(&self, now: Instant) -> Vec<String> {
-        let mut sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let expired = sessions
-            .iter()
-            .filter(|(_, entry)| {
-                now.saturating_duration_since(entry.last_seen) >= SESSION_SWEEP_AFTER
-            })
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for id in &expired {
-            sessions.remove(id);
-        }
-        expired
+        sessions.keys().cloned().collect()
     }
 
     #[cfg(test)]
@@ -250,6 +227,7 @@ pub(crate) struct StableBackend {
     session_manager: Arc<LocalSessionManager>,
     servers: PrincipalServers,
     registry: SessionRegistry,
+    reconciliation: tokio::sync::Mutex<()>,
 }
 
 impl StableBackend {
@@ -318,6 +296,7 @@ impl StableBackend {
             session_manager,
             servers: PrincipalServers::new(runtime),
             registry: SessionRegistry::new(config.max_sessions),
+            reconciliation: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -330,21 +309,63 @@ impl StableBackend {
         self.registry.available_slots()
     }
 
-    /// Handles one admitted stable-mode request.
-    pub(crate) async fn call(self: Arc<Self>, admitted: AdmittedRequest) -> Response<HttpBody> {
-        // Reclaim bindings whose rmcp sessions idled out.
-        for expired in self.registry.sweep() {
-            let manager = self.session_manager.clone();
-            tokio::spawn(async move {
-                let _ = manager.close_session(&expired.into()).await;
-            });
+    /// Reserves a session slot, reconciling stale registry bindings only when
+    /// the fast admission path finds the process ceiling full.
+    async fn reserve_session_slot(&self) -> Option<OwnedSemaphorePermit> {
+        if let Some(permit) = self.registry.try_reserve() {
+            return Some(permit);
         }
 
+        // Only one full-capacity caller probes rmcp at a time. Capacity may
+        // have been released while this caller waited, so recheck first.
+        let _reconciliation = self.reconciliation.lock().await;
+        if let Some(permit) = self.registry.try_reserve() {
+            return Some(permit);
+        }
+
+        let session_ids = self.registry.session_ids();
+        let checked = session_ids.len();
+        let mut absent = Vec::new();
+        let mut probe_errors = 0_usize;
+        for session_id in session_ids {
+            match self
+                .session_manager
+                .has_session(&session_id.clone().into())
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => absent.push(session_id),
+                Err(_) => probe_errors += 1,
+            }
+        }
+
+        // A concurrent DELETE may already have removed a binding. Conditional
+        // removal makes both paths idempotent and drops each permit at most
+        // once. Probe failures fail closed and retain their bindings.
+        let reclaimed = absent
+            .iter()
+            .filter(|session_id| self.registry.remove(session_id))
+            .count();
+        tracing::info!(
+            target: "any_mcp::http",
+            checked,
+            reclaimed,
+            probe_errors,
+            "http_session_reconciled"
+        );
+
+        self.registry.try_reserve()
+    }
+
+    /// Handles one admitted stable-mode request.
+    pub(crate) async fn call(self: Arc<Self>, admitted: AdmittedRequest) -> Response<HttpBody> {
         let AdmittedRequest {
-            parts,
+            mut parts,
             body,
             principal,
+            invocation,
         } = admitted;
+        parts.extensions.insert(invocation);
 
         // Gate: the negotiated-version header must be a tested
         // Streamable-HTTP-capable revision. The header postdates 2024-11-05,
@@ -381,7 +402,7 @@ impl StableBackend {
             if !initialize_version_accepted(&body) {
                 return fixed_response(StatusCode::BAD_REQUEST, "Bad Request");
             }
-            match self.registry.try_reserve() {
+            match self.reserve_session_slot().await {
                 Some(permit) => Some(permit),
                 None => {
                     tracing::info!(target: "any_mcp::http", "http_capacity_rejected");
@@ -459,9 +480,20 @@ mod tests {
     use http_body_util::BodyExt;
 
     use super::*;
-    use crate::{config::ApplicationProfile, runtime::StartupStatus};
+    use crate::{
+        config::ApplicationProfile,
+        http::{
+            auth::Authenticator,
+            listener::{ListenerState, McpService, handle_request},
+        },
+        runtime::StartupStatus,
+    };
 
     fn test_runtime() -> RuntimeContext {
+        test_runtime_with_timeout(Duration::from_secs(5))
+    }
+
+    fn test_runtime_with_timeout(timeout: Duration) -> RuntimeContext {
         let config = ClientConfig {
             base_url: Some("http://127.0.0.1:1".to_string()),
             keystore: Some("env".to_string()),
@@ -473,7 +505,7 @@ mod tests {
         RuntimeContext::from_parts_with_profile(
             client,
             4,
-            Duration::from_secs(5),
+            timeout,
             StartupStatus {
                 http_available: true,
                 grpc_available: false,
@@ -518,6 +550,10 @@ mod tests {
             parts,
             body: Bytes::copy_from_slice(body.as_bytes()),
             principal: principal.clone(),
+            invocation: crate::runtime::InvocationAnchor::capture_durations(
+                Duration::from_secs(5),
+                Duration::from_secs(300),
+            ),
         }
     }
 
@@ -590,6 +626,212 @@ mod tests {
         session
     }
 
+    fn listener_request(body: String, session: Option<&str>) -> Request<Full<Bytes>> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header("host", "localhost:8000")
+            .header("authorization", "Bearer synthetic-token")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json");
+        if let Some(session) = session {
+            builder = builder
+                .header("mcp-session-id", session)
+                .header("mcp-protocol-version", "2025-11-25");
+        }
+        builder
+            .body(Full::new(Bytes::from(body)))
+            .expect("listener request")
+    }
+
+    async fn initialize_listener_session(state: &Arc<ListenerState>) -> String {
+        let initialized =
+            handle_request(state, listener_request(initialize_body("2025-11-25"), None)).await;
+        assert_eq!(initialized.status(), StatusCode::OK);
+        let session = initialized
+            .headers()
+            .get(SESSION_ID_HEADER)
+            .expect("session id")
+            .to_str()
+            .expect("ascii session id")
+            .to_owned();
+        let notified = handle_request(
+            state,
+            listener_request(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                })
+                .to_string(),
+                Some(&session),
+            ),
+        )
+        .await;
+        assert_eq!(notified.status(), StatusCode::ACCEPTED);
+        session
+    }
+
+    fn stable_listener(
+        timeout: Duration,
+    ) -> (
+        Arc<ListenerState>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::runtime::InvocationAnchor>,
+    ) {
+        stable_listener_with_claim_barrier(timeout, None, false)
+    }
+
+    fn stable_listener_with_claim_barrier(
+        timeout: Duration,
+        claim_barrier: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+        listener_claim_fixture: bool,
+    ) -> (
+        Arc<ListenerState>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::runtime::InvocationAnchor>,
+    ) {
+        let runtime = test_runtime_with_timeout(timeout);
+        let config = crate::http::listener::tests::test_config(&[]);
+        let backend = Arc::new(StableBackend::new(
+            runtime.clone(),
+            &config,
+            CancellationToken::new(),
+        ));
+        let (anchor_tx, anchor_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ingress_runtime = runtime.clone();
+        let service: McpService = Arc::new(move |admitted| {
+            let backend = Arc::clone(&backend);
+            let runtime = ingress_runtime.clone();
+            let deadline_fixture = admitted
+                .body
+                .windows(b"__test_deadline".len())
+                .any(|window| window == b"__test_deadline");
+            if deadline_fixture {
+                if let Some((claimed, release)) = claim_barrier.as_ref() {
+                    admitted
+                        .invocation
+                        .arm_dispatch_claim_barrier(Arc::clone(claimed), Arc::clone(release));
+                }
+                let _ = anchor_tx.send(admitted.invocation.clone());
+            }
+            if listener_claim_fixture && deadline_fixture {
+                let invocation = admitted.invocation.clone();
+                return Box::pin(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        invocation.complete_armed_dispatch_claim()
+                    })
+                    .await;
+                    std::future::pending::<Response<HttpBody>>().await
+                });
+            }
+            Box::pin(async move {
+                let invocation = admitted.invocation.clone();
+                runtime
+                    .scope_ingress(invocation, backend.call(admitted))
+                    .await
+            })
+        });
+        let state = ListenerState::new_with_runtime(
+            &config,
+            Authenticator::SyntheticAllow,
+            None,
+            service,
+            &runtime,
+        );
+        (Arc::new(state), anchor_rx)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stable_http_terminal_wins_a_claiming_deadline_without_dispatch() {
+        let claimed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let (state, mut anchors) = stable_listener_with_claim_barrier(
+            Duration::from_millis(250),
+            Some((Arc::clone(&claimed), Arc::clone(&release))),
+            true,
+        );
+        let session = initialize_listener_session(&state).await;
+        let running = tokio::spawn(async move {
+            handle_request(
+                &state,
+                listener_request(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 42,
+                        "method": "tools/call",
+                        "params": {"name": "__test_deadline_mutation", "arguments": {}},
+                    })
+                    .to_string(),
+                    Some(&session),
+                ),
+            )
+            .await
+        });
+        let anchor = anchors.recv().await.expect("claiming anchor");
+        tokio::task::spawn_blocking(move || claimed.wait())
+            .await
+            .expect("claim barrier");
+        tokio::time::sleep_until(anchor.deadline()).await;
+        let response = tokio::time::timeout(Duration::from_secs(1), running).await;
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release barrier");
+        let response = response
+            .expect("listener terminal response")
+            .expect("request join");
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(!anchor.dispatched());
+        tokio::task::yield_now().await;
+        assert!(!anchor.dispatched());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stable_http_dispatch_wins_before_deadline_and_returns_structured_outcome() {
+        let claimed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let (state, mut anchors) = stable_listener_with_claim_barrier(
+            Duration::from_millis(250),
+            Some((Arc::clone(&claimed), Arc::clone(&release))),
+            false,
+        );
+        let session = initialize_listener_session(&state).await;
+        let running = tokio::spawn(async move {
+            handle_request(
+                &state,
+                listener_request(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 43,
+                        "method": "tools/call",
+                        "params": {"name": "__test_deadline_mutation", "arguments": {}},
+                    })
+                    .to_string(),
+                    Some(&session),
+                ),
+            )
+            .await
+        });
+        let anchor = anchors.recv().await.expect("claiming anchor");
+        tokio::task::spawn_blocking(move || claimed.wait())
+            .await
+            .expect("claim barrier");
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release barrier");
+        tokio::time::timeout_at(anchor.deadline(), async {
+            while !anchor.dispatched() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatch claim commits before deadline");
+        let response = tokio::time::timeout(Duration::from_secs(1), running)
+            .await
+            .expect("structured terminal response")
+            .expect("request join");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_body(response).await;
+        assert!(body.contains("mutation may have applied"), "{body}");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn initialize_creates_a_principal_bound_session_serving_tools() {
         let backend = backend(4);
@@ -646,6 +888,106 @@ mod tests {
             ))
             .await;
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stable_session_worker_preserves_expired_authenticated_anchor() {
+        let backend = backend(4);
+        let alice = principal("anchor-alice");
+        let session = initialize_session(&backend, &alice).await;
+        let mut request = admitted(
+            Method::POST,
+            &[
+                ("mcp-session-id", &session),
+                ("mcp-protocol-version", "2025-11-25"),
+            ],
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {"name": "server_status", "arguments": {}},
+            })
+            .to_string(),
+            &alice,
+        );
+        request.invocation = crate::runtime::InvocationAnchor::capture_durations(
+            Duration::from_secs(1),
+            Duration::from_secs(300),
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let response = backend.clone().call(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_body(response).await;
+        assert!(body.contains("\"id\":9"), "{body}");
+        assert!(body.contains("\"isError\":true"), "{body}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stable_http_preserves_pre_and_post_dispatch_deadline_classification() {
+        let (state, mut anchors) = stable_listener(Duration::from_secs(1));
+        let session = initialize_listener_session(&state).await;
+
+        let pre_state = Arc::clone(&state);
+        let pre_session = session.clone();
+        let pre = tokio::spawn(async move {
+            handle_request(
+                &pre_state,
+                listener_request(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 40,
+                        "method": "tools/call",
+                        "params": {"name": "__test_deadline_predispatch", "arguments": {}},
+                    })
+                    .to_string(),
+                    Some(&pre_session),
+                ),
+            )
+            .await
+        });
+        let pre_anchor = anchors.recv().await.expect("pre-dispatch anchor");
+        assert!(!pre_anchor.dispatched());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let pre_response = pre.await.expect("pre-dispatch response");
+        assert_eq!(pre_response.status(), StatusCode::OK);
+        let pre_body = read_body(pre_response).await;
+        assert!(pre_body.contains("\"id\":40"), "{pre_body}");
+        assert!(pre_body.contains("upstream"), "{pre_body}");
+        assert!(!pre_body.contains("mutation_indeterminate"), "{pre_body}");
+        assert!(!pre_anchor.dispatched());
+
+        let post_state = Arc::clone(&state);
+        let post = tokio::spawn(async move {
+            handle_request(
+                &post_state,
+                listener_request(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 41,
+                        "method": "tools/call",
+                        "params": {"name": "__test_deadline_mutation", "arguments": {}},
+                    })
+                    .to_string(),
+                    Some(&session),
+                ),
+            )
+            .await
+        });
+        let post_anchor = anchors.recv().await.expect("post-dispatch anchor");
+        for _ in 0..32 {
+            if post_anchor.dispatched() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(post_anchor.dispatched());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let post_response = post.await.expect("post-dispatch response");
+        assert_eq!(post_response.status(), StatusCode::OK);
+        let body = read_body(post_response).await;
+        assert!(body.contains("\"id\":41"), "{body}");
+        assert!(body.contains("\"code\":\"conflict\""), "{body}");
+        assert!(body.contains("mutation may have applied"), "{body}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -709,15 +1051,28 @@ mod tests {
                 &alice,
             ))
             .await;
-        assert!(
-            deleted.status().is_success(),
-            "delete status {}",
-            deleted.status()
-        );
+        assert_eq!(deleted.status(), StatusCode::ACCEPTED);
         assert_eq!(backend.registry.available_slots(), 1);
 
-        // The deleted session is unknown afterwards, and the slot serves a
-        // new principal.
+        // DELETE releases the binding exactly once. Repeating it observes an
+        // unknown session and cannot release an additional permit.
+        let repeated_delete = backend
+            .clone()
+            .call(admitted(
+                Method::DELETE,
+                &[
+                    ("mcp-session-id", &session),
+                    ("mcp-protocol-version", "2025-11-25"),
+                ],
+                "",
+                &alice,
+            ))
+            .await;
+        assert_eq!(repeated_delete.status(), StatusCode::NOT_FOUND);
+        assert_eq!(backend.registry.available_slots(), 1);
+
+        // The deleted session remains unknown, and the slot serves a new
+        // principal.
         let gone = backend
             .clone()
             .call(admitted(
@@ -759,6 +1114,132 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_initialize_reclaims_a_binding_absent_from_rmcp() {
+        let backend = backend(1);
+        let alice = principal("alice");
+        let stale_session = initialize_session(&backend, &alice).await;
+        assert_eq!(backend.registry.available_slots(), 0);
+
+        // Deterministically model rmcp's idle timeout: its worker owns the
+        // logical lifetime and removes the manager entry, while the admission
+        // binding remains until a full initialize reconciles the two stores.
+        backend
+            .session_manager
+            .close_session(&stale_session.clone().into())
+            .await
+            .expect("remove rmcp session");
+        assert!(
+            !backend
+                .session_manager
+                .has_session(&stale_session.clone().into())
+                .await
+                .expect("probe removed rmcp session")
+        );
+
+        let bob = principal("bob");
+        let replacement = initialize_session(&backend, &bob).await;
+        assert_ne!(replacement, stale_session);
+        assert_eq!(backend.registry.available_slots(), 0);
+
+        let gone = backend
+            .clone()
+            .call(admitted(
+                Method::POST,
+                &[
+                    ("mcp-session-id", &stale_session),
+                    ("mcp-protocol-version", "2025-11-25"),
+                ],
+                "{}",
+                &alice,
+            ))
+            .await;
+        assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stale_ceiling_one_reconciliation_admits_exactly_one_contender() {
+        const CONTENDERS: usize = 12;
+
+        let backend = backend(1);
+        let stale_session = initialize_session(&backend, &principal("stale-owner")).await;
+        backend
+            .session_manager
+            .close_session(&stale_session.into())
+            .await
+            .expect("remove stale rmcp session");
+
+        let start = Arc::new(tokio::sync::Barrier::new(CONTENDERS));
+        let mut contenders = Vec::with_capacity(CONTENDERS);
+        for index in 0..CONTENDERS {
+            let backend = backend.clone();
+            let start = start.clone();
+            contenders.push(tokio::spawn(async move {
+                let caller = principal(&format!("contender-{index}"));
+                start.wait().await;
+                let response = backend
+                    .call(admitted(
+                        Method::POST,
+                        &[],
+                        &initialize_body("2025-11-25"),
+                        &caller,
+                    ))
+                    .await;
+                let session = response
+                    .headers()
+                    .get(SESSION_ID_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let retry_after = response
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                (response.status(), session, retry_after, caller)
+            }));
+        }
+
+        let mut admitted_contender = None;
+        let mut rejected = 0_usize;
+        for contender in contenders {
+            let (status, session, retry_after, caller) = contender.await.expect("contender join");
+            match status {
+                StatusCode::OK => {
+                    assert!(
+                        admitted_contender.is_none(),
+                        "only one contender may take the slot"
+                    );
+                    assert!(retry_after.is_none());
+                    admitted_contender = Some((session.expect("admitted session id"), caller));
+                }
+                StatusCode::SERVICE_UNAVAILABLE => {
+                    assert!(session.is_none(), "a shed initialize must issue no session");
+                    assert_eq!(retry_after.as_deref(), Some("60"));
+                    rejected += 1;
+                }
+                other => panic!("unexpected initialize status {other}"),
+            }
+        }
+
+        assert_eq!(rejected, CONTENDERS - 1);
+        assert_eq!(backend.registry.available_slots(), 0);
+        let (session, caller) = admitted_contender.expect("one admitted contender");
+        let deleted = backend
+            .clone()
+            .call(admitted(
+                Method::DELETE,
+                &[
+                    ("mcp-session-id", &session),
+                    ("mcp-protocol-version", "2025-11-25"),
+                ],
+                "",
+                &caller,
+            ))
+            .await;
+        assert_eq!(deleted.status(), StatusCode::ACCEPTED);
+        assert_eq!(backend.registry.available_slots(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sessionless_get_and_delete_take_rmcp_fixed_statuses() {
         let backend = backend(2);
         let alice = principal("alice");
@@ -769,21 +1250,6 @@ mod tests {
         );
         let response = backend.clone().call(get).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn registry_sweep_releases_slots_only_after_the_idle_margin() {
-        let registry = SessionRegistry::new(2);
-        let permit = registry.try_reserve().expect("reserve");
-        registry.bind("session-1".to_owned(), principal("alice"), permit);
-        assert_eq!(registry.available_slots(), 1);
-
-        let now = Instant::now();
-        assert!(registry.sweep_at(now + Duration::from_secs(300)).is_empty());
-        let swept = registry.sweep_at(now + SESSION_SWEEP_AFTER + Duration::from_secs(1));
-        assert_eq!(swept, vec!["session-1".to_owned()]);
-        assert_eq!(registry.available_slots(), 2);
-        assert!(!registry.validate("session-1", &principal("alice")));
     }
 
     #[test]

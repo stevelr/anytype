@@ -418,7 +418,9 @@ impl SchemaTagHandlers {
                         verify_config: self.verify_config.clone(),
                         dispatch_hooks: self.dispatch_hooks.clone(),
                     };
-                    tokio::spawn(supervise_tag_create(supervision));
+                    runtime.spawn_invocation_controller("schema_tag_create", move || {
+                        supervise_tag_create(supervision)
+                    });
                     wait_for_attempt(attempt, cancellation).await
                 }
             }
@@ -474,7 +476,7 @@ impl SchemaTagHandlers {
                 }
 
                 run_dispatch_hook(dispatch_hooks.before_update.as_ref(), cancellation).await;
-                operation_progress.mark_dispatched();
+                operation_progress.mark_dispatched(runtime)?;
                 run_dispatch_hook(dispatch_hooks.after_update_mark.as_ref(), cancellation).await;
                 let response_anomaly = match request.update().await {
                     Ok(returned) => !tag_matches_update(&returned, &input).unwrap_or(false),
@@ -588,9 +590,10 @@ async fn supervise_tag_create(supervision: TagCreateSupervision) {
     } = supervision;
     let progress = attempt.progress();
     let task_progress = progress.clone();
-    let task = tokio::spawn(async move {
+    let task_runtime = runtime.clone();
+    let task = runtime.spawn_invocation_supervisor(async move {
         execute_tag_create(
-            &runtime,
+            &task_runtime,
             &contract,
             normalized,
             &CancellationToken::new(),
@@ -638,7 +641,7 @@ async fn execute_tag_create(
             }
 
             run_dispatch_hook(dispatch_hooks.before_create.as_ref(), cancellation).await;
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             run_dispatch_hook(dispatch_hooks.after_create_mark.as_ref(), cancellation).await;
             let created = match request.create().await {
                 Ok(created) => created,
@@ -958,6 +961,7 @@ mod tests {
     use std::{future::Future, time::Duration};
 
     use anytype::{
+        objects::DataModel,
         prelude::{AnytypeClient, ClientConfig, HttpCredentials},
         properties::PropertyFormat,
         test_util::{DisposableRun, unique_suffix, with_disposable_space_context},
@@ -1292,6 +1296,7 @@ mod tests {
 
     fn tag(id: &str, name: &str, key: &str, color: Color) -> Tag {
         Tag {
+            object: DataModel::Tag,
             id: id.to_owned(),
             name: name.to_owned(),
             key: key.to_owned(),

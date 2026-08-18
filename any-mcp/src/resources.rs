@@ -515,6 +515,7 @@ mod tests {
             snippet: Some("must not enter resource metadata".to_owned()),
             space_id: space_id.to_owned(),
             r#type: Some(Type {
+                object: DataModel::Type,
                 archived: false,
                 icon: None,
                 id: "type-1".to_owned(),
