@@ -1591,7 +1591,7 @@ mod tests {
     use anytype::test_util::{
         DisposableRun, retry_definitive_rate_limit, unique_suffix, with_disposable_space_context,
     };
-    use rmcp::model::{ListToolsResult, ToolAnnotations};
+    use rmcp::model::ToolAnnotations;
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use tiktoken_rs::{CoreBPE, o200k_base};
@@ -2533,8 +2533,10 @@ mod tests {
     }
 
     fn tools_list_value(server: &AnyMcpServer) -> Value {
-        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
-            .expect("tools list value")
+        serde_json::to_value(crate::server::stable_list_tools_result(
+            server.tools().to_vec(),
+        ))
+        .expect("tools list value")
     }
 
     fn preview_tools_list_value(server: &AnyMcpServer) -> Value {
@@ -3381,12 +3383,14 @@ mod tests {
         let without = AnyMcpServer::new_with_optional_registries(runtime, &WITHOUT_VIEWS_WRITE)
             .expect("pre-views-write no-selection");
         assert_eq!(
-            serde_json::to_vec(&ListToolsResult::with_all_items(
+            serde_json::to_vec(&crate::server::stable_list_tools_result(
                 production.tools().to_vec()
             ))
             .expect("production catalog bytes"),
-            serde_json::to_vec(&ListToolsResult::with_all_items(without.tools().to_vec()))
-                .expect("pre-views-write catalog bytes")
+            serde_json::to_vec(&crate::server::stable_list_tools_result(
+                without.tools().to_vec()
+            ))
+            .expect("pre-views-write catalog bytes")
         );
         let production_status = production
             .dispatch_tool(

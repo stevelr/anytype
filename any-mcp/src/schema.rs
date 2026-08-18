@@ -50,9 +50,7 @@ pub fn output_schema<T>() -> Result<Arc<JsonObject>, SchemaContractError>
 where
     T: JsonSchema + 'static,
 {
-    schema_for_output::<T>()
-        .map_err(|_| SchemaContractError)
-        .and_then(require_strict_root)
+    require_strict_root(schema_for_output::<T>())
 }
 
 fn require_strict_root(schema: Arc<JsonObject>) -> Result<Arc<JsonObject>, SchemaContractError> {

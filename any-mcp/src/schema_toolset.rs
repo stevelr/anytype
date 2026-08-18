@@ -183,7 +183,7 @@ mod tests {
     use std::{collections::BTreeMap, future::Future, time::Duration};
 
     use anytype::prelude::{AnytypeClient, ClientConfig};
-    use rmcp::model::{CallToolRequestParams, ListToolsResult};
+    use rmcp::model::CallToolRequestParams;
     use serde_json::{Map, Value, json};
     use sha2::{Digest, Sha256};
     use tiktoken_rs::{CoreBPE, o200k_base};
@@ -484,12 +484,14 @@ mod tests {
         let without = AnyMcpServer::new_with_optional_registries(without_runtime, &WITHOUT_SCHEMA)
             .expect("pre-link no-selection");
         assert_eq!(
-            serde_json::to_vec(&ListToolsResult::with_all_items(
+            serde_json::to_vec(&crate::server::stable_list_tools_result(
                 production.tools().to_vec()
             ))
             .expect("production catalog bytes"),
-            serde_json::to_vec(&ListToolsResult::with_all_items(without.tools().to_vec()))
-                .expect("pre-link catalog bytes")
+            serde_json::to_vec(&crate::server::stable_list_tools_result(
+                without.tools().to_vec()
+            ))
+            .expect("pre-link catalog bytes")
         );
         let production_status = production
             .dispatch_tool(
@@ -537,8 +539,10 @@ mod tests {
     }
 
     fn tools_value(server: &AnyMcpServer) -> Value {
-        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
-            .expect("tools/list value")
+        serde_json::to_value(crate::server::stable_list_tools_result(
+            server.tools().to_vec(),
+        ))
+        .expect("tools/list value")
     }
 
     fn adversarial_text(seed: usize, length: usize) -> String {

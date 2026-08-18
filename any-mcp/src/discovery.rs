@@ -1273,6 +1273,7 @@ fn domain_handler_error(error: DomainValueError) -> HandlerError {
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
+        future::Future,
         time::Duration,
     };
 
@@ -1303,6 +1304,26 @@ mod tests {
     const ID_B: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4z";
     const ID_C: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4x";
     const ID_D: &str = "bafyreid5fvqlnsobih2keakcxjrrlpmly6kf37klzjzen4ibfdgalcdp4w";
+
+    fn run_large_future<F, Fut>(test: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        std::thread::Builder::new()
+            .name("discovery-property-list".to_owned())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("discovery test runtime")
+                    .block_on(test());
+            })
+            .expect("spawn discovery test")
+            .join()
+            .expect("discovery test thread");
+    }
 
     struct ExpectedRequest {
         path: String,
@@ -2247,113 +2268,115 @@ mod tests {
         fixture.finish().await;
     }
 
-    #[tokio::test]
-    async fn property_list_scopes_sparse_pages_and_counts_tags_with_limit_one() {
-        let type_path = format!("/v1/spaces/{SPACE_ID}/types/{ID_A}");
-        let properties_path = format!("/v1/spaces/{SPACE_ID}/properties");
-        let tags_path = format!("/v1/spaces/{SPACE_ID}/properties/{ID_B}/tags");
-        let linked = vec![
-            property_value(ID_B, "status", "Status", "select"),
-            property_value(ID_D, "owner", "Owner", "objects"),
-        ];
-        let type_response = json!({"type":type_value(ID_A,"page","Page",false,linked)});
-        let fixture = HttpFixture::start(vec![
-            ExpectedRequest::json(&type_path, &[], type_response.clone()),
-            ExpectedRequest::json(
-                &properties_path,
-                &[("limit", "2")],
-                paged(
-                    vec![
-                        property_value(ID_B, "status", "Status", "select"),
-                        property_value(ID_C, "unlinked", "Unlinked", "text"),
-                    ],
-                    0,
-                    2,
-                    3,
+    #[test]
+    fn property_list_scopes_sparse_pages_and_counts_tags_with_limit_one() {
+        run_large_future(|| async {
+            let type_path = format!("/v1/spaces/{SPACE_ID}/types/{ID_A}");
+            let properties_path = format!("/v1/spaces/{SPACE_ID}/properties");
+            let tags_path = format!("/v1/spaces/{SPACE_ID}/properties/{ID_B}/tags");
+            let linked = vec![
+                property_value(ID_B, "status", "Status", "select"),
+                property_value(ID_D, "owner", "Owner", "objects"),
+            ];
+            let type_response = json!({"type":type_value(ID_A,"page","Page",false,linked)});
+            let fixture = HttpFixture::start(vec![
+                ExpectedRequest::json(&type_path, &[], type_response.clone()),
+                ExpectedRequest::json(
+                    &properties_path,
+                    &[("limit", "2")],
+                    paged(
+                        vec![
+                            property_value(ID_B, "status", "Status", "select"),
+                            property_value(ID_C, "unlinked", "Unlinked", "text"),
+                        ],
+                        0,
+                        2,
+                        3,
+                    ),
                 ),
-            ),
-            ExpectedRequest::json(
-                &tags_path,
-                &[("limit", "1")],
-                paged(vec![tag_value(ID_C, "open", "Open")], 0, 1, 2),
-            ),
-            ExpectedRequest::json(&type_path, &[], type_response),
-            ExpectedRequest::json(
-                &properties_path,
-                &[("limit", "2"), ("offset", "2")],
-                paged(
-                    vec![property_value(ID_D, "owner", "Owner", "objects")],
-                    2,
-                    2,
-                    3,
+                ExpectedRequest::json(
+                    &tags_path,
+                    &[("limit", "1")],
+                    paged(vec![tag_value(ID_C, "open", "Open")], 0, 1, 2),
                 ),
-            ),
-        ])
-        .await;
-        let handlers =
-            DiscoveryHandlers::with_new_cursor_store(runtime(&fixture.endpoint)).unwrap();
-        let cancellation = CancellationToken::new();
-        let first = handlers
-            .property_list(
-                PropertyListInput {
-                    space: DiscoveryReference::new(SPACE_ID).unwrap(),
-                    type_reference: Some(DiscoveryReference::new(ID_A).unwrap()),
-                    filters: Omittable::Missing,
-                    limit: PageLimit::new(2).unwrap(),
-                    cursor: None,
-                },
-                &cancellation,
-            )
+                ExpectedRequest::json(&type_path, &[], type_response),
+                ExpectedRequest::json(
+                    &properties_path,
+                    &[("limit", "2"), ("offset", "2")],
+                    paged(
+                        vec![property_value(ID_D, "owner", "Owner", "objects")],
+                        2,
+                        2,
+                        3,
+                    ),
+                ),
+            ])
             .await;
-        assert_eq!(first.is_error, Some(false));
-        let items = first.structured_content.as_ref().unwrap()["items"]
-            .as_array()
-            .unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["tag_count"], 2);
-        assert!(items[0].get("tags").is_none());
-        let cursor = cursor_from(&first);
-        let mismatch = handlers
-            .property_list(
-                PropertyListInput {
-                    space: DiscoveryReference::new(SPACE_ID).unwrap(),
-                    type_reference: Some(DiscoveryReference::new(ID_B).unwrap()),
-                    filters: Omittable::Missing,
-                    limit: PageLimit::new(2).unwrap(),
-                    cursor: Some(cursor.clone()),
-                },
-                &cancellation,
-            )
-            .await;
-        assert_error(&mismatch, "validation");
-        let second = handlers
-            .property_list(
-                PropertyListInput {
-                    space: DiscoveryReference::new(SPACE_ID).unwrap(),
-                    type_reference: Some(DiscoveryReference::new(ID_A).unwrap()),
-                    filters: Omittable::Missing,
-                    limit: PageLimit::new(2).unwrap(),
-                    cursor: Some(cursor),
-                },
-                &cancellation,
-            )
-            .await;
-        assert_eq!(second.is_error, Some(false));
-        let items = second.structured_content.as_ref().unwrap()["items"]
-            .as_array()
-            .unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["key"], "owner");
-        assert_eq!(items[0]["tag_count"], 0);
-        assert!(
-            second
-                .structured_content
-                .as_ref()
-                .unwrap()
-                .get("next_cursor")
-                .is_none()
-        );
-        fixture.finish().await;
+            let handlers =
+                DiscoveryHandlers::with_new_cursor_store(runtime(&fixture.endpoint)).unwrap();
+            let cancellation = CancellationToken::new();
+            let first = handlers
+                .property_list(
+                    PropertyListInput {
+                        space: DiscoveryReference::new(SPACE_ID).unwrap(),
+                        type_reference: Some(DiscoveryReference::new(ID_A).unwrap()),
+                        filters: Omittable::Missing,
+                        limit: PageLimit::new(2).unwrap(),
+                        cursor: None,
+                    },
+                    &cancellation,
+                )
+                .await;
+            assert_eq!(first.is_error, Some(false));
+            let items = first.structured_content.as_ref().unwrap()["items"]
+                .as_array()
+                .unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["tag_count"], 2);
+            assert!(items[0].get("tags").is_none());
+            let cursor = cursor_from(&first);
+            let mismatch = handlers
+                .property_list(
+                    PropertyListInput {
+                        space: DiscoveryReference::new(SPACE_ID).unwrap(),
+                        type_reference: Some(DiscoveryReference::new(ID_B).unwrap()),
+                        filters: Omittable::Missing,
+                        limit: PageLimit::new(2).unwrap(),
+                        cursor: Some(cursor.clone()),
+                    },
+                    &cancellation,
+                )
+                .await;
+            assert_error(&mismatch, "validation");
+            let second = handlers
+                .property_list(
+                    PropertyListInput {
+                        space: DiscoveryReference::new(SPACE_ID).unwrap(),
+                        type_reference: Some(DiscoveryReference::new(ID_A).unwrap()),
+                        filters: Omittable::Missing,
+                        limit: PageLimit::new(2).unwrap(),
+                        cursor: Some(cursor),
+                    },
+                    &cancellation,
+                )
+                .await;
+            assert_eq!(second.is_error, Some(false));
+            let items = second.structured_content.as_ref().unwrap()["items"]
+                .as_array()
+                .unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["key"], "owner");
+            assert_eq!(items[0]["tag_count"], 0);
+            assert!(
+                second
+                    .structured_content
+                    .as_ref()
+                    .unwrap()
+                    .get("next_cursor")
+                    .is_none()
+            );
+            fixture.finish().await;
+        });
     }
 
     #[tokio::test]

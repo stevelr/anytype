@@ -119,6 +119,10 @@ where
     pub fn success(&self, value: &O) -> Result<CallToolResult, ResultEncodingError> {
         serde_json::to_value(value)
             .map(CallToolResult::structured)
+            .map(|mut result| {
+                result.result_type = None;
+                result
+            })
             .map_err(|_| ResultEncodingError)
     }
 }

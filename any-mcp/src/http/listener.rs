@@ -495,7 +495,8 @@ fn classify_long_artifact_call(body: &[u8]) -> bool {
     request.jsonrpc == "2.0"
         && request.method == "tools/call"
         && valid_id
-        && request.params.task.is_none()
+        && request.params.input_responses.is_none()
+        && request.params.request_state.is_none()
         && long_artifact_tool(request.params.name.as_ref())
 }
 
@@ -1317,7 +1318,13 @@ pub(crate) mod tests {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "tools/call",
-                "params": {"name": "file_import", "arguments": {}, "task": {}},
+                "params": {"name": "file_import", "arguments": {}, "requestState": "opaque"},
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "file_import", "arguments": {}, "inputResponses": {}},
             }),
         ] {
             assert!(!classify_long_artifact_call(body.to_string().as_bytes()));

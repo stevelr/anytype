@@ -9,7 +9,7 @@
 //! stable session backend rather than inspecting response heads: the
 //! standalone GET stream's priming event and repeated keep-alives, session
 //! survival across an abrupt stream disconnect, the exact `Last-Event-ID`
-//! reconnect contract implemented by `rmcp` 2.2.0 for both the standalone
+//! reconnect contract implemented by `rmcp` 3.1.3 for both the standalone
 //! stream and request-scoped POST response streams, and stream termination
 //! when the session is deleted. Every socket wait is bounded.
 //!
@@ -357,7 +357,7 @@ fn content_frames(frames: Vec<SseFrame>) -> Vec<SseFrame> {
         .collect()
 }
 
-/// POST response streams are request-scoped. `rmcp` 2.2.0 lets a client that
+/// POST response streams are request-scoped. `rmcp` 3.1.3 lets a client that
 /// lost the connection while its request was still in flight reconnect with
 /// the priming event ID and receive the response on the resumed stream, which
 /// then ends. Once the response has been emitted the request-scoped stream is
@@ -437,14 +437,21 @@ async fn post_response_stream_resumes_in_flight_and_never_replays_after_completi
     }
     release.cancel();
     let recovered = content_frames(resumed.drain().await);
-    assert_eq!(recovered.len(), 1, "{recovered:?}");
+    assert_eq!(recovered.len(), 2, "{recovered:?}");
     assert_eq!(
         recovered[0].id.as_deref(),
+        Some(format!("0/{held_request}").as_str()),
+        "{recovered:?}"
+    );
+    assert_eq!(recovered[0].retry, Some(RETRY_MILLIS));
+    assert_eq!(recovered[0].data.as_deref(), Some(""));
+    assert_eq!(
+        recovered[1].id.as_deref(),
         Some(format!("1/{held_request}").as_str()),
         "{recovered:?}"
     );
-    assert_eq!(recovered[0].retry, None);
-    let message = recovered[0].json();
+    assert_eq!(recovered[1].retry, None);
+    let message = recovered[1].json();
     assert_eq!(message["id"], 2, "{message}");
     assert_eq!(message["result"]["isError"], false, "{message}");
     assert_eq!(

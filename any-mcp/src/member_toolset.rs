@@ -368,7 +368,6 @@ mod tests {
         objects::{DataModel, Icon},
         prelude::{AnytypeClient, ClientConfig, HttpCredentials},
     };
-    use rmcp::model::ListToolsResult;
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use tiktoken_rs::{CoreBPE, o200k_base};
@@ -461,7 +460,10 @@ mod tests {
     }
 
     fn tools_list_value(server: &AnyMcpServer) -> serde_json::Value {
-        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec())).unwrap()
+        serde_json::to_value(crate::server::stable_list_tools_result(
+            server.tools().to_vec(),
+        ))
+        .unwrap()
     }
 
     fn member_token_budget() -> serde_json::Value {

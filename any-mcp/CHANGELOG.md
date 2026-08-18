@@ -8,6 +8,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Upgrade `rmcp` to 3.1.3 while retaining the stable `2025-11-25` protocol
+  revision and the existing stdio and Streamable HTTP transport contracts.
+  Legacy responses omit the 2026 result discriminator, unsupported MRTR
+  continuation metadata fails closed, and HTTP signal listeners are installed
+  before the listener reports readiness.
 - Add a non-default, fail-closed benchmark harness core with pinned artifact
   admission, isolated-arm and credential-descriptor checks, bounded child
   protocol ownership, layered secret scanning, independent oracle contracts,

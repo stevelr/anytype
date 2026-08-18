@@ -2129,24 +2129,50 @@ pub async fn serve_stdio(
 
 /// Waits for the process interrupt signal, or the terminate signal on Unix.
 pub(crate) async fn wait_for_shutdown_signal() {
-    let interrupt = tokio::signal::ctrl_c();
+    wait_for_shutdown_signal_inner(None).await;
+}
+
+/// Installs process signal listeners, reports readiness, and waits for shutdown.
+pub(crate) async fn wait_for_shutdown_signal_ready(ready: tokio::sync::oneshot::Sender<()>) {
+    wait_for_shutdown_signal_inner(Some(ready)).await;
+}
+
+async fn wait_for_shutdown_signal_inner(ready: Option<tokio::sync::oneshot::Sender<()>>) {
     #[cfg(unix)]
     {
-        let mut terminate =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(terminate) => terminate,
-                Err(_) => {
-                    let _ = interrupt.await;
-                    return;
+        let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
+        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        let _ = ready.map(|ready| ready.send(()));
+        match (interrupt, terminate) {
+            (Ok(mut interrupt), Ok(mut terminate)) => {
+                tokio::select! {
+                    _ = interrupt.recv() => {}
+                    _ = terminate.recv() => {}
                 }
-            };
-        tokio::select! {
-            _ = interrupt => {}
-            _ = terminate.recv() => {}
+            }
+            (Ok(mut interrupt), Err(_)) => {
+                let _ = interrupt.recv().await;
+            }
+            (Err(_), Ok(mut terminate)) => {
+                let _ = terminate.recv().await;
+            }
+            (Err(_), Err(_)) => std::future::pending().await,
         }
     }
     #[cfg(not(unix))]
     {
+        let mut ready = ready;
+        let interrupt = tokio::signal::ctrl_c();
+        tokio::pin!(interrupt);
+        tokio::select! {
+            biased;
+            _ = &mut interrupt => {
+                let _ = ready.take().map(|ready| ready.send(()));
+                return;
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+        let _ = ready.take().map(|ready| ready.send(()));
         let _ = interrupt.await;
     }
 }
@@ -2276,7 +2302,9 @@ mod tests {
     use anytype::prelude::ClientConfig;
     use rmcp::{
         ErrorData as McpError, ServerHandler,
-        model::{CallToolRequestParams, CallToolResult, ServerCapabilities, ServerInfo},
+        model::{
+            CallToolRequestParams, CallToolResponse, CallToolResult, ServerCapabilities, ServerInfo,
+        },
         service::RequestContext,
     };
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
@@ -2560,7 +2588,7 @@ mod tests {
             &self,
             _request: CallToolRequestParams,
             context: RequestContext<RoleServer>,
-        ) -> Result<CallToolResult, McpError> {
+        ) -> Result<CallToolResponse, McpError> {
             let started = self.started.clone();
             let result = self
                 .runtime
@@ -2575,7 +2603,7 @@ mod tests {
                 .await;
             assert!(matches!(result, Err(RuntimeError::Cancelled)));
             self.cancelled.notify_one();
-            Ok(CallToolResult::success(Vec::new()))
+            Ok(CallToolResult::success(Vec::new()).into())
         }
     }
 

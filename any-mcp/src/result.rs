@@ -38,7 +38,9 @@ pub fn tool_error(error: &ToolError) -> CallToolResult {
             "message": ToolError::upstream().message(),
         })
     });
-    CallToolResult::structured_error(value)
+    let mut result = CallToolResult::structured_error(value);
+    result.result_type = None;
+    result
 }
 
 #[cfg(test)]

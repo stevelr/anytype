@@ -17,9 +17,9 @@ use std::{
 use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials};
 use rmcp::{
     model::{
-        CallToolRequestMethod, CallToolRequestParams, CallToolResult, ErrorData, ListToolsResult,
+        CallToolRequestMethod, CallToolRequestParams, CallToolResult, ErrorData,
         ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
-        ResourceTemplate, TaskMetadata,
+        ResourceTemplate,
     },
     schemars::JsonSchema,
 };
@@ -766,8 +766,10 @@ fn canonical_sha256(value: Value) -> String {
 }
 
 fn tools_list_value(server: &AnyMcpServer) -> Value {
-    serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
-        .expect("complete tools/list result")
+    serde_json::to_value(crate::server::stable_list_tools_result(
+        server.tools().to_vec(),
+    ))
+    .expect("complete tools/list result")
 }
 
 fn production_catalog_snapshot(server: &AnyMcpServer, read_only: bool) -> String {
@@ -863,7 +865,7 @@ fn production_token_budget() -> Value {
         .expect("optional status tool");
     let status_tokens = token_count(
         &tokenizer,
-        serde_json::to_value(ListToolsResult::with_all_items(vec![status]))
+        serde_json::to_value(crate::server::stable_list_tools_result(vec![status]))
             .expect("status tools/list value"),
     );
 
@@ -913,8 +915,10 @@ fn tools_list_tokens(tokenizer: &CoreBPE, value: &str, read_only: bool) -> usize
     let server = server(value, ApplicationProfile::Compact, read_only);
     token_count(
         tokenizer,
-        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
-            .expect("complete tools/list result"),
+        serde_json::to_value(crate::server::stable_list_tools_result(
+            server.tools().to_vec(),
+        ))
+        .expect("complete tools/list result"),
     )
 }
 
@@ -971,7 +975,7 @@ fn actual_token_budget() -> OptionalTokenBudget {
         common_status_ceiling_tokens: 500,
         common_status_tokens: token_count(
             &tokenizer,
-            serde_json::to_value(ListToolsResult::with_all_items(vec![status]))
+            serde_json::to_value(crate::server::stable_list_tools_result(vec![status]))
                 .expect("status tools/list result"),
         ),
         alpha_selected: canonical_selected("alpha"),
@@ -1200,15 +1204,15 @@ async fn disabled_and_read_only_calls_reject_before_decode_or_handler_work() {
     );
     assert_eq!(ALPHA_CALLS.load(Ordering::SeqCst), 0);
 
-    let task_error = disabled
+    let continuation_error = disabled
         .dispatch_tool(
-            CallToolRequestParams::new(ALPHA_READ).with_task(TaskMetadata::new()),
+            CallToolRequestParams::new(ALPHA_READ).with_request_state("opaque-state"),
             &CancellationToken::new(),
         )
         .await
-        .expect_err("disabled task-augmented name is method-not-found");
+        .expect_err("disabled continuation name is method-not-found");
     assert_eq!(
-        task_error,
+        continuation_error,
         ErrorData::method_not_found::<CallToolRequestMethod>()
     );
     assert_eq!(disabled.phase1_dispatch_polls(), 0);
@@ -1245,14 +1249,14 @@ async fn disabled_and_read_only_calls_reject_before_decode_or_handler_work() {
     assert_eq!(read_only.phase1_dispatch_polls(), 0);
 
     let selected = server("alpha", ApplicationProfile::Compact, false);
-    let selected_task_error = selected
+    let selected_continuation_error = selected
         .dispatch_tool(
-            CallToolRequestParams::new(ALPHA_READ).with_task(TaskMetadata::new()),
+            CallToolRequestParams::new(ALPHA_READ).with_input_responses(BTreeMap::new()),
             &CancellationToken::new(),
         )
         .await
-        .expect_err("selected optional task metadata is rejected");
-    assert_eq!(selected_task_error, invalid_arguments());
+        .expect_err("selected optional continuation metadata is rejected");
+    assert_eq!(selected_continuation_error, invalid_arguments());
     assert_eq!(ALPHA_CALLS.load(Ordering::SeqCst), 0);
     assert_eq!(selected.phase1_dispatch_polls(), 0);
 

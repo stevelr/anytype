@@ -179,7 +179,7 @@ mod tests {
     use std::{collections::BTreeMap, time::Duration};
 
     use anytype::prelude::{AnytypeClient, ClientConfig};
-    use rmcp::model::{CallToolRequestParams, ListToolsResult};
+    use rmcp::model::CallToolRequestParams;
     use serde_json::{Map, Value, json};
     use sha2::{Digest, Sha256};
     use tiktoken_rs::{CoreBPE, o200k_base};
@@ -459,11 +459,11 @@ mod tests {
         let before_link =
             AnyMcpServer::new_with_optional_registries(production_runtime, &WITHOUT_CHATS).unwrap();
         assert_eq!(
-            serde_json::to_vec(&ListToolsResult::with_all_items(
+            serde_json::to_vec(&crate::server::stable_list_tools_result(
                 production.tools().to_vec()
             ))
             .unwrap(),
-            serde_json::to_vec(&ListToolsResult::with_all_items(
+            serde_json::to_vec(&crate::server::stable_list_tools_result(
                 before_link.tools().to_vec()
             ))
             .unwrap()
@@ -520,7 +520,10 @@ mod tests {
     }
 
     fn tools_value(server: &AnyMcpServer) -> Value {
-        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec())).unwrap()
+        serde_json::to_value(crate::server::stable_list_tools_result(
+            server.tools().to_vec(),
+        ))
+        .unwrap()
     }
 
     fn hash(value: &Value) -> String {

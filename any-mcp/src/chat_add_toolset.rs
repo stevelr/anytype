@@ -779,7 +779,7 @@ mod tests {
         test_util::{DisposableRun, unique_suffix, with_disposable_space_context},
     };
     use chrono::TimeZone;
-    use rmcp::model::{CallToolRequestParams, ListToolsResult};
+    use rmcp::model::CallToolRequestParams;
     use serde_json::{Map, Value, json};
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split},
@@ -840,7 +840,7 @@ mod tests {
     fn chat_add_snapshot() -> Value {
         let tokenizer = tiktoken_rs::o200k_base().expect("o200k tokenizer");
         let catalog = canonical(
-            serde_json::to_value(ListToolsResult::with_all_items(vec![
+            serde_json::to_value(crate::server::stable_list_tools_result(vec![
                 chat_message_add_tool().unwrap().into_tool(),
             ]))
             .unwrap(),

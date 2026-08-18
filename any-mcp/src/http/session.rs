@@ -265,7 +265,7 @@ impl StableBackend {
         let rmcp_config = StreamableHttpServerConfig::default()
             .with_sse_keep_alive(Some(sse_keep_alive))
             .with_sse_retry(Some(SSE_RETRY))
-            .with_stateful_mode(true)
+            .with_legacy_session_mode(true)
             .with_json_response(false)
             .with_cancellation_token(cancellation)
             .with_allowed_hosts(

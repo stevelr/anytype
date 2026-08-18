@@ -8193,7 +8193,7 @@ mod tests {
     };
 
     use anytype::prelude::{AnytypeClient, ClientConfig};
-    use rmcp::model::{CallToolRequestParams, ListToolsResult};
+    use rmcp::model::CallToolRequestParams;
     use serde_json::{Map, Value, json};
     use sha2::{Digest, Sha256};
     use tiktoken_rs::{CoreBPE, o200k_base};
@@ -8862,8 +8862,10 @@ mod tests {
     }
 
     fn tools_value(server: &AnyMcpServer) -> Value {
-        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
-            .expect("tools value")
+        serde_json::to_value(crate::server::stable_list_tools_result(
+            server.tools().to_vec(),
+        ))
+        .expect("tools value")
     }
 
     fn dense_text(bytes: usize) -> String {
@@ -12639,10 +12641,9 @@ mod tests {
         for value in ["DataView", "2dataview", "data-view", "é"] {
             assert!(OpaqueKind::new(value.to_owned()).is_err(), "{value}");
         }
-        let output = serde_json::to_value(
-            rmcp::handler::server::tool::schema_for_output::<BodyBlockListOutput>()
-                .expect("body list output schema"),
-        )
+        let output = serde_json::to_value(rmcp::handler::server::tool::schema_for_output::<
+            BodyBlockListOutput,
+        >())
         .expect("schema value");
         let encoded = serde_json::to_string(&output).expect("schema JSON");
         for exact_enum in [

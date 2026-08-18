@@ -193,10 +193,12 @@ pub async fn serve_http(
     ));
     let shutdown = CancellationToken::new();
     let signal_shutdown = shutdown.clone();
+    let (signal_ready, signal_installed) = tokio::sync::oneshot::channel();
     let signals = tokio::spawn(async move {
-        crate::runtime::wait_for_shutdown_signal().await;
+        crate::runtime::wait_for_shutdown_signal_ready(signal_ready).await;
         signal_shutdown.cancel();
     });
+    let _ = signal_installed.await;
     let bound = match tokio::net::TcpListener::bind(config.bind).await {
         Ok(bound) => bound,
         Err(_) => {

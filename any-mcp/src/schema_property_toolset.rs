@@ -1079,7 +1079,6 @@ mod tests {
         prelude::{AnytypeClient, ClientConfig, HttpCredentials},
         test_util::{DisposableRun, unique_suffix, with_disposable_space_context},
     };
-    use rmcp::model::ListToolsResult;
     use serde_json::{Map, Value, json};
     use tiktoken_rs::{CoreBPE, o200k_base};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
@@ -1770,7 +1769,7 @@ mod tests {
             false,
             handlers.clone(),
         );
-        let expected = serde_json::to_value(rmcp::model::ListToolsResult::with_all_items(
+        let expected = serde_json::to_value(crate::server::stable_list_tools_result(
             direct_server.tools().to_vec(),
         ))
         .expect("direct tools value");
@@ -1836,8 +1835,10 @@ mod tests {
     }
 
     fn tools_list_value(server: &AnyMcpServer) -> Value {
-        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
-            .expect("tools list value")
+        serde_json::to_value(crate::server::stable_list_tools_result(
+            server.tools().to_vec(),
+        ))
+        .expect("tools list value")
     }
 
     fn adversarial_text(seed: usize, length: usize) -> String {

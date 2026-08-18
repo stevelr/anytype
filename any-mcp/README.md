@@ -740,8 +740,8 @@ raw MCP IDs are never formatted. Operators can explicitly override the
 
 ### Protocol and wire-contract boundaries
 
-- [`rmcp`](https://docs.rs/rmcp/) 2.2.0 with the `server`, `macros`, `schemars`,
-  and `transport-io` features;
+- [`rmcp`](https://docs.rs/rmcp/) 3.1.3 with the `server`, `macros`, `schemars`,
+  `transport-io`, and `transport-streamable-http-server` features;
 - production advertises rmcp's latest released protocol, exactly `2025-11-25`,
   and uses the standard `initialize`/`notifications/initialized` lifecycle.
   Released revisions from the oldest explicitly regression-tested revision,

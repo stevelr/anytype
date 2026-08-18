@@ -330,7 +330,7 @@ mod tests {
         error::AnytypeError,
         prelude::{AnytypeClient, ClientConfig, HttpCredentials},
     };
-    use rmcp::model::{CallToolRequestParams, ListToolsResult, ToolAnnotations};
+    use rmcp::model::{CallToolRequestParams, ToolAnnotations};
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use tiktoken_rs::{CoreBPE, o200k_base};
@@ -794,22 +794,22 @@ mod tests {
         let tool = serde_json::to_value(object_discussion_get_tool().expect("tool").as_tool())
             .expect("tool JSON");
         let selected_server = server(true, false);
-        let selected = serde_json::to_value(ListToolsResult::with_all_items(
+        let selected = serde_json::to_value(crate::server::stable_list_tools_result(
             selected_server.tools().to_vec(),
         ))
         .expect("selected tools JSON");
         let selected_read_only_server = server(true, true);
-        let selected_read_only = serde_json::to_value(ListToolsResult::with_all_items(
+        let selected_read_only = serde_json::to_value(crate::server::stable_list_tools_result(
             selected_read_only_server.tools().to_vec(),
         ))
         .expect("read-only tools JSON");
         let base_server = server(false, false);
-        let base = serde_json::to_value(ListToolsResult::with_all_items(
+        let base = serde_json::to_value(crate::server::stable_list_tools_result(
             base_server.tools().to_vec(),
         ))
         .expect("base tools JSON");
         let base_read_only_server = server(false, true);
-        let base_read_only = serde_json::to_value(ListToolsResult::with_all_items(
+        let base_read_only = serde_json::to_value(crate::server::stable_list_tools_result(
             base_read_only_server.tools().to_vec(),
         ))
         .expect("read-only base tools JSON");

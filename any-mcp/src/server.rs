@@ -10,10 +10,10 @@ use std::{fmt, sync::Arc};
 use rmcp::{
     RoleServer, ServerHandler,
     model::{
-        CallToolRequestMethod, CallToolRequestParams, CallToolResult, ErrorData, Implementation,
-        ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-        ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, ServerCapabilities,
-        ServerInfo, Tool,
+        CallToolRequestMethod, CallToolRequestParams, CallToolResponse, CallToolResult, ErrorData,
+        Implementation, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
+        PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
+        ReadResourceResult, ServerCapabilities, ServerInfo, Tool,
     },
     service::{NotificationContext, RequestContext},
 };
@@ -440,7 +440,10 @@ impl AnyMcpServer {
             let result = task.await;
             guard.disarm();
             match result {
-                Ok(result) => result,
+                Ok(result) => result.map(|mut result| {
+                    result.result_type = None;
+                    result
+                }),
                 Err(_) => Err(ErrorData::internal_error("Tool execution failed.", None)),
             }
         })
@@ -486,7 +489,7 @@ impl AnyMcpServer {
                 CallToolRequestMethod,
             >())));
         }
-        if request.task.is_some() {
+        if request.input_responses.is_some() || request.request_state.is_some() {
             return Box::pin(std::future::ready(Err(invalid_arguments())));
         }
         if self.state.optional_catalog.is_read_only_mutation(name) {
@@ -680,7 +683,7 @@ impl AnyMcpServer {
         request: Option<PaginatedRequestParams>,
     ) -> Result<ListToolsResult, ErrorData> {
         reject_static_cursor(request)?;
-        Ok(ListToolsResult::with_all_items(self.state.tools.clone()))
+        Ok(stable_list_tools_result(self.state.tools.clone()))
     }
 
     pub(crate) fn list_resources_wire(
@@ -688,9 +691,9 @@ impl AnyMcpServer {
         request: Option<PaginatedRequestParams>,
     ) -> Result<ListResourcesResult, ErrorData> {
         reject_static_cursor(request)?;
-        Ok(ListResourcesResult::with_all_items(
-            self.state.resource_instances.clone(),
-        ))
+        let mut result = ListResourcesResult::with_all_items(self.state.resource_instances.clone());
+        result.result_type = None;
+        Ok(result)
     }
 
     pub(crate) fn list_resource_templates_wire(
@@ -698,9 +701,10 @@ impl AnyMcpServer {
         request: Option<PaginatedRequestParams>,
     ) -> Result<ListResourceTemplatesResult, ErrorData> {
         reject_static_cursor(request)?;
-        Ok(ListResourceTemplatesResult::with_all_items(
-            self.state.resource_templates.clone(),
-        ))
+        let mut result =
+            ListResourceTemplatesResult::with_all_items(self.state.resource_templates.clone());
+        result.result_type = None;
+        Ok(result)
     }
 
     pub(crate) async fn read_resource_wire(
@@ -708,29 +712,32 @@ impl AnyMcpServer {
         request: ReadResourceRequestParams,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<ReadResourceResult, ErrorData> {
-        if let Some(registry) = self
+        let mut result = if let Some(registry) = self
             .state
             .optional_catalog
             .registry_for_resource(&request.uri)
         {
-            return registry
+            registry
                 .read_resource(request, &self.runtime, cancellation)
-                .await;
-        }
-        if self
-            .state
-            .linked_optional_registries
-            .iter()
-            .any(|registry| registry.owns_resource_uri(&request.uri))
-        {
-            return Err(ErrorData::method_not_found::<
-                rmcp::model::ReadResourceRequestMethod,
-            >());
-        }
-        self.state
-            .resources
-            .read_resource(request, cancellation)
-            .await
+                .await?
+        } else {
+            if self
+                .state
+                .linked_optional_registries
+                .iter()
+                .any(|registry| registry.owns_resource_uri(&request.uri))
+            {
+                return Err(ErrorData::method_not_found::<
+                    rmcp::model::ReadResourceRequestMethod,
+                >());
+            }
+            self.state
+                .resources
+                .read_resource(request, cancellation)
+                .await?
+        };
+        result.result_type = None;
+        Ok(result)
     }
 }
 
@@ -775,7 +782,7 @@ impl ServerHandler for AnyMcpServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<CallToolResponse, ErrorData> {
         // A client that omits `notifications/initialized` still reaches a
         // terminal roots decision: installation is set-once and idempotent.
         self.runtime().client_roots().install_peer(&context.peer);
@@ -789,7 +796,7 @@ impl ServerHandler for AnyMcpServer {
                 .get::<crate::runtime::InvocationAnchor>()
                 .cloned()
             else {
-                return Ok(tool_error(&ToolError::upstream()));
+                return Ok(tool_error(&ToolError::upstream()).into());
             };
             return self
                 .runtime
@@ -801,9 +808,12 @@ impl ServerHandler for AnyMcpServer {
                     ))
                     .await
                 })
-                .await;
+                .await
+                .map(Into::into);
         }
-        Box::pin(self.dispatch_tool_for_protocol(request, &protocol_version, &context.ct)).await
+        Box::pin(self.dispatch_tool_for_protocol(request, &protocol_version, &context.ct))
+            .await
+            .map(Into::into)
     }
 
     async fn list_resources(
@@ -826,8 +836,10 @@ impl ServerHandler for AnyMcpServer {
         &self,
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, ErrorData> {
-        self.read_resource_wire(request, &context.ct).await
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        self.read_resource_wire(request, &context.ct)
+            .await
+            .map(Into::into)
     }
 }
 
@@ -842,6 +854,12 @@ pub(crate) fn decode_arguments<T: DeserializeOwned>(
 ) -> Result<T, ErrorData> {
     serde_json::from_value(Value::Object(arguments.unwrap_or_default()))
         .map_err(|_| invalid_arguments())
+}
+
+pub(crate) fn stable_list_tools_result(tools: Vec<Tool>) -> ListToolsResult {
+    let mut result = ListToolsResult::with_all_items(tools);
+    result.result_type = None;
+    result
 }
 
 fn invalid_arguments() -> ErrorData {
@@ -1304,8 +1322,10 @@ mod tests {
     fn tools_list_value(profile: ApplicationProfile, read_only: bool) -> Value {
         let server =
             AnyMcpServer::new(runtime_with_profile(profile, read_only)).expect("static catalog");
-        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
-            .expect("serialize complete tools/list result")
+        serde_json::to_value(crate::server::stable_list_tools_result(
+            server.tools().to_vec(),
+        ))
+        .expect("serialize complete tools/list result")
     }
 
     fn assert_valid_representative(server: &AnyMcpServer, name: &str, result: &Value) {
@@ -2323,9 +2343,10 @@ mod tests {
         let tokenizer = o200k_base().expect("construct pinned o200k_base tokenizer");
         let server = AnyMcpServer::new(runtime_with_profile(ApplicationProfile::Compact, false))
             .expect("compact static catalog");
-        let response =
-            serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
-                .expect("serialize complete tools/list result");
+        let response = serde_json::to_value(crate::server::stable_list_tools_result(
+            server.tools().to_vec(),
+        ))
+        .expect("serialize complete tools/list result");
         eprintln!(
             "complete_tools_list_result={}",
             token_count(&tokenizer, response)

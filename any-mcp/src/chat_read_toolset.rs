@@ -1013,7 +1013,7 @@ mod tests {
         test_util::{DisposableRun, unique_suffix, with_disposable_space_context},
     };
     use chrono::{FixedOffset, TimeZone, Timelike};
-    use rmcp::model::{CallToolRequestParams, ListToolsResult, ToolAnnotations};
+    use rmcp::model::{CallToolRequestParams, ToolAnnotations};
     use serde_json::{Map, Value, json};
     use sha2::{Digest, Sha256};
     use tiktoken_rs::{CoreBPE, o200k_base};
@@ -1113,8 +1113,10 @@ mod tests {
     }
 
     fn catalog_value(server: &AnyMcpServer) -> Value {
-        serde_json::to_value(ListToolsResult::with_all_items(server.tools().to_vec()))
-            .expect("catalog JSON")
+        serde_json::to_value(crate::server::stable_list_tools_result(
+            server.tools().to_vec(),
+        ))
+        .expect("catalog JSON")
     }
 
     fn catalog_record(tokenizer: &CoreBPE, server: &AnyMcpServer) -> Value {

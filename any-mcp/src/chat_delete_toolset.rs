@@ -509,7 +509,6 @@ mod tests {
         test_util::{DisposableRun, unique_suffix, with_disposable_space_context},
     };
     use chrono::DateTime;
-    use rmcp::model::ListToolsResult;
     use serde_json::{Map, Value, json};
     use sha2::{Digest, Sha256};
     use tokio::sync::Notify;
@@ -571,7 +570,7 @@ mod tests {
     fn delete_snapshot() -> Value {
         let tokenizer = tiktoken_rs::o200k_base().expect("o200k tokenizer");
         let catalog = canonical(
-            serde_json::to_value(ListToolsResult::with_all_items(vec![
+            serde_json::to_value(crate::server::stable_list_tools_result(vec![
                 chat_message_delete_tool().unwrap().into_tool(),
             ]))
             .unwrap(),

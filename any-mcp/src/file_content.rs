@@ -2653,7 +2653,7 @@ mod tests {
             DisposableRun, TestContext, TestResult, unique_suffix, with_disposable_space_context,
         },
     };
-    use rmcp::model::{ErrorCode, ListToolsResult, ResourceContents};
+    use rmcp::model::{ErrorCode, ResourceContents};
     use serde_json::{Map, json};
     use tiktoken_rs::o200k_base;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
@@ -4837,8 +4837,9 @@ mod tests {
             .find(|tool| tool.name == "optional_toolset_status")
             .expect("common optional status tool")
             .clone();
-        let status_value = serde_json::to_value(ListToolsResult::with_all_items(vec![status]))
-            .expect("status tools/list JSON");
+        let status_value =
+            serde_json::to_value(crate::server::stable_list_tools_result(vec![status]))
+                .expect("status tools/list JSON");
         let per_tool = read_write
             .tools()
             .iter()

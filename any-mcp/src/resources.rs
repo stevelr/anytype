@@ -47,7 +47,7 @@ const UPSTREAM_MESSAGE: &str = "Anytype could not complete the resource read.";
 
 /// A validated document read together with its typed MCP resource descriptor.
 ///
-/// The descriptor carries byte size and annotations supported by `rmcp` 2.2,
+/// The descriptor carries byte size and annotations supported by `rmcp` 3.1,
 /// while [`ReadResourceResult`] carries only the complete markdown body. This
 /// lets tool result adapters emit the same metadata-rich resource link without
 /// duplicating document properties or content in `_meta`.
@@ -646,10 +646,7 @@ mod tests {
             .expect("resource annotations");
         assert_eq!(annotations.priority, Some(RESOURCE_PRIORITY));
         assert_eq!(
-            annotations
-                .last_modified
-                .expect("last modified")
-                .to_rfc3339(),
+            annotations.last_modified.as_deref().expect("last modified"),
             "2026-07-20T10:00:00+00:00"
         );
         let descriptor_wire = serde_json::to_value(descriptor).expect("descriptor wire");
