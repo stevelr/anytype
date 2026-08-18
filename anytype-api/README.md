@@ -71,6 +71,18 @@ server filtering after pagination. When typed list filters include one positive
 type filter, the client maps it to search's dedicated type selector instead of
 sending it as a generic property condition.
 
+### REST model fidelity
+
+`Type`, `Property`, `Tag`, and `Member` retain the REST response's `object`
+discriminator. Responses that omit it use the model's expected discriminator
+for compatibility, while an observed value is preserved. `Member.icon` uses
+the typed `Icon` model.
+
+gRPC file details accept an integral numeric `addedDate` as Unix seconds as
+well as the established RFC 3339 string form. `FileObject::target_object_id`
+is populated only from `targetObjectId`. `createdInContext` remains upload
+context.
+
 ### Bounded HTTP responses
 
 Buffered REST responses have finite byte ceilings. Ordinary JSON defaults to

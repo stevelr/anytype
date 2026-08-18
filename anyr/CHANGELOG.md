@@ -63,6 +63,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Reject conflicting global output requests for every command: any pair of
+  `--json`, `--pretty`, `--table`, and `--quiet`, or `--quiet` with
+  `-o`/`--output`, now fails before dispatch.
+- Keep chat transport and pagination truthful: message list, get, and delete
+  are gRPC-only and reject `--transport rest`, while `--all` chat listings and
+  message searches exhaust checked server pages.
+- Run the real-operations live case inside the shared cleanup-owned disposable
+  space guard so failures during setup or assertions cannot strand its space.
 - Make the `init-cli` child-failure regression assert its stable operation and
   redaction contract instead of requiring platform-specific exit-status text.
 - Make the oversized `init-cli` output regression emit its limit-crossing

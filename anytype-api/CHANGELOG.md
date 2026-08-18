@@ -288,6 +288,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Preserve REST model fidelity for types, properties, tags, and members by
+  retaining their `object` discriminator and decoding member icons as `Icon`.
+  File detail parsing now accepts integral numeric `addedDate` values and no
+  longer synthesizes `targetObjectId` from `createdInContext`.
 - Run the HTTP deadline tests in real time until the fixture accepts the
   request and only then freeze the clock: under `start_paused`, auto-advance
   could virtually expire the deadline while the real TCP connect was still

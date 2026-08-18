@@ -8,6 +8,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Keep ignored live-test instructions tied to executable targets and scenario
+  roles without hard-coded suite totals that drift as coverage grows.
+- Document the cross-platform CA trust requirements for private-authority JWKS
+  fetches.
+- Correct artifact staging documentation to include the shipped `429`
+  rate-limit and `416` unsatisfiable-range responses.
 - Run the portable cross-platform contracts and disposable headless live gate
   on pushes to `main` and nightly while retaining manually selected portable,
   live, clean-server, and combined tiers.
@@ -284,6 +290,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Reconcile full stable-session admission against rmcp and reclaim only
+  bindings conclusively reported absent. Live sessions and failed probes retain
+  their slots, so capacity remains fail-closed without evicting active clients.
+- Compile the Unix reviewed-log window limit independently of the optional
+  acceptance harness, keeping the feature-minimal headless stdio test target
+  valid.
 - Make the portable suites deterministic on macOS and Windows: loopback HTTP
   fixtures explicitly restore blocking mode on accepted sockets, Windows test
   roots and selected configuration files receive current-user-only ACLs, and

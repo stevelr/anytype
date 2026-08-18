@@ -1854,9 +1854,9 @@ failure artifact.
 The selectable `headless_direct_standard_*` and
 `headless_stdio_standard_*` cases cover discovery, document/resource access,
 views, mutations, exported-Markdown no-op replacement, and archive through
-both entry paths. They execute all 14
-standard tools and `resources/list`, `resources/templates/list`, and
-`resources/read`, including bounded cursor terminality and binding,
+both entry paths. They execute the standard tools and `resources/list`,
+`resources/templates/list`, and `resources/read`, including bounded cursor
+terminality and binding,
 ambiguity, explicit view selection, idempotent create, independent
 read-after-write visibility, stale/count edit conflicts, and active/archive
 evidence. Discovery additionally proves exact identities for a forwarded flat
@@ -2211,6 +2211,21 @@ ACL entry to name the process user, LocalSystem, or Built-in Administrators.
   `ANY_MCP_HTTP_AUDIENCE`; `ANY_MCP_HTTP_REQUIRED_SCOPE` defaults to
   `anytype.mcp`.
 
+On supported non-Apple Unix targets, reqwest's rustls platform verifier uses
+`SSL_CERT_FILE` as a replacement for native CA discovery for every reqwest
+client in the process, including the startup JWKS fetch. These anchors protect
+authentication integrity because they determine which TLS issuer may supply
+the verification keys. Use the reviewed issuing private CA or a tightly
+controlled CA bundle containing that issuer and only other roots the process
+requires. Omitting a required root can make other HTTPS operations unavailable;
+an arbitrary or broad bundle expands trust across every reqwest call. A
+self-signed server leaf is not a CA trust anchor, and rustls rejects it even
+when `curl` accepts the same file.
+
+macOS and Windows use OS-native trust. Without explicitly configured roots,
+they do not honor `SSL_CERT_FILE`. Install the reviewed issuing CA through the
+platform trust store or a process deployment mechanism limited to that CA.
+
 Stable mode accepts protocol revisions `2025-03-26`, `2025-06-18`, and
 `2025-11-25` over stateful sessions with optional SSE; revision `2024-11-05`
 remains stdio-only. Sessions are bound to the authenticated principal.
@@ -2222,6 +2237,12 @@ retry an uncertain create after re-initializing. With
 `ANY_MCP_PROTOCOL=experimental-2026-07-28`, `/mcp` instead serves the
 stateless preview: one bounded POST per request returning
 `application/json`, with GET and DELETE rejected.
+
+When stable-session admission reaches its ceiling, the server reconciles its
+bindings with the `rmcp` session manager. It releases only bindings that `rmcp`
+conclusively reports absent; live sessions and failed probes retain their
+slots, so unresolved capacity continues to fail closed with `503 Service
+Unavailable` and `Retry-After: 60`.
 
 Browser clients require `ANY_MCP_HTTP_ALLOWED_ORIGINS` (exact serialized
 origins; absent means every Origin-bearing request is rejected) and must use

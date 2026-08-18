@@ -64,6 +64,9 @@ anyr backup inspect ARCHIVE [--max-cache SIZE]
   `inspect`, or a result file that aliases an input or generated artifact) instead
   of silently choosing one.
 - **Archive formats**: `list`, `diff`, `inspect`, and `restore` accept both `.zip` archives and unpacked archive directories.
+- **Raw extraction**: `extract` writes archived payload bytes for file-layout
+  snapshots 8 through 12. A missing payload returns the typed
+  `MissingRawPayloadError` without creating the destination.
 - **Pre-delete archives**: `anyr space delete SPACE --archive PATH` writes a complete protobuf `.zip` to the exact non-existing path before deletion. Validate the selected file with `anyr backup list PATH --files`.
 - **Manifest**: anyback writes manifest metadata to `<archive>.manifest.json`. Archives without manifests (including direct pre-delete and desktop-generated backups) are still supported.
 
@@ -73,7 +76,11 @@ anyr backup inspect ARCHIVE [--max-cache SIZE]
 
 ### Library Crate
 
-This package also exposes a reusable Rust library crate, `anyback_reader`, for archive traversal and snapshot file inspection. Library consumers can use `default-features = false` to exclude CLI-only dependencies.
+This package also exposes a reusable Rust library crate, `anyback_reader`, for
+archive traversal and snapshot file inspection. The command types and
+`run_command` entry point are embedded by `anyr backup`; the crate has no
+standalone top-level parser. Library consumers can use
+`default-features = false` to exclude CLI-only dependencies.
 
 ### Restore Transport
 
@@ -100,6 +107,11 @@ output, callback evidence, or restored content fails the gate. Run this target
 alone with `--ignored --exact --test-threads=1`; do not share its server with
 parallel mutation suites. Normal workspace tests remain offline because the
 live test stays ignored.
+
+The shared live-test command harness validates non-TTY stderr on every `anyr`
+attempt, including attempts made by lock-retry policies. Failure reports expose
+only exit status, byte lengths, and terminal-control categories; malformed
+result documents and archive paths are not echoed into diagnostics.
 
 ### Restore Content-Fidelity Live Matrix
 
