@@ -394,6 +394,46 @@ class TestDisposableSpaceCleanup(unittest.TestCase):
         ):
             create_owned_space("owned")
 
+    def test_disposable_space_recovers_missing_create_id_before_cleanup(self) -> None:
+        space_name = "owned-receipt-1234000"
+        inventory = {
+            "items": [],
+            "pagination": {
+                "has_more": False,
+                "limit": 200,
+                "offset": 0,
+                "total": 0,
+            },
+        }
+        created_inventory = {
+            "items": [{"id": "new", "name": space_name, "object": "space"}],
+            "pagination": {
+                "has_more": False,
+                "limit": 200,
+                "offset": 0,
+                "total": 1,
+            },
+        }
+        case = TestAnyrCommands(methodName="test_top_level")
+        case.space_prefix = "owned"
+        with (
+            mock.patch(
+                __name__ + ".run_anyr_json",
+                side_effect=[
+                    inventory,
+                    {"name": "receipt-without-id"},
+                    created_inventory,
+                    {"id": "new", "name": space_name, "object": "space"},
+                ],
+            ),
+            mock.patch(__name__ + ".time.time", return_value=1234.0),
+            mock.patch(__name__ + ".delete_owned_space") as delete,
+        ):
+            with case.disposable_space("receipt") as space_id:
+                self.assertEqual(space_id, "new")
+        delete.assert_called_once()
+        self.assertEqual(delete.call_args.args[1], "new")
+
 
 class TestAnyrCommands(unittest.TestCase):
     @classmethod
@@ -658,6 +698,14 @@ class TestAnyrCommands(unittest.TestCase):
         self.assert_help_ok("object", "create")
         self.assert_help_ok("object", "update")
         self.assert_help_ok("object", "delete")
+        self.assert_help_ok("object", "discussion")
+        self.assert_help_ok("object", "discussion", "get")
+        self.assert_help_ok("object", "discussion", "attach")
+
+    def test_body(self) -> None:
+        self.assert_help_ok("body")
+        for command in ("list", "show", "create", "update", "delete", "move"):
+            self.assert_help_ok("body", command)
 
     def test_file(self) -> None:
         self.assert_help_ok("file")
@@ -901,6 +949,139 @@ class TestAnyrCommands(unittest.TestCase):
     def test_real_operations(self) -> None:
         with self.disposable_space("real-operations") as space_id:
             self.assert_real_operations(space_id)
+
+    def test_body_and_attached_discussion_operations(self) -> None:
+        """Exercise the verified gRPC body and derived-discussion surfaces."""
+        with self.disposable_space("body-discussion") as space_id:
+            created = run_anyr_json(
+                "object",
+                "create",
+                space_id,
+                "page",
+                "--name",
+                "Body and discussion diagnostics",
+            )
+            object_id = created.get("id")
+            self.assertIsInstance(object_id, str, "page create missing id")
+
+            absent = run_anyr_json(
+                "object", "discussion", "get", space_id, object_id
+            )
+            self.assertEqual(absent.get("state"), "absent")
+            attached = run_anyr_json(
+                "object", "discussion", "attach", space_id, object_id
+            )
+            discussion_id = attached.get("discussion_id")
+            self.assertIsInstance(discussion_id, str, "discussion attach missing id")
+            repeated = run_anyr_json(
+                "object", "discussion", "get", space_id, object_id
+            )
+            self.assertEqual(repeated.get("discussion_id"), discussion_id)
+
+            initial = run_anyr_json("body", "list", space_id, object_id)
+            root_id = initial.get("root_id")
+            self.assertIsInstance(root_id, str, "body list missing root id")
+
+            callout_spec = json.dumps(
+                {
+                    "content": {
+                        "kind": "callout",
+                        "text": "diagnostic",
+                        "icon": {"type": "emoji", "content": "💡"},
+                    },
+                    "background_color": "grey",
+                }
+            )
+            callout_receipt = run_anyr_json(
+                "body",
+                "create",
+                space_id,
+                object_id,
+                root_id,
+                "last-child",
+                "--block",
+                callout_spec,
+            )
+            callout_id = callout_receipt["affected"][0]["block_id"]
+            shown = run_anyr_json("body", "show", space_id, object_id, callout_id)
+            self.assertEqual(shown.get("parent_id"), root_id)
+            self.assertEqual(
+                shown.get("content", {}).get("content", {}).get("style"), "callout"
+            )
+
+            update_spec = json.dumps(
+                {
+                    "kind": "text",
+                    "text": "updated",
+                    "marks": [
+                        {
+                            "range": {"start": 0, "end": 7},
+                            "kind": {"type": "bold"},
+                        }
+                    ],
+                }
+            )
+            run_anyr_json(
+                "body",
+                "update",
+                space_id,
+                object_id,
+                callout_id,
+                "--change",
+                update_spec,
+            )
+
+            divider_receipt = run_anyr_json(
+                "body",
+                "create",
+                space_id,
+                object_id,
+                root_id,
+                "last-child",
+                "--block",
+                json.dumps({"content": {"kind": "divider", "style": "dots"}}),
+            )
+            divider_id = divider_receipt["affected"][0]["block_id"]
+            run_anyr_json(
+                "body",
+                "move",
+                space_id,
+                object_id,
+                divider_id,
+                callout_id,
+                "before",
+            )
+            ordered = run_anyr_json("body", "list", space_id, object_id)
+            positions = {
+                item["id"]: (item["order"], item["parent_id"], item["sibling_index"])
+                for item in ordered.get("items", [])
+                if item.get("id") in (divider_id, callout_id)
+            }
+            self.assertEqual(positions[divider_id][1], root_id)
+            self.assertEqual(positions[callout_id][1], root_id)
+            self.assertLess(positions[divider_id][0], positions[callout_id][0])
+            self.assertLess(positions[divider_id][2], positions[callout_id][2])
+
+            table = run_anyr("body", "list", space_id, object_id, "--table")
+            self.assertEqual(table.returncode, 0, table.stderr)
+            self.assertIn("parent_id", table.stdout)
+            discussion_table = run_anyr(
+                "object", "discussion", "get", space_id, object_id, "--table"
+            )
+            self.assertEqual(discussion_table.returncode, 0, discussion_table.stderr)
+            self.assertIn("discussion_id", discussion_table.stdout)
+
+            for block_id in (divider_id, callout_id):
+                run_anyr_json(
+                    "body",
+                    "delete",
+                    space_id,
+                    object_id,
+                    block_id,
+                    "--expected-subtree-blocks",
+                    "1",
+                    "--confirm",
+                )
 
     def assert_real_operations(self, space_id: str) -> None:
         suffix = str(int(time.time() * 1000))

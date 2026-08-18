@@ -8,6 +8,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- Add `anyr object discussion get|attach` for verified discovery and
+  idempotent creation of discussions derived from exact page and note IDs,
+  with JSON and table output.
+- Add bounded `anyr body list|show|create|update|delete|move` commands over the
+  typed `anytype-api` block surface. Reads expose exact document order and
+  structural position; closed JSON constructors and changes cover rich text,
+  callouts, links, tables, embeds, and presentation fields; mutations return
+  fresh verification evidence.
 - `anyr init-cli --force` ignores an existing Anytype CLI config
   (`~/.anytype/config.json`) and creates a new account instead of reusing it.
 - When `init-cli` finds a CLI config without `accountKey` (the Anytype CLI
@@ -93,6 +101,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Reconcile a newly created disposable test space from a complete inventory
+  when the create response omits its ID, so the cleanup guard still owns and
+  deletes the exact space after a later assertion failure.
 - Reject conflicting global output requests for every command: any pair of
   `--json`, `--pretty`, `--table`, and `--quiet`, or `--quiet` with
   `-o`/`--output`, now fails before dispatch.

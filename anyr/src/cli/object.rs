@@ -2,7 +2,10 @@ use anyhow::{Result, bail};
 use anytype::{prelude::*, validation::looks_like_object_id};
 
 use crate::{
-    cli::{AppContext, must_have_body, pagination_limit, pagination_offset, resolve_icon_exists},
+    cli::{
+        AppContext, discussion, must_have_body, pagination_limit, pagination_offset,
+        resolve_icon_exists,
+    },
     filter::{parse_filters, parse_property},
     output::OutputFormat,
 };
@@ -195,6 +198,7 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             let object = ctx.client.object(space_id, object_id).delete().await?;
             ctx.output.emit_json(&object)
         }
+        super::ObjectCommands::Discussion(args) => discussion::handle(ctx, args).await,
     }
 }
 

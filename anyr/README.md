@@ -70,6 +70,14 @@ anyr chat messages list "Work" "Ops" -t
 # Post message
 anyr chat messages send "Work" "Ops" --text "hello world?"
 
+# Discover or attach the discussion derived from an exact page or note
+anyr object discussion get "Work" OBJECT_ID
+anyr object discussion attach "Work" OBJECT_ID
+
+# Inspect a page body in exact document order
+anyr body list "Work" OBJECT_ID -t
+anyr body show "Work" OBJECT_ID BLOCK_ID --pretty
+
 # Markdown editing (the former any-edit commands)
 anyr md get "Work" OBJECT_ID -o page.md
 anyr md update -i page.md
@@ -106,6 +114,44 @@ or `anyr --version` reports the anyr Cargo binary version. Version reporting
 is intentionally top-level; `anyr mcp --version` is rejected with guidance to
 use `anyr --version`. The archive inspector is included in the default anyr
 build.
+
+### Attached discussions and typed body blocks
+
+`anyr object discussion get SPACE OBJECT_ID` returns either an `absent` state
+or the verified derived discussion ID for one exact page or note. `attach`
+performs the same verification and creates the discussion when absent; repeated
+calls return the same attachment. These operations are separate from ordinary
+space chats, though the resulting discussion ID can be passed to the gRPC chat
+message commands.
+
+`anyr body list SPACE OBJECT_ID` returns a bounded page of blocks in exact
+depth-first document order. Every item includes `order`, `depth`, `parent_id`,
+`sibling_index`, its exact block ID, ordered children, restrictions,
+presentation, and typed content. `body show` selects one exact block ID.
+
+Create and update accept a closed JSON document as a literal, `@FILE`, `@-`, or
+`-` for stdin. For example:
+
+```sh
+anyr body create "Work" OBJECT_ID ROOT_BLOCK_ID last-child --block \
+  '{"content":{"kind":"callout","text":"Check this","icon":{"type":"emoji","content":"💡"}},"background_color":"grey"}'
+
+anyr body update "Work" OBJECT_ID BLOCK_ID --change \
+  '{"kind":"text","text":"Checked","marks":[{"range":{"start":0,"end":7},"kind":{"type":"bold"}}]}'
+
+anyr body move "Work" OBJECT_ID BLOCK_ID TARGET_BLOCK_ID before
+anyr body delete "Work" OBJECT_ID BLOCK_ID \
+  --expected-subtree-blocks 1 --confirm
+```
+
+Create supports paragraphs, headings, bulleted and numbered items, checkboxes,
+toggles, callouts, quotes, code blocks, dividers, unfetched bookmarks, link and
+relation cards, bounded tables, LaTeX/Mermaid/YouTube embeds, and tables of
+contents. Update supports text and marks, text style, checkbox state, text
+color, callout icon, embed content, divider style, link appearance, alignment,
+and background. The API validates each JSON value and verifies every mutation
+with a fresh body read. Delete additionally compares the current subtree size
+with `--expected-subtree-blocks` before dispatch.
 
 `anyr space delete` defaults to an interactive, fail-closed flow. It first
 offers to write a complete space backup in the current directory, then requires

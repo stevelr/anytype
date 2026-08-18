@@ -21,9 +21,11 @@ use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Generator;
 
 pub mod auth;
+pub mod body;
 pub mod chat;
 pub mod common;
 mod deadline;
+pub mod discussion;
 pub mod file;
 pub mod init_cli;
 pub mod list;
@@ -132,6 +134,9 @@ pub enum Commands {
     /// Chat commands (gRPC)
     #[command(alias = "chats")]
     Chat(ChatArgs),
+
+    /// Typed document body block diagnostics and mutations (gRPC)
+    Body(BodyArgs),
 
     /// Space list and CRUD operations
     #[command(alias = "spaces")]
@@ -426,6 +431,160 @@ pub enum InviteCommands {
 pub struct ObjectArgs {
     #[command(subcommand)]
     pub command: ObjectCommands,
+}
+
+/// Arguments for typed body block operations.
+#[derive(Args, Debug)]
+pub struct BodyArgs {
+    #[command(subcommand)]
+    pub command: BodyCommands,
+}
+
+/// Position of a block relative to an exact existing target.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum InsertPositionArg {
+    /// Immediately before the target sibling
+    Before,
+    /// Immediately after the target sibling
+    After,
+    /// First child of the target
+    FirstChild,
+    /// Last child of the target
+    LastChild,
+}
+
+/// Typed body block reads and verified mutations.
+#[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
+pub enum BodyCommands {
+    /// List typed blocks in exact depth-first document order
+    List {
+        /// space id or unique name
+        space: String,
+
+        /// exact object id
+        object_id: String,
+
+        /// maximum blocks to return (1-2048)
+        #[arg(long, default_value = "100")]
+        limit: usize,
+
+        /// zero-based document-order offset
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
+    /// Show one exact block and its structural position
+    Show {
+        /// space id or unique name
+        space: String,
+
+        /// exact object id
+        object_id: String,
+
+        /// exact block id
+        block_id: String,
+    },
+    /// Create one typed block relative to an existing target
+    Create {
+        /// space id or unique name
+        space: String,
+
+        /// exact object id
+        object_id: String,
+
+        /// exact existing target block id
+        target_block_id: String,
+
+        /// position relative to the target
+        #[arg(value_enum)]
+        position: InsertPositionArg,
+
+        /// typed block JSON, @FILE, @-, or -
+        #[arg(long, value_name = "JSON_OR_@FILE")]
+        block: String,
+    },
+    /// Apply one typed change to an exact block
+    Update {
+        /// space id or unique name
+        space: String,
+
+        /// exact object id
+        object_id: String,
+
+        /// exact block id
+        block_id: String,
+
+        /// typed change JSON, @FILE, @-, or -
+        #[arg(long, value_name = "JSON_OR_@FILE")]
+        change: String,
+    },
+    /// Delete one exact block subtree after size confirmation
+    Delete {
+        /// space id or unique name
+        space: String,
+
+        /// exact object id
+        object_id: String,
+
+        /// exact subtree root block id
+        block_id: String,
+
+        /// expected number of blocks in the subtree
+        #[arg(long)]
+        expected_subtree_blocks: usize,
+
+        /// confirm deletion of the exact subtree
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Move one exact block relative to an existing target
+    Move {
+        /// space id or unique name
+        space: String,
+
+        /// exact object id
+        object_id: String,
+
+        /// exact block id to move
+        block_id: String,
+
+        /// exact existing target block id
+        target_block_id: String,
+
+        /// position relative to the target
+        #[arg(value_enum)]
+        position: InsertPositionArg,
+    },
+}
+
+/// Arguments for an exact parent object's attached discussion.
+#[derive(Args, Debug)]
+pub struct ObjectDiscussionArgs {
+    #[command(subcommand)]
+    pub command: ObjectDiscussionCommands,
+}
+
+/// Attached-discussion discovery and creation operations.
+#[derive(Subcommand, Debug)]
+#[command(next_display_order = None)]
+pub enum ObjectDiscussionCommands {
+    /// Get the verified attached-discussion state without creating it
+    Get {
+        /// space id or unique name
+        space: String,
+
+        /// exact parent object id
+        object_id: String,
+    },
+    /// Return the attached discussion, creating and verifying it when absent
+    #[command(alias = "ensure")]
+    Attach {
+        /// space id or unique name
+        space: String,
+
+        /// exact parent object id
+        object_id: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -822,6 +981,8 @@ pub enum ObjectCommands {
         /// id of object to delete
         object_id: String,
     },
+    /// Discover or attach the discussion derived from an exact page or note
+    Discussion(ObjectDiscussionArgs),
 }
 
 #[derive(Args, Debug)]
@@ -1907,6 +2068,7 @@ mod workflow_deadline_selection_tests {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Central dispatch owns the shared client and output contract.
 pub async fn run(mut cli: Cli) -> Result<()> {
     validate_output_flags(&cli)?;
     apply_init_cli_endpoint_defaults(&mut cli);
@@ -1990,6 +2152,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
         }
         Commands::Auth(args) => auth::handle(&ctx, args).await,
         Commands::Chat(args) => Box::pin(chat::handle(&ctx, args)).await,
+        Commands::Body(args) => body::handle(&ctx, args).await,
         Commands::Space(args) => space::handle(&ctx, args).await,
         Commands::Object(args) => object::handle(&ctx, args).await,
         Commands::File(args) => file::handle(&ctx, args).await,
