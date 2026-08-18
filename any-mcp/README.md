@@ -326,11 +326,12 @@ on its own, so an incomplete setup refuses work instead of widening access.
 3. **Select the policy.** `--config ABSOLUTE_PATH` or `ANY_MCP_CONFIG` chooses
    the strict TOML file. Validate it before starting a client with
    `anyr mcp check --config FILE`.
-4. **Verify at run time.** Call `artifact_status`. It reports
-   `local_roots_active`, `import_root_count`, `export_root_count`,
-   `staging_configured`, `staging_active`, remaining staging bytes and entries,
-   and the validator counts, so an operator can confirm the authority a client
-   actually received without exposing record metadata.
+4. **Verify at run time.** Call `artifact_status`. It reports the path-free
+   `local_root_authority` state (`unavailable`, `configured`, `narrowed`, or
+   `disabled`), effective import and export root counts, staging posture and
+   remaining capacity, and validator counts. The result describes the
+   authority this session actually received without exposing root identities
+   or record metadata.
 
 #### Local clients (stdio)
 
@@ -393,6 +394,13 @@ alias, or a URI that is not a canonical local `file:` directory) disables local
 root operations for the rest of the session rather than falling back to the
 broader configured policy. Staged operations are unaffected. Client root URIs
 and display names never appear in diagnostics or receipts.
+
+`artifact_status` and local operations share that one terminal decision.
+`configured` reports the complete static policy, `narrowed` reports only the
+effective intersection, `disabled` reports zero effective roots after a
+fail-closed resolution, and `unavailable` reports zero roots when no local-root
+plane exists. Concurrent or cancelled callers cannot restart resolution or
+extend its first absolute deadline.
 
 #### Remote clients (HTTP staging)
 
@@ -1458,11 +1466,14 @@ success. Space and full non-archived type references use the bounded
 `anytype-api` resolvers. Optional templates use the public direct-id or exact
 1,000-row resolver and are fetched by id to revalidate archive, space, and type
 id/key for the generic template object; the endpoint path scopes the owning
-object type. The immediate POST response and final verification GET are both
-revalidated. A success requires safe matching object, space, and type id/key
-plus semantic agreement for each caller-supplied name, Markdown body, icon,
-and typed property in both representations. The MCP result contains only a
-bounded object summary and canonical resource link.
+object type. The immediate POST response is treated as a creation receipt: it
+must contain a safe object ID in the resolved space and type and must not report
+an archived object. The independent verification GET is authoritative for the
+completed state and must match the receipt identity plus every caller-supplied
+name, Markdown body, icon, and typed property. This permits a transient or
+noncanonical create response to converge without sending a second POST; a
+missing or divergent final read remains mutation-indeterminate. The MCP result
+contains only a bounded object summary and canonical resource link.
 
 All optional fields reject explicit JSON `null`; omission means that the field
 is absent from the create payload. Names are nonempty, while an explicitly

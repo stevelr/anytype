@@ -8,6 +8,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Make `artifact_status` report the session's effective local-root authority as
+  `unavailable`, `configured`, `narrowed`, or `disabled`, with path-free
+  effective root counts. Status and artifact operations now share one
+  cancellation-independent, first-deadline decision that cannot widen on a
+  retry or concurrent caller.
+- Treat `object_create`'s POST response as a validated creation receipt and the
+  bounded independent GET as the authoritative semantic result. A transient
+  response body can converge without a second POST, while a divergent final
+  state remains mutation-indeterminate.
 - Reject Unicode `Bidi_Control` characters in `file_import` and
   `document_import_create` names before mutation dispatch, using validation
   diagnostics that do not repeat the rejected name or code point. ZWNJ, ZWJ,
