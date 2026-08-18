@@ -1,0 +1,295 @@
+name: Custom anytype-cli builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      cli-version:
+        description: anytype-cli tag (for example, 0.3.6 or v0.3.6)
+        required: true
+        default: "0.3.6"
+        type: string
+      heart-version:
+        description: anytype-heart tag (for example, 0.50.20 or v0.50.20)
+        required: true
+        default: "0.50.20"
+        type: string
+      go-version:
+        description: Go toolchain version
+        required: true
+        default: "1.26.5"
+        type: string
+      publish-release:
+        description: Also publish permanent, directly downloadable release assets
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-anytype-${{ inputs.cli-version }}-${{ inputs.heart-version }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate versions
+    runs-on: ubuntu-latest
+    outputs:
+      cli-ref: ${{ steps.versions.outputs.cli_ref }}
+      cli-version: ${{ steps.versions.outputs.cli_version }}
+      heart-ref: ${{ steps.versions.outputs.heart_ref }}
+      heart-version: ${{ steps.versions.outputs.heart_version }}
+      artifact-prefix: ${{ steps.versions.outputs.artifact_prefix }}
+      release-tag: ${{ steps.versions.outputs.release_tag }}
+    steps:
+      - name: Normalize and validate inputs
+        id: versions
+        env:
+          CLI_INPUT: ${{ inputs.cli-version }}
+          HEART_INPUT: ${{ inputs.heart-version }}
+          GO_INPUT: ${{ inputs.go-version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version_pattern='^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'
+          go_pattern='^[0-9]+\.[0-9]+(\.[0-9]+)?$'
+
+          if [[ ! "${CLI_INPUT}" =~ ${version_pattern} ]]; then
+            echo "Invalid anytype-cli version: ${CLI_INPUT}" >&2
+            exit 1
+          fi
+          if [[ ! "${HEART_INPUT}" =~ ${version_pattern} ]]; then
+            echo "Invalid anytype-heart version: ${HEART_INPUT}" >&2
+            exit 1
+          fi
+          if [[ ! "${GO_INPUT}" =~ ${go_pattern} ]]; then
+            echo "Invalid Go version: ${GO_INPUT}" >&2
+            exit 1
+          fi
+
+          cli_version="${CLI_INPUT#v}"
+          heart_version="${HEART_INPUT#v}"
+          cli_ref="v${cli_version}"
+          heart_ref="v${heart_version}"
+
+          git ls-remote --exit-code --tags \
+            https://github.com/anyproto/anytype-cli.git \
+            "refs/tags/${cli_ref}" >/dev/null
+          git ls-remote --exit-code --tags \
+            https://github.com/anyproto/anytype-heart.git \
+            "refs/tags/${heart_ref}" >/dev/null
+
+          artifact_prefix="anytype_${cli_version}_${heart_version}"
+          release_tag="custom-anytype-cli-v${cli_version}-heart-v${heart_version}"
+
+          {
+            echo "cli_ref=${cli_ref}"
+            echo "cli_version=${cli_version}"
+            echo "heart_ref=${heart_ref}"
+            echo "heart_version=${heart_version}"
+            echo "artifact_prefix=${artifact_prefix}"
+            echo "release_tag=${release_tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build custom binaries
+    needs: prepare
+    runs-on: macos-15
+    steps:
+      - name: Check out anytype-cli
+        uses: actions/checkout@v6
+        with:
+          repository: anyproto/anytype-cli
+          ref: ${{ needs.prepare.outputs.cli-ref }}
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: source/go.sum
+
+      - name: Select anytype-heart version
+        working-directory: source
+        env:
+          HEART_REF: ${{ needs.prepare.outputs.heart-ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          go get "github.com/anyproto/anytype-heart@${HEART_REF}"
+          go mod tidy
+          go list -m github.com/anyproto/anytype-heart
+
+      - name: Install cross-compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew tap FiloSottile/musl-cross
+          brew trust FiloSottile/musl-cross
+          brew install mingw-w64 musl-cross
+
+      - name: Build supported platforms
+        working-directory: source
+        env:
+          VERSION: ${{ needs.prepare.outputs.cli-ref }}+heart.${{ needs.prepare.outputs.heart-ref }}
+          GIT_STATE: custom
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMMIT="$(git rev-parse --short HEAD)"
+          BUILD_TIME="$(date -u '+%Y-%m-%d %H:%M:%S')"
+          export COMMIT BUILD_TIME
+          make -j4 \
+            build-linux-amd64 \
+            build-linux-arm64 \
+            build-darwin-arm64 \
+            build-windows-amd64
+
+      - name: Package binaries and checksums
+        env:
+          PREFIX: ${{ needs.prepare.outputs.artifact-prefix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p packages/staging
+
+          cp source/dist/anytype-linux-amd64 packages/staging/anytype
+          tar -C packages/staging -czf "packages/${PREFIX}_x86_64-linux.tar.gz" anytype
+
+          cp source/dist/anytype-linux-arm64 packages/staging/anytype
+          tar -C packages/staging -czf "packages/${PREFIX}_aarch64-linux.tar.gz" anytype
+
+          cp source/dist/anytype-darwin-arm64 packages/staging/anytype
+          tar -C packages/staging -czf "packages/${PREFIX}_aarch64-macos.tar.gz" anytype
+
+          cp source/dist/anytype-windows-amd64.exe packages/staging/anytype.exe
+          zip -j \
+            "packages/${PREFIX}_x86_64-windows.zip" \
+            packages/staging/anytype.exe
+
+          rm -rf packages/staging
+          (
+            cd packages
+            shasum -a 256 ./*.tar.gz ./*.zip > SHA256SUMS
+          )
+
+      - name: Add build details to summary
+        env:
+          PREFIX: ${{ needs.prepare.outputs.artifact-prefix }}
+          CLI_REF: ${{ needs.prepare.outputs.cli-ref }}
+          HEART_REF: ${{ needs.prepare.outputs.heart-ref }}
+        shell: bash
+        run: |
+          {
+            echo "## Custom anytype-cli build"
+            echo
+            echo "- anytype-cli: \`${CLI_REF}\`"
+            echo "- anytype-heart: \`${HEART_REF}\`"
+            echo "- Go: \`${{ inputs.go-version }}\`"
+            echo
+            echo "Built \`${PREFIX}\` for Linux x86_64, Linux ARM64, macOS ARM64, and Windows x86_64."
+            echo
+            echo "> Windows ARM64 is unavailable because anyproto/tantivy-go does not publish a Windows ARM64 native library or CGO linker configuration."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload Linux x86_64 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact-prefix }}_x86_64-linux
+          path: packages/${{ needs.prepare.outputs.artifact-prefix }}_x86_64-linux.tar.gz
+          compression-level: 0
+          retention-days: 90
+
+      - name: Upload Linux ARM64 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact-prefix }}_aarch64-linux
+          path: packages/${{ needs.prepare.outputs.artifact-prefix }}_aarch64-linux.tar.gz
+          compression-level: 0
+          retention-days: 90
+
+      - name: Upload macOS ARM64 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact-prefix }}_aarch64-macos
+          path: packages/${{ needs.prepare.outputs.artifact-prefix }}_aarch64-macos.tar.gz
+          compression-level: 0
+          retention-days: 90
+
+      - name: Upload Windows x86_64 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact-prefix }}_x86_64-windows
+          path: packages/${{ needs.prepare.outputs.artifact-prefix }}_x86_64-windows.zip
+          compression-level: 0
+          retention-days: 90
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact-prefix }}_checksums
+          path: packages/SHA256SUMS
+          retention-days: 90
+
+  publish:
+    name: Publish release assets
+    if: ${{ inputs.publish-release }}
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ${{ needs.prepare.outputs.artifact-prefix }}_*
+          path: packages
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release-tag }}
+          CLI_REF: ${{ needs.prepare.outputs.cli-ref }}
+          HEART_REF: ${{ needs.prepare.outputs.heart-ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          notes="Custom anytype-cli build using ${CLI_REF} with anytype-heart ${HEART_REF}. Assets are provided for Linux x86_64, Linux ARM64, macOS ARM64, and Windows x86_64. Windows ARM64 is not supported by the upstream tantivy-go native library."
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "anytype-cli ${CLI_REF} with anytype-heart ${HEART_REF}" \
+              --notes "${notes}"
+            gh release upload "${RELEASE_TAG}" packages/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create "${RELEASE_TAG}" packages/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "anytype-cli ${CLI_REF} with anytype-heart ${HEART_REF}" \
+              --notes "${notes}"
+          fi
+
+      - name: Add download commands to summary
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release-tag }}
+          PREFIX: ${{ needs.prepare.outputs.artifact-prefix }}
+        shell: bash
+        run: |
+          {
+            echo "## Download"
+            echo
+            echo '```shell'
+            echo "gh release download '${RELEASE_TAG}' --repo '${GITHUB_REPOSITORY}'"
+            echo "curl -fLO '${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${PREFIX}_x86_64-linux.tar.gz'"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
