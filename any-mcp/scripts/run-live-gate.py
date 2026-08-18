@@ -15,9 +15,7 @@ from pathlib import Path
 OUTPUT_LIMIT = 1024 * 1024
 PROCESS_TIMEOUT = 1200
 SUMMARY_LINE = re.compile(rb"(?m)^test result:.*$")
-FAILED_TEST_LINE = re.compile(
-    rb"(?m)^test ([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*) \.\.\. FAILED$"
-)
+FAILED_TEST_LINE = re.compile(rb"(?m)^test ([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*) \.\.\. FAILED$")
 TEST_SUMMARY = re.compile(
     rb"test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored; 0 measured; "
     rb"[0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s"

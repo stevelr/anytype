@@ -10,9 +10,7 @@ RUST = re.compile(
     re.MULTILINE,
 )
 RUST_LINE = re.compile(r"^test result:.*$", re.MULTILINE)
-PYTHON_RAN = re.compile(
-    r"^Ran ([1-9][0-9]*) tests? in [0-9]+(?:\.[0-9]+)?s$", re.MULTILINE
-)
+PYTHON_RAN = re.compile(r"^Ran ([1-9][0-9]*) tests? in [0-9]+(?:\.[0-9]+)?s$", re.MULTILINE)
 PYTHON_TEST_IDS = (
     "TestAnyrCommands.test_auth",
     "TestAnyrCommands.test_consolidated_cli_surfaces",

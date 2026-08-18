@@ -19,6 +19,7 @@ FilterConditionNin = "FilterConditionNin"
 nin = "nin" # serialized NotIn condition and CLI identifiers
 oif = "oif" # nftables output-interface keyword
 ratatui = "ratatui" # dependency name
+benchmark_flate2 = "benchmark_flate2"
 
 [default.extend-words]
 caf = "caf" # NFC "caf\u{e9}" filename prefix in Unicode-normalization alias tests

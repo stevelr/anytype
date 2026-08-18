@@ -1,4 +1,5 @@
-<div class="inset caution"><span class="label">⚠️ {% if title %}{{ title }}{% else %}Caution{% endif %}</span>
+<div class="inset caution">
+  <span class="label">⚠️ {% if title %}{{ title }}{% else %}Caution{% endif %}</span>
 
-{{ body | markdown | safe }}
+  {{ body | markdown | safe }}
 </div>

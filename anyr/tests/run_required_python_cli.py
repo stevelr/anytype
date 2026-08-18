@@ -41,9 +41,7 @@ def failure_diagnostics(result: unittest.TestResult) -> str:
 
 def fixed_failure_message(diagnostics: str) -> str:
     """Return the fixed category only, leaving captured details private."""
-    return (
-        f"required anyr Python gate failed: {classify_failure_diagnostics(diagnostics)}"
-    )
+    return f"required anyr Python gate failed: {classify_failure_diagnostics(diagnostics)}"
 
 
 def write_failure_category(category_file: Path, category: str) -> None:

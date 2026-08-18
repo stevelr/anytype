@@ -1,4 +1,5 @@
-<div class="inset danger"><span class="label">🛑 {% if title %}{{ title }}{% else %}Danger{% endif %}</span>
+<div class="inset danger">
+  <span class="label">🛑 {% if title %}{{ title }}{% else %}Danger{% endif %}</span>
 
-{{ body | markdown | safe }}
+  {{ body | markdown | safe }}
 </div>

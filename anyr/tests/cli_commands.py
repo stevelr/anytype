@@ -165,9 +165,7 @@ def run_anyr(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def run_anyr_with_input(
-    input_text: str, *args: str
-) -> subprocess.CompletedProcess[str]:
+def run_anyr_with_input(input_text: str, *args: str) -> subprocess.CompletedProcess[str]:
     cmd = [anyr_bin(), *args]
     print(f"running cmd with stdin: {cmd}")
     return subprocess.run(
@@ -339,9 +337,7 @@ class TestDisposableSpaceCleanup(unittest.TestCase):
                 __name__ + ".run_anyr_json",
                 side_effect=[
                     {
-                        "items": [
-                            {"id": "ambient", "name": "owned", "object": "space"}
-                        ],
+                        "items": [{"id": "ambient", "name": "owned", "object": "space"}],
                         "pagination": {
                             "has_more": False,
                             "limit": 200,
@@ -351,9 +347,7 @@ class TestDisposableSpaceCleanup(unittest.TestCase):
                     },
                     {"id": "ambient"},
                     {
-                        "items": [
-                            {"id": "ambient", "name": "owned", "object": "space"}
-                        ],
+                        "items": [{"id": "ambient", "name": "owned", "object": "space"}],
                         "pagination": {
                             "has_more": False,
                             "limit": 200,
@@ -611,9 +605,7 @@ class TestAnyrCommands(unittest.TestCase):
                 os.path.lexists(destination),
                 "failed backup left the selected destination behind",
             )
-            self.assert_space_exists(
-                space["id"], "backup failure deleted the source space"
-            )
+            self.assert_space_exists(space["id"], "backup failure deleted the source space")
 
     def test_space_delete_non_interactive_archive_is_exact_and_valid(self) -> None:
         self.require_healthy_pings()
@@ -713,9 +705,7 @@ class TestAnyrCommands(unittest.TestCase):
             file_id = uploaded.get("id")
             self.assertIsInstance(file_id, str, "file upload missing id")
             self.assertEqual(uploaded.get("size"), len(payload))
-            self.assertIsNone(
-                uploaded.get("details"), "path upload must use the REST backend"
-            )
+            self.assertIsNone(uploaded.get("details"), "path upload must use the REST backend")
 
             fetched = run_anyr_json("file", "get", space_id, file_id)
             self.assertEqual(fetched.get("id"), file_id, "file get id mismatch")
@@ -728,9 +718,7 @@ class TestAnyrCommands(unittest.TestCase):
 
             # search --sort / --sort --desc must both succeed and stay scoped.
             for extra in (["--sort", "name"], ["--sort", "name", "--desc"]):
-                found = run_anyr_json(
-                    "file", "search", space_id, "--limit", "100", *extra
-                )
+                found = run_anyr_json("file", "search", space_id, "--limit", "100", *extra)
                 self.assertTrue(
                     any(item.get("id") == file_id for item in found.get("items", [])),
                     f"file search {' '.join(extra)} is missing the uploaded file",
@@ -749,9 +737,7 @@ class TestAnyrCommands(unittest.TestCase):
 
             # Full REST download writes the exact bytes.
             target = os.path.join(work, "downloaded.txt")
-            downloaded = run_anyr_json(
-                "file", "download", space_id, file_id, "-f", target
-            )
+            downloaded = run_anyr_json("file", "download", space_id, file_id, "-f", target)
             self.assertEqual(downloaded.get("status"), 200)
             self.assertTrue(downloaded.get("written"))
             with open(target, "rb") as handle:
@@ -836,9 +822,7 @@ class TestAnyrCommands(unittest.TestCase):
             rich_id = rich.get("id")
             self.assertIsInstance(rich_id, str, "rich upload missing id")
             self.assertNotEqual(rich_id, file_id, "distinct bytes must not dedupe")
-            self.assertIsInstance(
-                rich.get("details"), dict, "a rich option must select gRPC"
-            )
+            self.assertIsInstance(rich.get("details"), dict, "a rich option must select gRPC")
             self.assertNotEqual(
                 run_anyr(
                     "file",
@@ -1016,9 +1000,7 @@ class TestAnyrCommands(unittest.TestCase):
             self.assertIsNotNone(created_tag_id, "tag create missing id")
 
             tag_by_key = run_anyr_json("tag", "get", space_id, prop_key, tag_key)
-            self.assertEqual(
-                tag_by_key.get("id"), created_tag_id, "tag get by key mismatch"
-            )
+            self.assertEqual(tag_by_key.get("id"), created_tag_id, "tag get by key mismatch")
 
             updated_tag = run_anyr_json(
                 "tag",
@@ -1056,9 +1038,7 @@ class TestAnyrCommands(unittest.TestCase):
                 "--name",
                 updated_obj_name,
             )
-            self.assertEqual(
-                updated_obj.get("id"), created_obj_id, "object update mismatch"
-            )
+            self.assertEqual(updated_obj.get("id"), created_obj_id, "object update mismatch")
 
             list_by_key = run_anyr_json(
                 "object",

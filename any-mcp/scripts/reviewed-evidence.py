@@ -179,21 +179,17 @@ def capture(source: Path, context: Path, artifact: Path) -> None:
     try:
         _, fresh = reviewed_window(source, context)
     except EvidenceInvalid:
-        payload = (
-            b"any-mcp reviewed failure evidence\nreviewed_log_invalid\nevent_count=0\n"
-        )
+        payload = b"any-mcp reviewed failure evidence\nreviewed_log_invalid\nevent_count=0\n"
     except (OSError, ValueError, UnicodeError):
         payload = (
-            b"any-mcp reviewed failure evidence\n"
-            b"reviewed_log_unavailable\nevent_count=0\n"
+            b"any-mcp reviewed failure evidence\nreviewed_log_unavailable\nevent_count=0\n"
         )
     else:
         try:
             count = reviewed_event_count(fresh)
         except EvidenceInvalid:
             payload = (
-                b"any-mcp reviewed failure evidence\n"
-                b"reviewed_log_invalid\nevent_count=0\n"
+                b"any-mcp reviewed failure evidence\nreviewed_log_invalid\nevent_count=0\n"
             )
         else:
             payload = (

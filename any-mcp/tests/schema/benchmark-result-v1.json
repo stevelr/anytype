@@ -347,7 +347,15 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["schema_version", "event", "run_id", "mode", "track", "scenario", "statistics"],
+          "required": [
+            "schema_version",
+            "event",
+            "run_id",
+            "mode",
+            "track",
+            "scenario",
+            "statistics"
+          ],
           "properties": {
             "schema_version": { "const": 1 },
             "event": { "const": "summary" },
@@ -368,7 +376,15 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["schema_version", "event", "run_id", "mode", "track", "reason", "run_root"],
+          "required": [
+            "schema_version",
+            "event",
+            "run_id",
+            "mode",
+            "track",
+            "reason",
+            "run_root"
+          ],
           "properties": {
             "schema_version": { "const": 1 },
             "event": { "const": "blocked" },

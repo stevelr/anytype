@@ -76,6 +76,14 @@
     }
   },
   "registry_ceiling_tokens": 69608,
-  "selected": ["artifacts", "body-blocks", "chats", "files", "members", "schema", "views-write"],
+  "selected": [
+    "artifacts",
+    "body-blocks",
+    "chats",
+    "files",
+    "members",
+    "schema",
+    "views-write"
+  ],
   "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
 }

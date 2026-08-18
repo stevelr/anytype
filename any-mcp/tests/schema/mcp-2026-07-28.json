@@ -1740,7 +1740,16 @@
     },
     "LoggingLevel": {
       "description": "The severity of a log message.\n\nThese map to syslog message severities, as specified in RFC-5424:\nhttps://datatracker.ietf.org/doc/html/rfc5424#section-6.2.1",
-      "enum": ["alert", "critical", "debug", "emergency", "error", "info", "notice", "warning"],
+      "enum": [
+        "alert",
+        "critical",
+        "debug",
+        "emergency",
+        "error",
+        "info",
+        "notice",
+        "warning"
+      ],
       "type": "string"
     },
     "LoggingMessageNotification": {
@@ -2353,7 +2362,10 @@
           "description": "If specified, the caller is requesting out-of-band progress notifications for this request (as represented by {@link ProgressNotificationnotifications/progress}). The value of this parameter is an opaque token that will be attached to any subsequent notifications. The receiver is not obligated to provide these notifications."
         }
       },
-      "required": ["io.modelcontextprotocol/clientCapabilities", "io.modelcontextprotocol/protocolVersion"],
+      "required": [
+        "io.modelcontextprotocol/clientCapabilities",
+        "io.modelcontextprotocol/protocolVersion"
+      ],
       "type": "object"
     },
     "RequestParams": {

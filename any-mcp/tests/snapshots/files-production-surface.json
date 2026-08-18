@@ -21,7 +21,10 @@
   },
   "read_only_status_call": {
     "content": [
-      { "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}", "type": "text" }
+      {
+        "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}",
+        "type": "text"
+      }
     ],
     "isError": false,
     "structuredContent": { "active_toolsets": ["files"], "configured_toolsets": ["files"] }
@@ -63,7 +66,10 @@
   },
   "read_write_status_call": {
     "content": [
-      { "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}", "type": "text" }
+      {
+        "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}",
+        "type": "text"
+      }
     ],
     "isError": false,
     "structuredContent": { "active_toolsets": ["files"], "configured_toolsets": ["files"] }
@@ -118,7 +124,10 @@
   },
   "stdio_read_only_status_call": {
     "content": [
-      { "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}", "type": "text" }
+      {
+        "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}",
+        "type": "text"
+      }
     ],
     "isError": false,
     "resultType": "complete",
@@ -169,7 +178,10 @@
   },
   "stdio_read_write_status_call": {
     "content": [
-      { "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}", "type": "text" }
+      {
+        "text": "{\"active_toolsets\":[\"files\"],\"configured_toolsets\":[\"files\"]}",
+        "type": "text"
+      }
     ],
     "isError": false,
     "resultType": "complete",

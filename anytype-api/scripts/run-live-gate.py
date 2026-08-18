@@ -43,9 +43,7 @@ def terminate(process: subprocess.Popen[bytes]) -> None:
     process.wait()
 
 
-def run_bounded(
-    command: list[str], timeout: float = PROCESS_TIMEOUT
-) -> tuple[int, bytes]:
+def run_bounded(command: list[str], timeout: float = PROCESS_TIMEOUT) -> tuple[int, bytes]:
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -145,9 +143,7 @@ def environment_is_admitted(environment: dict[str, str]) -> bool:
             "ANYTYPE_KEY_ACCOUNT_ID" in environment
             and not environment["ANYTYPE_KEY_ACCOUNT_ID"]
         )
-        and all(
-            name in allowed for name in environment if name.startswith("ANYTYPE_KEY_")
-        )
+        and all(name in allowed for name in environment if name.startswith("ANYTYPE_KEY_"))
         and environment.get("ANYTYPE_RATE_LIMIT_MAX_RETRIES", "5") == "5"
         and endpoint_is_loopback(environment.get("ANYTYPE_URL"))
         and endpoint_is_loopback(environment.get("ANYTYPE_GRPC_ENDPOINT"))

@@ -1,4 +1,5 @@
-<div class="inset best"><span class="label">✅ {% if title %}{{ title }}{% else %}Best practice{% endif %}</span>
+<div class="inset best">
+  <span class="label">✅ {% if title %}{{ title }}{% else %}Best practice{% endif %}</span>
 
-{{ body | markdown | safe }}
+  {{ body | markdown | safe }}
 </div>

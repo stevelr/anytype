@@ -39,9 +39,7 @@ class SpaceOwnershipTests(unittest.TestCase):
         with (
             mock.patch(
                 "anyr.tests.cli_commands.run_anyr_json",
-                return_value=page(
-                    [space("duplicate", "one"), space("duplicate", "two")]
-                ),
+                return_value=page([space("duplicate", "one"), space("duplicate", "two")]),
             ),
             self.assertRaisesRegex(AssertionError, "duplicate"),
         ):
@@ -50,9 +48,7 @@ class SpaceOwnershipTests(unittest.TestCase):
     def test_inventory_accepts_supported_non_regular_models_only(self):
         with mock.patch(
             "anyr.tests.cli_commands.run_anyr_json",
-            return_value=page(
-                [space("regular", "Regular"), space("chat", "Chat", "chat")]
-            ),
+            return_value=page([space("regular", "Regular"), space("chat", "Chat", "chat")]),
         ):
             inventory = cli_commands.complete_space_inventory()
         self.assertEqual(inventory["chat"].model, "chat")
@@ -85,9 +81,7 @@ class SpaceOwnershipTests(unittest.TestCase):
             invalid["pagination"][key] = value
             with (
                 self.subTest(key=key, value=value),
-                mock.patch(
-                    "anyr.tests.cli_commands.run_anyr_json", return_value=invalid
-                ),
+                mock.patch("anyr.tests.cli_commands.run_anyr_json", return_value=invalid),
                 self.assertRaisesRegex(AssertionError, "pagination"),
             ):
                 cli_commands.complete_space_inventory()
@@ -153,16 +147,12 @@ class SpaceOwnershipTests(unittest.TestCase):
                 "anyr.tests.cli_commands.run_anyr_json",
                 side_effect=[space("new", "owned"), space("new", "owned")],
             ) as get_space,
-            mock.patch(
-                "anyr.tests.cli_commands.run_anyr", return_value=completed
-            ) as delete,
+            mock.patch("anyr.tests.cli_commands.run_anyr", return_value=completed) as delete,
             mock.patch("anyr.tests.cli_commands.wait_for_space_absence") as absent,
         ):
             cli_commands.delete_owned_space("owned", "new")
         self.assertEqual(get_space.call_count, 2)
-        delete.assert_called_once_with(
-            "space", "delete", "new", "--skip-archive", "--confirm"
-        )
+        delete.assert_called_once_with("space", "delete", "new", "--skip-archive", "--confirm")
         absent.assert_called_once_with("owned", "new")
 
         with (
@@ -211,9 +201,7 @@ class SpaceOwnershipTests(unittest.TestCase):
 
         with (
             mock.patch("anyr.tests.cli_commands.run_anyr_json", side_effect=get_space),
-            mock.patch(
-                "anyr.tests.cli_commands.run_anyr_with_input", side_effect=dispatch
-            ),
+            mock.patch("anyr.tests.cli_commands.run_anyr_with_input", side_effect=dispatch),
         ):
             cli_commands.run_owned_space_delete(
                 "owned", "new", "--skip-archive", input_text="cancel\n"
@@ -224,9 +212,7 @@ class SpaceOwnershipTests(unittest.TestCase):
         case = cli_commands.TestAnyrCommands()
         case.space_prefix = "owned"
         with (
-            mock.patch(
-                "anyr.tests.cli_commands.create_owned_space", return_value="new"
-            ),
+            mock.patch("anyr.tests.cli_commands.create_owned_space", return_value="new"),
             mock.patch("anyr.tests.cli_commands.delete_owned_space") as cleanup,
             self.assertRaisesRegex(RuntimeError, "setup failed"),
         ):

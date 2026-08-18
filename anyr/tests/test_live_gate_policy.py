@@ -49,9 +49,7 @@ class LiveGatePolicyTests(unittest.TestCase):
             "inventory-invalid",
         )
         self.assertEqual(
-            classify_failure_diagnostics(
-                "disposable space create ownership is ambiguous"
-            ),
+            classify_failure_diagnostics("disposable space create ownership is ambiguous"),
             "create-ambiguous",
         )
         self.assertEqual(
@@ -59,9 +57,7 @@ class LiveGatePolicyTests(unittest.TestCase):
             "required-test-failed",
         )
         message = fixed_failure_message("token=secret-untrusted-message")
-        self.assertEqual(
-            message, "required anyr Python gate failed: required-test-failed"
-        )
+        self.assertEqual(message, "required anyr Python gate failed: required-test-failed")
         self.assertNotIn("secret", message)
 
     def test_category_files_surface_only_allowlisted_values(self):
@@ -69,9 +65,7 @@ class LiveGatePolicyTests(unittest.TestCase):
             for category in FAILURE_CATEGORIES:
                 category_file = Path(directory, f"{category}.category")
                 write_failure_category(category_file, category)
-                self.assertEqual(
-                    category_file.read_text(encoding="ascii"), f"{category}\n"
-                )
+                self.assertEqual(category_file.read_text(encoding="ascii"), f"{category}\n")
                 self.assertEqual(stat.S_IMODE(category_file.stat().st_mode), 0o600)
         with self.assertRaisesRegex(RuntimeError, "destination"):
             write_failure_category(Path("relative.category"), "token=secret")
@@ -158,10 +152,7 @@ class LiveGatePolicyTests(unittest.TestCase):
         )
         self.assertEqual(actual, list(PYTHON_TEST_IDS))
         self.assertEqual(
-            [
-                test.id().removeprefix("anyr.tests.cli_commands.")
-                for test in required_suite()
-            ],
+            [test.id().removeprefix("anyr.tests.cli_commands.") for test in required_suite()],
             list(PYTHON_TEST_IDS),
         )
         with (

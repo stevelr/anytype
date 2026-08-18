@@ -29,9 +29,7 @@ reviewer_spec.loader.exec_module(review_server_log)
 
 
 class RunnerTests(unittest.TestCase):
-    def invoke(
-        self, mode: str, label: str, child: str
-    ) -> subprocess.CompletedProcess[str]:
+    def invoke(self, mode: str, label: str, child: str) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as private:
             environment = dict(os.environ, ANY_MCP_LIVE_PRIVATE_DIR=private)
             result = subprocess.run(

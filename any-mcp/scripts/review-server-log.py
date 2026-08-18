@@ -18,9 +18,7 @@ def review_line(line: bytes, oversized: bool = False) -> bytes:
     lowered = line.lower()
     if oversized:
         severity, category = "error", "server_oversized"
-    elif (
-        b"panic" in lowered or b'"level":"fatal"' in lowered or b"\tfatal\t" in lowered
-    ):
+    elif b"panic" in lowered or b'"level":"fatal"' in lowered or b"\tfatal\t" in lowered:
         severity, category = "fatal", "server_fatal"
     elif b'"level":"error"' in lowered or b"\terror\t" in lowered:
         severity, category = "error", "server_error"
