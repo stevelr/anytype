@@ -380,7 +380,7 @@ pub async fn object_update(
     let input = input.clone();
     let progress = MutationProgress::new();
     let operation_progress = progress.clone();
-    execute_mutation_handler(
+    let operation = execute_mutation_handler(
         runtime,
         contract,
         OperationContext::new("object_update"),
@@ -465,7 +465,7 @@ pub async fn object_update(
                 request = property.apply(request);
             }
 
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             let patch_anomaly = match request.update().await {
                 Ok(returned) => !requested_state_matches(
                     &returned,
@@ -524,8 +524,15 @@ pub async fn object_update(
                 body_sha256: execution.body_sha256,
             })
         },
-    )
-    .await
+    );
+    let routed = runtime
+        .run_routed_invocation("object_update", cancellation, Box::pin(operation))
+        .await;
+    match routed {
+        Ok(result) => result,
+        Err(failure) if failure.dispatched => tool_error(&ToolError::mutation_indeterminate()),
+        Err(_) => tool_error(&ToolError::upstream()),
+    }
 }
 
 fn preflight(input: &ObjectUpdateInput) -> Result<Vec<MutationProperty>, HandlerError> {

@@ -1549,7 +1549,9 @@ fn spawn_upload_supervisor(
     input: NormalizedUpload,
     retained_candidate: Option<EntityId>,
 ) {
-    tokio::spawn(async move {
+    let supervisor_runtime = runtime.clone();
+    runtime.spawn_invocation_controller("file_content_upload", move || async move {
+        let runtime = supervisor_runtime;
         let credential_generation = attempt.credential_generation;
         let progress = attempt.progress.clone();
         let task_runtime = runtime.clone();
@@ -1559,11 +1561,12 @@ fn spawn_upload_supervisor(
         let task_attempt = attempt.clone();
         let task_progress = progress.clone();
         let task_deadline = attempt.deadline;
-        let task = tokio::spawn(async move {
+        let execution_runtime = task_runtime.clone();
+        let task = task_runtime.spawn_invocation_supervisor(async move {
             match retained_candidate {
                 Some(candidate) => {
                     execute_upload_replay(
-                        &task_runtime,
+                        &execution_runtime,
                         &task_contract,
                         input,
                         candidate,
@@ -1574,7 +1577,7 @@ fn spawn_upload_supervisor(
                 }
                 None => {
                     execute_upload_leader(
-                        &task_runtime,
+                        &execution_runtime,
                         &task_contract,
                         &task_cohort,
                         &task_key,
@@ -1689,7 +1692,9 @@ async fn execute_upload_leader(
                 if let Some(media_type) = operation_input.media_type.as_ref() {
                     request = request.mime(media_type.as_str());
                 }
-                operation_progress.mark_dispatched();
+                operation_progress
+                    .mark_dispatched(runtime)
+                    .map_err(|_| FileOperationError::Tool(ToolError::upstream()))?;
                 let uploaded = match request.upload().await {
                     Ok(uploaded) => uploaded,
                     Err(error) if mutation_rejection_is_definitive(&error) => {
@@ -4005,7 +4010,7 @@ mod tests {
             BeginUpload::LeadNew(attempt) => attempt,
             _ => panic!("uncertain leader"),
         };
-        attempt.progress.mark_dispatched();
+        attempt.progress.mark_dispatched_for_test();
         uncertain
             .finish(
                 &key,
@@ -4060,7 +4065,7 @@ mod tests {
 
         let deadline = test_deadline();
         let dispatched = Arc::new(UploadAttempt::new(None, deadline, 0));
-        dispatched.progress.mark_dispatched();
+        dispatched.progress.mark_dispatched_for_test();
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         let post_dispatch = wait_for_upload(dispatched, &cancellation, deadline).await;

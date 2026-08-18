@@ -3070,22 +3070,44 @@ fn block_change(
     }
 }
 
-async fn observe_body_dispatch<F, T>(
-    future: F,
-    metrics: BodyRpcMetrics,
-    progress: MutationProgress,
-) -> T
+enum DispatchObservationError<E> {
+    Rejected,
+    Operation(E),
+}
+
+impl<E> From<DispatchObservationError<E>> for HandlerOperationError
 where
-    F: Future<Output = T>,
+    E: Into<HandlerOperationError>,
 {
-    let baseline = metrics.snapshot().write_polls;
-    let mut future = Box::pin(future);
-    std::future::poll_fn(move |context: &mut Context<'_>| {
-        let result = Pin::as_mut(&mut future).poll(context);
-        if metrics.snapshot().write_polls > baseline {
-            progress.mark_dispatched();
+    fn from(error: DispatchObservationError<E>) -> Self {
+        match error {
+            DispatchObservationError::Rejected => HandlerError::new(ToolError::upstream()).into(),
+            DispatchObservationError::Operation(error) => error.into(),
         }
-        result
+    }
+}
+
+async fn observe_body_dispatch<F, T, E>(
+    runtime: &RuntimeContext,
+    future: F,
+    _metrics: BodyRpcMetrics,
+    progress: MutationProgress,
+) -> Result<T, DispatchObservationError<E>>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    let mut future = Box::pin(future);
+    let mut marked = false;
+    std::future::poll_fn(move |context: &mut Context<'_>| {
+        if !marked {
+            if progress.mark_dispatched(runtime).is_err() {
+                return std::task::Poll::Ready(Err(DispatchObservationError::Rejected));
+            }
+            marked = true;
+        }
+        Pin::as_mut(&mut future)
+            .poll(context)
+            .map(|result| result.map_err(DispatchObservationError::Operation))
     })
     .await
 }
@@ -3109,13 +3131,14 @@ where
     .await
 }
 
-async fn observe_first_write_poll<F, T>(
+async fn observe_first_write_poll<F, T, E>(
+    runtime: &RuntimeContext,
     future: F,
     progress: MutationProgress,
     page_create_polls: Arc<std::sync::atomic::AtomicUsize>,
-) -> T
+) -> Result<T, DispatchObservationError<E>>
 where
-    F: Future<Output = T>,
+    F: Future<Output = Result<T, E>>,
 {
     let mut future = Box::pin(future);
     let mut marked = false;
@@ -3126,10 +3149,14 @@ where
                 std::sync::atomic::Ordering::Acquire,
                 |current| Some(current.saturating_add(1)),
             );
-            progress.mark_dispatched();
+            if progress.mark_dispatched(runtime).is_err() {
+                return std::task::Poll::Ready(Err(DispatchObservationError::Rejected));
+            }
             marked = true;
         }
-        Pin::as_mut(&mut future).poll(context)
+        Pin::as_mut(&mut future)
+            .poll(context)
+            .map(|result| result.map_err(DispatchObservationError::Operation))
     })
     .await
 }
@@ -4455,6 +4482,7 @@ impl BodyHandlers {
                 let metrics = prepared.rpc.metrics();
                 let editor = body_editor(&prepared.snapshot, &client, prepared.rpc.clone());
                 let receipt = match observe_body_dispatch(
+                    runtime,
                     editor.update(&block_id, change),
                     metrics,
                     operation_progress,
@@ -4531,9 +4559,13 @@ impl BodyHandlers {
                     .map_err(HandlerOperationError::from)?;
                 let metrics = prepared.rpc.metrics();
                 let editor = body_editor(&prepared.snapshot, &client, prepared.rpc.clone());
-                let receipt =
-                    observe_body_dispatch(editor.delete(&block_id), metrics, operation_progress)
-                        .await?;
+                let receipt = observe_body_dispatch(
+                    runtime,
+                    editor.delete(&block_id),
+                    metrics,
+                    operation_progress,
+                )
+                .await?;
                 let projected =
                     project_snapshot(&receipt.snapshot).map_err(HandlerOperationError::from)?;
                 if !verify_delete_transition(&before, &projected, &subtree) {
@@ -4617,6 +4649,7 @@ impl BodyHandlers {
                 let metrics = prepared.rpc.metrics();
                 let editor = body_editor(&prepared.snapshot, &client, prepared.rpc.clone());
                 let receipt = observe_body_dispatch(
+                    runtime,
                     editor.move_block(&block_id, &target_id, input.position.into()),
                     metrics,
                     operation_progress,
@@ -5604,16 +5637,19 @@ impl BodyHandlers {
             }
             BeginAttempt::Lead(attempt) => {
                 let runtime = runtime.clone();
+                let supervisor_runtime = runtime.clone();
                 let contract = self.create.clone();
                 let store = self.block_creates.clone();
                 let rpc_metrics = self.rpc_metrics.clone();
                 let task_attempt = attempt.clone();
-                tokio::spawn(async move {
+                runtime.spawn_invocation_controller("body_block_create", move || async move {
+                    let runtime = supervisor_runtime;
                     let progress = task_attempt.progress();
                     let task_progress = progress.clone();
-                    let task = tokio::spawn(async move {
+                    let execution_runtime = runtime.clone();
+                    let task = runtime.spawn_invocation_supervisor(async move {
                         execute_block_create(
-                            &runtime,
+                            &execution_runtime,
                             &contract,
                             input,
                             resolved,
@@ -5754,6 +5790,7 @@ async fn execute_block_create(
             let metrics = rpc.metrics();
             let editor = body_editor(&snapshot, &client, rpc);
             let receipt = observe_body_dispatch(
+                runtime,
                 editor.create(new, &target_id, input.position.into()),
                 metrics,
                 operation_progress,
@@ -6497,21 +6534,24 @@ impl BodyHandlers {
             }
             RichBeginAttempt::Lead(attempt) => {
                 let runtime = runtime.clone();
+                let supervisor_runtime = runtime.clone();
                 let contract = self.rich_create.clone();
                 let store = self.rich_creates.clone();
                 let rpc_metrics = self.rpc_metrics.clone();
                 let page_create_polls = self.page_create_polls.clone();
                 let task_attempt = attempt.clone();
-                tokio::spawn(async move {
+                runtime.spawn_invocation_controller("body_rich_create", move || async move {
+                    let runtime = supervisor_runtime;
                     let progress = task_attempt.progress();
                     let task_progress = progress.clone();
                     let execution_attempt = task_attempt.clone();
                     let leader_cancellation = task_attempt.leader_cancellation();
-                    let task = tokio::spawn(async move {
+                    let execution_runtime = runtime.clone();
+                    let task = runtime.spawn_invocation_supervisor(async move {
                         execute_rich_create(
                             input,
                             RichExecutionContext {
-                                runtime: &runtime,
+                                runtime: &execution_runtime,
                                 contract: &contract,
                                 resolved_space: resolved,
                                 progress: &task_progress,
@@ -6587,21 +6627,24 @@ impl BodyHandlers {
         let prior_result = claim.result;
         let page_type_id = claim.metadata.page_type_id;
         let runtime = runtime.clone();
+        let supervisor_runtime = runtime.clone();
         let contract = self.rich_resume.clone();
         let store = self.rich_creates.clone();
         let rpc_metrics = self.rpc_metrics.clone();
         let task_attempt = attempt.clone();
-        tokio::spawn(async move {
+        runtime.spawn_invocation_controller("body_rich_resume", move || async move {
+            let runtime = supervisor_runtime;
             let progress = task_attempt.progress();
             let task_progress = progress.clone();
             let leader_cancellation = task_attempt.leader_cancellation();
             let execution_page_type_id = page_type_id.clone();
-            let task = tokio::spawn(async move {
+            let execution_runtime = runtime.clone();
+            let task = runtime.spawn_invocation_supervisor(async move {
                 execute_rich_resume(
                     input,
                     prior_result,
                     RichResumeContext {
-                        runtime: &runtime,
+                        runtime: &execution_runtime,
                         contract: &contract,
                         resolved_space: &resolved,
                         page_type_id: &execution_page_type_id,
@@ -7008,6 +7051,7 @@ async fn execute_rich_resume(
         }
     }
     execute_rich_resume_suffix(
+        runtime,
         &input,
         contract,
         &client,
@@ -7026,6 +7070,7 @@ async fn execute_rich_resume(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_rich_resume_suffix(
+    runtime: &RuntimeContext,
     input: &RichPageCreateInput,
     contract: &WorkflowTool<RichPageCreateOutput>,
     client: &AnytypeClient,
@@ -7065,6 +7110,7 @@ async fn execute_rich_resume_suffix(
         let before_polls = rpc.metrics().snapshot().write_polls;
         let editor = body_editor(&current, client, rpc.clone());
         let observed_write = observe_body_dispatch(
+            runtime,
             editor.create(new, &target, InsertPosition::LastChild),
             rpc.metrics(),
             progress.clone(),
@@ -7148,7 +7194,10 @@ async fn execute_rich_resume_suffix(
                 }
                 current = write.snapshot;
             }
-            Some(Err(error)) => {
+            Some(Err(DispatchObservationError::Rejected)) => {
+                return resume_internal_failure(progress);
+            }
+            Some(Err(DispatchObservationError::Operation(error))) => {
                 let polled = rpc.metrics().snapshot().write_polls > before_polls;
                 let definitive = polled && mutation_rejection_is_definitive(&error);
                 let final_hash = fresh_rich_hash(client, &space_id, &object_id, rpc.clone()).await;
@@ -7328,7 +7377,7 @@ async fn execute_rich_create(
         .no_verify()
         .create();
     let observed_page_create =
-        observe_first_write_poll(page_create, progress.clone(), page_create_polls);
+        observe_first_write_poll(runtime, page_create, progress.clone(), page_create_polls);
     let candidate = match tokio::select! {
         biased;
         () = cancellation.cancelled() => {
@@ -7354,13 +7403,21 @@ async fn execute_rich_create(
         result = observed_page_create => result,
     } {
         Ok(candidate) => candidate,
-        Err(error) if mutation_rejection_is_definitive(&error) => {
+        Err(DispatchObservationError::Rejected) => {
+            return CreateExecution::new(
+                tool_error(&ToolError::upstream()),
+                CreateDisposition::PreDispatchFailure,
+            );
+        }
+        Err(DispatchObservationError::Operation(error))
+            if mutation_rejection_is_definitive(&error) =>
+        {
             return CreateExecution::new(
                 api_error_result(&error),
                 CreateDisposition::PreDispatchFailure,
             );
         }
-        Err(_) => {
+        Err(DispatchObservationError::Operation(_)) => {
             return CreateExecution::new(
                 tool_error(&ToolError::conflict()),
                 CreateDisposition::Indeterminate,
@@ -7526,6 +7583,7 @@ async fn execute_rich_create(
         let before_polls = rpc.metrics().snapshot().write_polls;
         let editor = body_editor(&current, &client, rpc.clone());
         let observed_write = observe_body_dispatch(
+            runtime,
             editor.create(new, &target, InsertPosition::LastChild),
             rpc.metrics(),
             progress.clone(),
@@ -7621,7 +7679,16 @@ async fn execute_rich_create(
                 }
                 current = receipt.snapshot;
             }
-            Some(Err(error)) => {
+            Some(Err(DispatchObservationError::Rejected)) => {
+                let (error, disposition) =
+                    if progress.stage() == crate::handler_support::MutationStage::PreDispatch {
+                        (ToolError::upstream(), CreateDisposition::PreDispatchFailure)
+                    } else {
+                        (ToolError::conflict(), CreateDisposition::Indeterminate)
+                    };
+                return CreateExecution::new(tool_error(&error), disposition);
+            }
+            Some(Err(DispatchObservationError::Operation(error))) => {
                 let polled = rpc.metrics().snapshot().write_polls > before_polls;
                 let definitive = polled && mutation_rejection_is_definitive(&error);
                 let final_hash = fresh_rich_hash(&client, &space_id, &object_id, rpc.clone()).await;
@@ -8121,7 +8188,7 @@ mod tests {
     use std::{
         collections::BTreeMap,
         future::Future,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         time::Duration,
     };
 
@@ -8130,6 +8197,7 @@ mod tests {
     use serde_json::{Map, Value, json};
     use sha2::{Digest, Sha256};
     use tiktoken_rs::{CoreBPE, o200k_base};
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::{
@@ -9646,7 +9714,7 @@ mod tests {
                         BeginAttempt::Lead(attempt) => attempt,
                         _ => panic!("uncertain cohort leader"),
                     };
-                    uncertain.progress().mark_dispatched();
+                    uncertain.progress().mark_dispatched_for_test();
                     store
                         .finish(
                             &uncertain_key,
@@ -10466,7 +10534,7 @@ mod tests {
                 BeginAttempt::Lead(attempt) => attempt,
                 _ => panic!("unexpected uncertain result"),
             };
-            uncertain.progress().mark_dispatched();
+            uncertain.progress().mark_dispatched_for_test();
             store
                 .finish(
                     &uncertain_key,
@@ -12875,7 +12943,7 @@ mod tests {
             let candidate = attempt
                 .record_pending_candidate("space".to_owned(), "object".to_owned())
                 .await;
-            attempt.progress().mark_dispatched();
+            attempt.progress().mark_dispatched_for_test();
             store
                 .finish(
                     &pending_key,
@@ -12898,14 +12966,20 @@ mod tests {
             let recovery_polls = Arc::new(AtomicUsize::new(0));
             let page_create_polls = Arc::new(AtomicUsize::new(0));
             let body_rpc_metrics = BodyRpcMetrics::default();
+            let dispatch_runtime = runtime(None, ApplicationProfile::Compact, false);
             let unpolled_page_create = observe_first_write_poll(
-                async {},
+                &dispatch_runtime,
+                async { Ok::<_, AnytypeError>(()) },
                 MutationProgress::new(),
                 Arc::clone(&page_create_polls),
             );
             drop(unpolled_page_create);
-            let unpolled_body_write =
-                observe_body_dispatch(async {}, body_rpc_metrics.clone(), MutationProgress::new());
+            let unpolled_body_write = observe_body_dispatch(
+                &dispatch_runtime,
+                async { Ok::<_, AnytypeError>(()) },
+                body_rpc_metrics.clone(),
+                MutationProgress::new(),
+            );
             drop(unpolled_body_write);
             let polls = Arc::clone(&recovery_polls);
             let unpolled = observe_pending_candidate_get(&candidate, async move {
@@ -13002,7 +13076,7 @@ mod tests {
                 let candidate = attempt
                     .record_pending_candidate("space".to_owned(), format!("object-{ordinal}"))
                     .await;
-                attempt.progress().mark_dispatched();
+                attempt.progress().mark_dispatched_for_test();
                 store
                     .finish(
                         &key,
@@ -13077,7 +13151,7 @@ mod tests {
             let candidate = attempt
                 .record_pending_candidate("space".to_owned(), "object-hash".to_owned())
                 .await;
-            attempt.progress().mark_dispatched();
+            attempt.progress().mark_dispatched_for_test();
             store
                 .finish(
                     &key,
@@ -13129,6 +13203,107 @@ mod tests {
             assert_eq!(page_create_polls.load(Ordering::SeqCst), 0);
             assert_eq!(body_rpc_metrics.snapshot().write_polls, 0);
         });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_first_write_settles_controller_and_releases_capacity() {
+        let runtime = runtime(None, ApplicationProfile::Compact, false);
+        let operation_runtime = runtime.clone();
+        let wrote = Arc::new(AtomicBool::new(false));
+        let operation_wrote = Arc::clone(&wrote);
+        let settled = Arc::new(AtomicBool::new(false));
+        let operation_settled = Arc::clone(&settled);
+        let controller =
+            runtime.spawn_invocation_controller(BODY_BLOCK_CREATE, move || async move {
+                let deadline =
+                    tokio::time::Instant::from_std(operation_runtime.invocation_deadline());
+                tokio::time::sleep_until(deadline).await;
+                let result = observe_body_dispatch(
+                    &operation_runtime,
+                    async move {
+                        operation_wrote.store(true, Ordering::SeqCst);
+                        Ok::<_, AnytypeError>(())
+                    },
+                    BodyRpcMetrics::default(),
+                    MutationProgress::new(),
+                )
+                .await;
+                assert!(matches!(result, Err(DispatchObservationError::Rejected)));
+                operation_settled.store(true, Ordering::SeqCst);
+            });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        controller.await.expect("controller completion");
+        assert!(settled.load(Ordering::SeqCst));
+        assert!(!wrote.load(Ordering::SeqCst));
+        let recovered = runtime
+            .admit_invocation(BODY_BLOCK_CREATE, &CancellationToken::new())
+            .await
+            .expect("capacity recovery");
+        drop(recovered);
+    }
+
+    #[tokio::test]
+    async fn cancelled_first_write_settles_child_controller_and_releases_capacity() {
+        let runtime = runtime(None, ApplicationProfile::Compact, false);
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation(BODY_BLOCK_CREATE, &cancellation)
+            .await
+            .expect("parent admission");
+        let release = Arc::new(Notify::new());
+        let operation_release = Arc::clone(&release);
+        let wrote = Arc::new(AtomicBool::new(false));
+        let operation_wrote = Arc::clone(&wrote);
+        let settled = Arc::new(AtomicBool::new(false));
+        let operation_settled = Arc::clone(&settled);
+        let (controller_tx, controller_rx) = tokio::sync::oneshot::channel();
+        let parent_runtime = runtime.clone();
+        let child_runtime = runtime.clone();
+        let parent_cancellation = cancellation.clone();
+        let parent = tokio::spawn(async move {
+            parent_runtime
+                .run_invocation(
+                    capability,
+                    &parent_cancellation,
+                    Box::pin(async move {
+                        let marker_runtime = child_runtime.clone();
+                        let controller = child_runtime.spawn_invocation_controller(
+                            BODY_BLOCK_CREATE,
+                            move || async move {
+                                operation_release.notified().await;
+                                let result = observe_body_dispatch(
+                                    &marker_runtime,
+                                    async move {
+                                        operation_wrote.store(true, Ordering::SeqCst);
+                                        Ok::<_, AnytypeError>(())
+                                    },
+                                    BodyRpcMetrics::default(),
+                                    MutationProgress::new(),
+                                )
+                                .await;
+                                assert!(matches!(result, Err(DispatchObservationError::Rejected)));
+                                operation_settled.store(true, Ordering::SeqCst);
+                            },
+                        );
+                        let _ = controller_tx.send(controller);
+                        std::future::pending::<()>().await;
+                    }),
+                )
+                .await
+        });
+        let controller = controller_rx.await.expect("controller handle");
+        cancellation.cancel();
+        release.notify_waiters();
+        assert!(parent.await.expect("parent join").is_err());
+        controller.await.expect("controller completion");
+        assert!(settled.load(Ordering::SeqCst));
+        assert!(!wrote.load(Ordering::SeqCst));
+        let recovered = runtime
+            .admit_invocation(BODY_BLOCK_CREATE, &CancellationToken::new())
+            .await
+            .expect("capacity recovery");
+        drop(recovered);
     }
 
     #[test]

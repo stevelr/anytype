@@ -138,11 +138,31 @@ pub async fn serve_http(
                 &config,
                 session_cancel.clone(),
             ));
-            Arc::new(move |admitted| Box::pin(backend.clone().call(admitted)))
+            let ingress_runtime = runtime.clone();
+            Arc::new(move |admitted| {
+                let backend = Arc::clone(&backend);
+                let runtime = ingress_runtime.clone();
+                Box::pin(async move {
+                    let invocation = admitted.invocation.clone();
+                    runtime
+                        .scope_ingress(invocation, backend.call(admitted))
+                        .await
+                })
+            })
         }
         ProtocolMode::Experimental20260728 => {
             let backend = Arc::new(preview::PreviewBackend::new(runtime.clone()));
-            Arc::new(move |admitted| Box::pin(backend.clone().call(admitted)))
+            let ingress_runtime = runtime.clone();
+            Arc::new(move |admitted| {
+                let backend = Arc::clone(&backend);
+                let runtime = ingress_runtime.clone();
+                Box::pin(async move {
+                    let invocation = admitted.invocation.clone();
+                    runtime
+                        .scope_ingress(invocation, backend.call(admitted))
+                        .await
+                })
+            })
         }
     };
 
@@ -164,11 +184,12 @@ pub async fn serve_http(
         "http_transport_starting"
     );
 
-    let state = Arc::new(listener::ListenerState::new(
+    let state = Arc::new(listener::ListenerState::new_with_runtime(
         &config,
         authenticator,
         metadata,
         service,
+        &runtime,
     ));
     let shutdown = CancellationToken::new();
     let signal_shutdown = shutdown.clone();
@@ -180,6 +201,8 @@ pub async fn serve_http(
         Ok(bound) => bound,
         Err(_) => {
             signals.abort();
+            session_cancel.cancel();
+            shutdown_runtime(&runtime).await;
             return Err(HttpTransportError::Bind);
         }
     };
@@ -203,20 +226,10 @@ pub async fn serve_http(
     result.map_err(|listener::HttpServeError::Listener| HttpTransportError::Listener)
 }
 
-/// Waits for shutdown-owned artifact settlement after HTTP sessions have stopped.
-async fn drain_artifact_settlements(runtime: &RuntimeContext) {
-    runtime
-        .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
-        .await;
-}
-
 /// Stops runtime admission and waits for owned artifact settlement.
 async fn shutdown_runtime(runtime: &RuntimeContext) {
     runtime.begin_shutdown();
-    drain_artifact_settlements(runtime).await;
-    runtime
-        .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
-        .await;
+    runtime.drain_artifact_cleanup().await;
 }
 
 #[cfg(test)]
@@ -280,10 +293,27 @@ mod tests {
             .expect("settlement permit");
         let dropped = Arc::new(AtomicBool::new(false));
         let marker = Arc::clone(&dropped);
-        let _receiver = runtime.supervise_import_settlement(key, permit, async move {
-            let _marker = DropMarker(marker);
-            std::future::pending().await
-        });
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("file_import", &cancellation)
+            .await
+            .expect("invocation admission");
+        let _receiver = runtime
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async {
+                    Some(
+                        runtime.supervise_import_settlement(key, permit, async move {
+                            let _marker = DropMarker(marker);
+                            std::future::pending().await
+                        }),
+                    )
+                }),
+            )
+            .await
+            .expect("start settlement")
+            .expect("settlement receiver");
         tokio::task::yield_now().await;
         dropped
     }
@@ -296,5 +326,27 @@ mod tests {
         shutdown_runtime(&runtime).await;
 
         assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn bind_failure_runs_the_shared_artifact_cleanup() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy address");
+        let address = occupied.local_addr().expect("occupied address");
+        let runtime = test_runtime();
+        let dropped = pending_settlement(&runtime).await;
+        let mut config = listener::tests::test_config(&[]);
+        config.bind = address;
+
+        let result = serve_http(
+            runtime,
+            ProtocolMode::Stable,
+            config,
+            HttpAuthMaterial::StaticToken(StaticToken::for_test()),
+        )
+        .await;
+
+        assert_eq!(result, Err(HttpTransportError::Bind));
+        assert!(dropped.load(Ordering::Acquire));
+        drop(occupied);
     }
 }

@@ -1160,7 +1160,7 @@ impl CollectionMemberMutationHandlers {
             if operation_cancellation.is_cancelled() {
                 return Err(HandlerError::new(ToolError::upstream()).into());
             }
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             run_add_after_mark_hook(&hooks, &operation_cancellation).await;
             match client
                 .collection_member_add(
@@ -1240,7 +1240,7 @@ impl CollectionMemberMutationHandlers {
             if operation_cancellation.is_cancelled() {
                 return Err(HandlerError::new(ToolError::upstream()).into());
             }
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             run_remove_after_mark_hook(&hooks, &operation_cancellation).await;
             if client
                 .view_remove_object(

@@ -8,9 +8,10 @@
 use std::{
     fmt,
     future::Future,
+    pin::Pin,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -40,6 +41,299 @@ use crate::{
     server::AnyMcpServer,
     space_policy::{PolicyClient, SpaceAuthority, SpacePolicy},
 };
+
+pub(crate) const LONG_ARTIFACT_TOOLS: [&str; 5] = [
+    "document_export",
+    "document_import_create",
+    "document_import_update",
+    "file_export",
+    "file_import",
+];
+
+tokio::task_local! {
+    static INGRESS_ANCHOR: InvocationAnchor;
+    static INVOCATION_CAPABILITY: InvocationCapability;
+}
+
+#[cfg(test)]
+type DispatchClaimBarrier = Arc<Mutex<Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>>>;
+
+/// Absolute ordinary and artifact candidates captured at authenticated ingress.
+#[derive(Clone, Debug)]
+pub(crate) struct InvocationAnchor {
+    ordinary: tokio::time::Instant,
+    artifact: tokio::time::Instant,
+    ceiling: tokio::time::Instant,
+    dispatch_state: Arc<AtomicU8>,
+    #[cfg(test)]
+    dispatch_claim_barrier: DispatchClaimBarrier,
+}
+
+impl InvocationAnchor {
+    /// Captures both profile candidates from one instant.
+    pub(crate) fn capture(runtime: &RuntimeContext) -> Self {
+        Self::capture_durations(
+            runtime.request_timeout,
+            runtime.artifact_config.limits.operation_timeout,
+        )
+    }
+
+    /// Captures candidates from validated transport-owned durations.
+    pub(crate) fn capture_durations(
+        ordinary_timeout: Duration,
+        artifact_timeout: Duration,
+    ) -> Self {
+        let started = tokio::time::Instant::now();
+        let ordinary = started.checked_add(ordinary_timeout).unwrap_or(started);
+        let artifact = started.checked_add(artifact_timeout).unwrap_or(started);
+        Self {
+            ordinary,
+            artifact,
+            ceiling: ordinary,
+            dispatch_state: Arc::new(AtomicU8::new(InvocationCapability::PENDING)),
+            #[cfg(test)]
+            dispatch_claim_barrier: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Returns the ordinary candidate used through admission and decoding.
+    pub(crate) const fn ordinary_deadline(&self) -> tokio::time::Instant {
+        self.ordinary
+    }
+
+    /// Selects the long candidate only for one exact approved artifact tool.
+    pub(crate) fn select_tool(&self, name: &str) -> Self {
+        let mut selected = self.clone();
+        selected.ceiling = if long_artifact_tool(name) {
+            self.artifact
+        } else {
+            self.ordinary
+        };
+        selected
+    }
+
+    /// Returns the selected ingress ceiling.
+    pub(crate) const fn deadline(&self) -> tokio::time::Instant {
+        self.ceiling
+    }
+
+    /// Returns whether this authenticated invocation crossed mutation dispatch.
+    #[cfg(test)]
+    pub(crate) fn dispatched(&self) -> bool {
+        self.dispatch_state.load(Ordering::SeqCst) == InvocationCapability::DISPATCHED
+    }
+
+    /// Atomically rejects an invocation unless mutation dispatch committed first.
+    ///
+    /// A transport terminal event uses this arbitration before returning a
+    /// retryable response. A claimant that loses this compare-exchange cannot
+    /// later dispatch from a detached session or controller task.
+    pub(crate) fn terminal_observes_dispatch(&self) -> bool {
+        loop {
+            let state = self.dispatch_state.load(Ordering::SeqCst);
+            match state {
+                InvocationCapability::DISPATCHED => return true,
+                InvocationCapability::REJECTED => return false,
+                InvocationCapability::PENDING | InvocationCapability::CLAIMING => {
+                    if self
+                        .dispatch_state
+                        .compare_exchange(
+                            state,
+                            InvocationCapability::REJECTED,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_dispatch_claim_barrier(
+        &self,
+        claimed: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        *self
+            .dispatch_claim_barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((claimed, release));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_armed_dispatch_claim(&self) -> bool {
+        if self
+            .dispatch_state
+            .compare_exchange(
+                InvocationCapability::PENDING,
+                InvocationCapability::CLAIMING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        if let Some((claimed, release)) = self
+            .dispatch_claim_barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            claimed.wait();
+            release.wait();
+        }
+        self.dispatch_state
+            .compare_exchange(
+                InvocationCapability::CLAIMING,
+                InvocationCapability::DISPATCHED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+}
+
+/// Returns whether one exact tool receives the artifact invocation profile.
+pub(crate) fn long_artifact_tool(name: &str) -> bool {
+    LONG_ARTIFACT_TOOLS.contains(&name)
+}
+
+#[derive(Clone)]
+pub(crate) struct InvocationCapability {
+    deadline: tokio::time::Instant,
+    permit_domain: Arc<Semaphore>,
+    _lease: Arc<tokio::sync::OwnedSemaphorePermit>,
+    dispatch_state: Arc<AtomicU8>,
+    shutdown: CancellationToken,
+    cancellation: CancellationToken,
+    #[cfg(test)]
+    dispatch_claim_barrier: DispatchClaimBarrier,
+}
+
+impl InvocationCapability {
+    const PENDING: u8 = 0;
+    const CLAIMING: u8 = 1;
+    const DISPATCHED: u8 = 2;
+    const REJECTED: u8 = 3;
+
+    fn matches(&self, permits: &Arc<Semaphore>) -> bool {
+        Arc::ptr_eq(&self.permit_domain, permits)
+    }
+
+    pub(crate) const fn deadline(&self) -> tokio::time::Instant {
+        self.deadline
+    }
+
+    fn current_failure(&self) -> Option<ControlledFailureKind> {
+        if tokio::time::Instant::now() >= self.deadline {
+            Some(ControlledFailureKind::TimedOut)
+        } else if self.shutdown.is_cancelled() {
+            Some(ControlledFailureKind::ShuttingDown)
+        } else if self.cancellation.is_cancelled() {
+            Some(ControlledFailureKind::Cancelled)
+        } else {
+            None
+        }
+    }
+
+    fn reject_undispatched(&self) -> bool {
+        loop {
+            let state = self.dispatch_state.load(Ordering::SeqCst);
+            if !matches!(state, Self::PENDING | Self::CLAIMING) {
+                return false;
+            }
+            if self
+                .dispatch_state
+                .compare_exchange(state, Self::REJECTED, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    fn dispatched(&self) -> bool {
+        self.dispatch_state.load(Ordering::SeqCst) == Self::DISPATCHED
+    }
+
+    fn try_dispatch(&self) -> Result<(), ControlledFailureKind> {
+        if let Some(failure) = self.current_failure() {
+            let _ = self.reject_undispatched();
+            return Err(failure);
+        }
+        match self.dispatch_state.compare_exchange(
+            Self::PENDING,
+            Self::CLAIMING,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => {
+                #[cfg(test)]
+                if let Some((claimed, release)) = self
+                    .dispatch_claim_barrier
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                {
+                    claimed.wait();
+                    release.wait();
+                }
+                if let Some(failure) = self.current_failure() {
+                    let _ = self.dispatch_state.compare_exchange(
+                        Self::CLAIMING,
+                        Self::REJECTED,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    );
+                    return Err(failure);
+                }
+                match self.dispatch_state.compare_exchange(
+                    Self::CLAIMING,
+                    Self::DISPATCHED,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(self
+                        .current_failure()
+                        .unwrap_or(ControlledFailureKind::Cancelled)),
+                }
+            }
+            Err(Self::DISPATCHED) => Ok(()),
+            Err(_) => Err(self
+                .current_failure()
+                .unwrap_or(ControlledFailureKind::Cancelled)),
+        }
+    }
+}
+
+/// Atomically marks the active invocation as possibly dispatched.
+pub(crate) fn mark_invocation_dispatched(
+    runtime: &RuntimeContext,
+) -> Result<(), ControlledFailureKind> {
+    INVOCATION_CAPABILITY
+        .try_with(|capability| {
+            if capability.matches(&runtime.permits) {
+                capability.try_dispatch()
+            } else {
+                Err(ControlledFailureKind::Cancelled)
+            }
+        })
+        .unwrap_or(Err(ControlledFailureKind::Cancelled))
+}
+
+/// Controlled failure while admitting or running one complete invocation.
+#[derive(Debug)]
+pub(crate) struct InvocationFailure {
+    pub(crate) kind: ControlledFailureKind,
+    pub(crate) dispatched: bool,
+}
 
 fn hash_generation_part(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
@@ -134,6 +428,8 @@ pub struct RuntimeContext {
     #[cfg_attr(not(any(test, feature = "acceptance-harness")), allow(dead_code))]
     artifact_acceptance_gates: ArtifactAcceptanceGates,
     client_roots: Arc<ClientRootsGate>,
+    #[cfg(test)]
+    force_catalog_failure: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct RuntimeParts {
@@ -238,6 +534,249 @@ impl fmt::Debug for RuntimeContext {
 }
 
 impl RuntimeContext {
+    /// Runs transport work with its authenticated ingress anchor available to dispatch.
+    pub(crate) async fn scope_ingress<F, T>(&self, anchor: InvocationAnchor, operation: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        INGRESS_ANCHOR.scope(anchor, operation).await
+    }
+
+    /// Returns the current transport anchor, or captures one for direct dispatch.
+    pub(crate) fn ingress_anchor(&self, tool_name: &str) -> InvocationAnchor {
+        INGRESS_ANCHOR
+            .try_with(Clone::clone)
+            .unwrap_or_else(|_| InvocationAnchor::capture(self).select_tool(tool_name))
+    }
+
+    /// Acquires the shared invocation permit under the selected absolute deadline.
+    pub(crate) async fn admit_invocation(
+        &self,
+        tool_name: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationCapability, InvocationFailure> {
+        let anchor = INGRESS_ANCHOR
+            .try_with(Clone::clone)
+            .unwrap_or_else(|_| InvocationAnchor::capture(self).select_tool(tool_name));
+        let deadline = anchor
+            .select_tool(tool_name)
+            .deadline()
+            .min(anchor.deadline());
+        let acquire = Arc::clone(&self.permits).acquire_owned();
+        tokio::pin!(acquire);
+        let permit = tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(deadline) => {
+                return Err(InvocationFailure {
+                    kind: ControlledFailureKind::TimedOut,
+                    dispatched: false,
+                });
+            }
+            () = self.shutdown.cancelled() => {
+                return Err(InvocationFailure {
+                    kind: ControlledFailureKind::ShuttingDown,
+                    dispatched: false,
+                });
+            }
+            () = cancellation.cancelled() => {
+                return Err(InvocationFailure {
+                    kind: ControlledFailureKind::Cancelled,
+                    dispatched: false,
+                });
+            }
+            permit = &mut acquire => permit.map_err(|_| InvocationFailure {
+                kind: ControlledFailureKind::ShuttingDown,
+                dispatched: false,
+            })?,
+        };
+        Ok(InvocationCapability {
+            deadline,
+            permit_domain: Arc::clone(&self.permits),
+            _lease: Arc::new(permit),
+            dispatch_state: Arc::clone(&anchor.dispatch_state),
+            shutdown: self.shutdown.clone(),
+            cancellation: cancellation.clone(),
+            #[cfg(test)]
+            dispatch_claim_barrier: Arc::clone(&anchor.dispatch_claim_barrier),
+        })
+    }
+
+    /// Runs one invocation under its unforgeable deadline and permit lease.
+    pub(crate) async fn run_invocation<T>(
+        &self,
+        capability: InvocationCapability,
+        cancellation: &CancellationToken,
+        operation: Pin<Box<dyn Future<Output = T> + Send + '_>>,
+    ) -> Result<T, InvocationFailure> {
+        let deadline = capability.deadline;
+        let shutdown = self.shutdown.clone();
+        if let Some(kind) = capability.current_failure() {
+            let _ = capability.reject_undispatched();
+            return Err(InvocationFailure {
+                kind,
+                dispatched: false,
+            });
+        }
+        let terminal_capability = capability.clone();
+        INVOCATION_CAPABILITY
+            .scope(
+                capability,
+                anytype::scope_grpc_deadline(deadline, async move {
+                    tokio::pin!(operation);
+                    tokio::select! {
+                        biased;
+                        result = &mut operation => Ok(result),
+                        () = tokio::time::sleep_until(deadline) => {
+                            let _ = terminal_capability.reject_undispatched();
+                            Err(InvocationFailure {
+                                kind: ControlledFailureKind::TimedOut,
+                                dispatched: terminal_capability.dispatched(),
+                            })
+                        },
+                        () = shutdown.cancelled() => {
+                            let _ = terminal_capability.reject_undispatched();
+                            Err(InvocationFailure {
+                                kind: ControlledFailureKind::ShuttingDown,
+                                dispatched: terminal_capability.dispatched(),
+                            })
+                        },
+                        () = cancellation.cancelled() => {
+                            let _ = terminal_capability.reject_undispatched();
+                            Err(InvocationFailure {
+                                kind: ControlledFailureKind::Cancelled,
+                                dispatched: terminal_capability.dispatched(),
+                            })
+                        },
+                    }
+                }),
+            )
+            .await
+    }
+
+    /// Runs a direct top-level router under a newly acquired capability.
+    ///
+    /// Transport-owned routes already have a matching capability and execute
+    /// inline. A present foreign capability is rejected rather than replaced.
+    pub(crate) async fn run_routed_invocation<T>(
+        &self,
+        tool_name: &str,
+        cancellation: &CancellationToken,
+        operation: Pin<Box<dyn Future<Output = T> + Send + '_>>,
+    ) -> Result<T, InvocationFailure> {
+        match INVOCATION_CAPABILITY.try_with(|capability| capability.matches(&self.permits)) {
+            Ok(true) => Ok(operation.await),
+            Ok(false) => Err(InvocationFailure {
+                kind: ControlledFailureKind::Cancelled,
+                dispatched: false,
+            }),
+            Err(_) => {
+                let capability = self.admit_invocation(tool_name, cancellation).await?;
+                self.run_invocation(capability, cancellation, operation)
+                    .await
+            }
+        }
+    }
+
+    /// Transfers the active lease to one reviewed idempotency supervisor.
+    ///
+    /// General background work must use `tokio::spawn` and reacquire runtime
+    /// capacity. This seam is reserved for supervisors whose settlement is
+    /// part of the initiating invocation.
+    pub(crate) fn spawn_invocation_supervisor<F, T>(
+        &self,
+        operation: F,
+    ) -> tokio::task::JoinHandle<T>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let capability = INVOCATION_CAPABILITY
+            .try_with(|capability| {
+                capability
+                    .matches(&self.permits)
+                    .then(|| capability.clone())
+            })
+            .ok()
+            .flatten();
+        let Some(capability) = capability else {
+            tracing::error!(target: "any_mcp::runtime", "invocation_supervisor_capability_rejected");
+            let task = tokio::spawn(async move {
+                std::future::pending::<()>().await;
+                operation.await
+            });
+            task.abort();
+            return task;
+        };
+        let deadline = capability.deadline;
+        tokio::spawn(async move {
+            INVOCATION_CAPABILITY
+                .scope(
+                    capability,
+                    anytype::scope_grpc_deadline(deadline, operation),
+                )
+                .await
+        })
+    }
+
+    /// Starts an approved top-level idempotency controller.
+    ///
+    /// Direct in-process routers have no transport capability, so they acquire
+    /// one normally. An HTTP or stdio invocation transfers its existing lease.
+    pub(crate) fn spawn_invocation_controller<F, O>(
+        &self,
+        tool_name: &'static str,
+        operation: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: FnOnce() -> O + Send + 'static,
+        O: Future<Output = ()> + Send + 'static,
+    {
+        match INVOCATION_CAPABILITY.try_with(|capability| capability.matches(&self.permits)) {
+            Ok(true) => {
+                return self.spawn_invocation_supervisor(async move {
+                    operation().await;
+                });
+            }
+            Ok(false) => {
+                tracing::error!(
+                    target: "any_mcp::runtime",
+                    "invocation_controller_capability_rejected"
+                );
+                let task = tokio::spawn(async move {
+                    std::future::pending::<()>().await;
+                    operation().await
+                });
+                task.abort();
+                return task;
+            }
+            Err(_) => {}
+        }
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            let Ok(capability) = runtime.admit_invocation(tool_name, &cancellation).await else {
+                return;
+            };
+            let deadline = capability.deadline;
+            INVOCATION_CAPABILITY
+                .scope(
+                    capability,
+                    anytype::scope_grpc_deadline(deadline, async move {
+                        operation().await;
+                    }),
+                )
+                .await;
+        })
+    }
+
+    /// Returns the active invocation deadline, or a fresh ordinary candidate.
+    pub(crate) fn invocation_deadline(&self) -> Instant {
+        INVOCATION_CAPABILITY
+            .try_with(InvocationCapability::deadline)
+            .unwrap_or_else(|_| InvocationAnchor::capture(self).ordinary_deadline())
+            .into_std()
+    }
+
     /// Builds the long-lived client, loads existing credentials, and performs
     /// the mandatory startup health checks exactly once.
     ///
@@ -382,10 +921,19 @@ impl RuntimeContext {
         &self.client_roots
     }
 
+    #[cfg(test)]
+    pub(crate) fn force_catalog_failure(&self) {
+        self.force_catalog_failure.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn catalog_failure_forced(&self) -> bool {
+        self.force_catalog_failure.load(Ordering::SeqCst)
+    }
+
     /// Returns the one absolute deadline for a newly admitted invocation.
     pub(crate) fn request_deadline(&self) -> Instant {
-        let now = Instant::now();
-        now.checked_add(self.request_timeout).unwrap_or(now)
+        self.invocation_deadline()
     }
 
     fn next_operation_correlation_id(&self) -> u64 {
@@ -512,8 +1060,30 @@ impl RuntimeContext {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let shutdown = self.shutdown.clone();
         let operations = self.artifact_operations.clone();
+        let capability = INVOCATION_CAPABILITY
+            .try_with(|capability| {
+                capability
+                    .matches(&self.permits)
+                    .then(|| capability.clone())
+            })
+            .ok()
+            .flatten();
+        let Some(capability) = capability else {
+            tracing::error!(target: "any_mcp::runtime", "import_supervisor_capability_rejected");
+            drop(admission);
+            let _ = sender.send(Err(ArtifactToolError::Indeterminate));
+            return receiver;
+        };
+        let deadline = capability.deadline;
         tokio::spawn(async move {
-            let mut child = tokio::spawn(operation);
+            let mut child = tokio::spawn(async move {
+                INVOCATION_CAPABILITY
+                    .scope(
+                        capability,
+                        anytype::scope_grpc_deadline(deadline, operation),
+                    )
+                    .await
+            });
             let result = tokio::select! {
                 joined = &mut child => match joined {
                     Ok(result) => result,
@@ -552,6 +1122,23 @@ impl RuntimeContext {
         A: FnOnce(Result<T, ArtifactToolError>) + Send + 'static,
     {
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let capability = INVOCATION_CAPABILITY
+            .try_with(|capability| {
+                capability
+                    .matches(&self.permits)
+                    .then(|| capability.clone())
+            })
+            .ok()
+            .flatten();
+        let Some(capability) = capability else {
+            tracing::error!(target: "any_mcp::runtime", "artifact_blocking_capability_rejected");
+            let _ = sender.send(Err(ArtifactToolError::Indeterminate));
+            return receiver;
+        };
+        if mark_invocation_dispatched(self).is_err() {
+            let _ = sender.send(Err(ArtifactToolError::Upstream));
+            return receiver;
+        }
         let gate = match self.settlement_gate.lock() {
             Ok(gate) => gate,
             Err(poisoned) => poisoned.into_inner(),
@@ -565,6 +1152,7 @@ impl RuntimeContext {
         let active = Arc::clone(&self.settlement_active);
         let notify = Arc::clone(&self.settlement_notify);
         tokio::spawn(async move {
+            let _capability_lease = capability;
             let result = match tokio::task::spawn_blocking(operation).await {
                 Ok(result) => result,
                 Err(_) => Err(ArtifactToolError::Indeterminate),
@@ -637,6 +1225,18 @@ impl RuntimeContext {
         if let Some(staging) = &self.artifact_staging {
             let _ = staging.drain(timeout).await;
         }
+    }
+
+    /// Drains settlement and staging under one shared cleanup deadline.
+    pub(crate) async fn drain_artifact_cleanup(&self) {
+        let started = tokio::time::Instant::now();
+        let deadline = started
+            .checked_add(self.artifact_config.limits.operation_timeout)
+            .unwrap_or(started);
+        let settlement_remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        self.drain_artifact_settlements(settlement_remaining).await;
+        let staging_remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        self.drain_artifact_staging(staging_remaining).await;
     }
 
     /// Returns whether process shutdown has started.
@@ -764,6 +1364,27 @@ impl RuntimeContext {
         C: Fn(&E) -> OperationFailureDiagnostic,
         D: Fn(ControlledFailureKind) -> OperationFailureDiagnostic,
     {
+        let inherited_deadline = INVOCATION_CAPABILITY
+            .try_with(|capability| {
+                capability
+                    .matches(&self.permits)
+                    .then_some(capability.deadline.into_std())
+            })
+            .ok()
+            .flatten();
+        if let Some(inherited_deadline) = inherited_deadline {
+            return Box::pin(execute_inherited_capability(
+                self,
+                deadline.min(inherited_deadline),
+                context,
+                cancellation,
+                operation,
+                classify,
+                classify_control,
+            ))
+            .await;
+        }
+
         let started = Instant::now();
         let correlation_id = self.next_operation_correlation_id();
         let controlled = async {
@@ -1015,8 +1636,49 @@ impl RuntimeContext {
             settlement_gate: Arc::new(Mutex::new(SettlementAdmissionGate { accepting: true })),
             artifact_acceptance_gates: ArtifactAcceptanceGates::disabled(),
             client_roots: Arc::new(ClientRootsGate::default()),
+            #[cfg(test)]
+            force_catalog_failure: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_inherited_capability<F, T, E, C, D>(
+    runtime: &RuntimeContext,
+    deadline: Instant,
+    context: OperationContext,
+    cancellation: &CancellationToken,
+    operation: F,
+    classify: C,
+    classify_control: D,
+) -> Result<T, ControlledOperationError<E>>
+where
+    F: Future<Output = Result<T, E>>,
+    C: Fn(&E) -> OperationFailureDiagnostic,
+    D: Fn(ControlledFailureKind) -> OperationFailureDiagnostic,
+{
+    let started = Instant::now();
+    let correlation_id = runtime.next_operation_correlation_id();
+    let controlled = async {
+        tokio::select! {
+            biased;
+            () = runtime.shutdown.cancelled() => Err(ControlledOperationError::ShuttingDown),
+            () = cancellation.cancelled() => Err(ControlledOperationError::Cancelled),
+            result = operation => result.map_err(ControlledOperationError::Operation),
+        }
+    };
+    let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), controlled)
+        .await
+        .unwrap_or(Err(ControlledOperationError::TimedOut));
+    log_classified_operation(
+        context,
+        correlation_id,
+        started.elapsed(),
+        &result,
+        &classify,
+        &classify_control,
+    );
+    result
 }
 
 async fn verify_startup_probes<FH, FG, HH, HG, EH, EG>(
@@ -1442,7 +2104,14 @@ pub async fn serve_stdio(
     runtime: RuntimeContext,
     protocol_mode: ProtocolMode,
 ) -> Result<(), ServeError> {
-    let server = AnyMcpServer::new(runtime).map_err(|_| ServeError::Catalog)?;
+    let server = match AnyMcpServer::new(runtime.clone()) {
+        Ok(server) => server,
+        Err(_) => {
+            runtime.begin_shutdown();
+            runtime.drain_artifact_cleanup().await;
+            return Err(ServeError::Catalog);
+        }
+    };
     crate::stdio::serve_stdio(server, protocol_mode).await
 }
 
@@ -1485,43 +2154,34 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     let runtime = server.runtime().clone();
+    let result = serve_transport_inner(server, transport).await;
+    runtime.begin_shutdown();
+    runtime.drain_artifact_cleanup().await;
+    result
+}
+
+pub(crate) async fn serve_transport_inner<T, E, A>(
+    server: AnyMcpServer,
+    transport: T,
+) -> Result<(), ServeError>
+where
+    T: IntoTransport<RoleServer, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
     let transport = ShutdownTransport {
         inner: transport.into_transport(),
-        runtime: runtime.clone(),
+        runtime: server.runtime().clone(),
     };
     let running = match server.serve(transport).await {
         Ok(running) => running,
-        Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => {
-            runtime.begin_shutdown();
-            runtime
-                .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
-                .await;
-            runtime
-                .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
-                .await;
-            return Ok(());
-        }
-        Err(_) => {
-            runtime.begin_shutdown();
-            runtime
-                .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
-                .await;
-            return Err(ServeError::Initialization);
-        }
+        Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => return Ok(()),
+        Err(_) => return Err(ServeError::Initialization),
     };
 
-    let result = match running.waiting().await {
+    match running.waiting().await {
         Ok(QuitReason::Closed | QuitReason::Cancelled) => Ok(()),
         Ok(QuitReason::JoinError(_)) | Ok(_) | Err(_) => Err(ServeError::ServiceTask),
-    };
-    runtime.begin_shutdown();
-    runtime
-        .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
-        .await;
-    runtime
-        .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
-        .await;
-    result
+    }
 }
 
 struct ShutdownTransport<T> {
@@ -1641,6 +2301,33 @@ mod tests {
         );
     }
 
+    async fn start_import_supervisor<F>(
+        runtime: &RuntimeContext,
+        key: [u8; 32],
+        admission: ImportSettlementAdmission,
+        operation: F,
+    ) -> tokio::sync::oneshot::Receiver<Result<FileImportOutput, ArtifactToolError>>
+    where
+        F: Future<Output = Result<FileImportOutput, ArtifactToolError>> + Send + 'static,
+    {
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("file_import", &cancellation)
+            .await
+            .expect("invocation admission");
+        runtime
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async {
+                    Some(runtime.supervise_import_settlement(key, admission, operation))
+                }),
+            )
+            .await
+            .expect("start import supervisor")
+            .expect("supervisor receiver")
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_local_publication_waiter_remains_owned_and_indeterminate() {
         let runtime = runtime(1, Duration::from_secs(1));
@@ -1657,15 +2344,43 @@ mod tests {
         let worker_entered = Arc::clone(&entered);
         let worker_release = Arc::clone(&release);
         let abandoned_operations = runtime.artifact_operations().clone();
-        let receiver = runtime.supervise_artifact_blocking(
-            move || {
-                worker_entered.wait();
-                worker_release.wait();
-                Ok::<_, ArtifactToolError>(())
-            },
-            move |_| abandoned_operations.mark_indeterminate(key),
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("file_import", &cancellation)
+            .await
+            .expect("invocation admission");
+        let operation_runtime = runtime.clone();
+        let (receiver_sender, receiver_receiver) = tokio::sync::oneshot::channel();
+        let running = runtime.run_invocation(
+            capability,
+            &cancellation,
+            Box::pin(async move {
+                let receiver = operation_runtime.supervise_artifact_blocking(
+                    move || {
+                        worker_entered.wait();
+                        worker_release.wait();
+                        Ok::<_, ArtifactToolError>(())
+                    },
+                    move |_| abandoned_operations.mark_indeterminate(key),
+                );
+                let _ = receiver_sender.send(receiver);
+                std::future::pending::<()>().await;
+            }),
         );
+        tokio::pin!(running);
+        let receiver = tokio::select! {
+            receiver = receiver_receiver => receiver.expect("supervisor receiver"),
+            result = &mut running => panic!("invocation ended before supervisor: {result:?}"),
+        };
         entered.wait();
+        cancellation.cancel();
+        assert!(matches!(
+            running.await,
+            Err(InvocationFailure {
+                kind: ControlledFailureKind::Cancelled,
+                dispatched: true,
+            })
+        ));
         drop(receiver);
         release.wait();
         runtime
@@ -1693,11 +2408,12 @@ mod tests {
             admission.reserve_import(runtime.artifact_operations(), key, fingerprint),
             Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
         ));
-        let receiver = runtime.supervise_import_settlement(key, admission, async move {
+        let receiver = start_import_supervisor(&runtime, key, admission, async move {
             panic!("test settlement panic");
             #[allow(unreachable_code)]
             Ok::<_, ArtifactToolError>(unreachable!())
-        });
+        })
+        .await;
         assert!(matches!(
             receiver.await,
             Ok(Err(ArtifactToolError::Indeterminate))
@@ -1782,9 +2498,10 @@ mod tests {
             admission.reserve_import(runtime.artifact_operations(), key, fingerprint),
             Ok(crate::artifact_toolset::ImportIdempotency::Dispatch)
         ));
-        let receiver = runtime.supervise_import_settlement(key, admission, async {
+        let receiver = start_import_supervisor(&runtime, key, admission, async {
             std::future::pending::<Result<FileImportOutput, ArtifactToolError>>().await
-        });
+        })
+        .await;
         tokio::task::yield_now().await;
         runtime.begin_shutdown();
         assert!(matches!(
@@ -2678,5 +3395,634 @@ mod tests {
         ));
         assert!(!waiter_executed.load(Ordering::SeqCst));
         assert!(runtime.is_shutting_down());
+    }
+
+    #[tokio::test]
+    async fn invocation_capability_reuses_the_shared_permit_domain_across_forks() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let fork = runtime.fork_identity();
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("server_status", &cancellation)
+            .await
+            .expect("invocation admission");
+        let result = runtime
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async {
+                    fork.execute(
+                        OperationContext::new("capability_probe"),
+                        &CancellationToken::new(),
+                        async { Ok::<_, AnytypeError>(7_u8) },
+                    )
+                    .await
+                }),
+            )
+            .await
+            .expect("invocation result")
+            .expect("operation result");
+        assert_eq!(result, 7);
+        assert_eq!(runtime.permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn arbitrary_spawn_does_not_inherit_invocation_capability() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("server_status", &cancellation)
+            .await
+            .expect("invocation admission");
+        let inherited = runtime
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async {
+                    tokio::spawn(async { INVOCATION_CAPABILITY.try_with(|_| ()).is_ok() })
+                        .await
+                        .expect("spawn join")
+                }),
+            )
+            .await
+            .expect("invocation result");
+        assert!(!inherited);
+    }
+
+    #[tokio::test]
+    async fn reviewed_supervisor_transfers_the_same_invocation_capability() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("object_create", &cancellation)
+            .await
+            .expect("invocation admission");
+        let supervisor_runtime = runtime.clone();
+        let inherited = runtime
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async move {
+                    supervisor_runtime
+                        .spawn_invocation_supervisor(async {
+                            INVOCATION_CAPABILITY.try_with(|_| ()).is_ok()
+                        })
+                        .await
+                        .expect("supervisor join")
+                }),
+            )
+            .await
+            .expect("invocation result");
+        assert!(inherited);
+        assert_eq!(runtime.permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn reviewed_supervisor_fails_closed_without_matching_capability() {
+        let primary = runtime(1, Duration::from_secs(1));
+        let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_executed = Arc::clone(&executed);
+        let absent = primary.spawn_invocation_supervisor(async move {
+            task_executed.store(true, Ordering::SeqCst);
+        });
+        assert!(
+            absent
+                .await
+                .expect_err("absent capability rejects")
+                .is_cancelled()
+        );
+        assert!(!executed.load(Ordering::SeqCst));
+
+        let other = runtime(1, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let capability = primary
+            .admit_invocation("object_create", &cancellation)
+            .await
+            .expect("invocation admission");
+        let mismatch_executed = Arc::clone(&executed);
+        primary
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async move {
+                    let mismatch = other.spawn_invocation_supervisor(async move {
+                        mismatch_executed.store(true, Ordering::SeqCst);
+                    });
+                    assert!(
+                        mismatch
+                            .await
+                            .expect_err("mismatched capability rejects")
+                            .is_cancelled()
+                    );
+                }),
+            )
+            .await
+            .expect("invocation result");
+        assert!(!executed.load(Ordering::SeqCst));
+        assert_eq!(primary.permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn controller_reacquires_only_when_capability_is_absent() {
+        let direct = runtime(1, Duration::from_secs(1));
+        let direct_executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_executed = Arc::clone(&direct_executed);
+        direct
+            .spawn_invocation_controller("object_create", move || async move {
+                operation_executed.store(true, Ordering::SeqCst);
+            })
+            .await
+            .expect("direct controller");
+        assert!(direct_executed.load(Ordering::SeqCst));
+        assert_eq!(direct.permits.available_permits(), 1);
+
+        let primary = runtime(1, Duration::from_secs(1));
+        let foreign = runtime(1, Duration::from_secs(1));
+        let foreign_executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation = CancellationToken::new();
+        let capability = primary
+            .admit_invocation("object_create", &cancellation)
+            .await
+            .expect("primary capability");
+        let attempted = Arc::clone(&foreign_executed);
+        let foreign_controller = foreign.clone();
+        primary
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async move {
+                    let rejected = foreign_controller.spawn_invocation_controller(
+                        "object_create",
+                        move || async move {
+                            attempted.store(true, Ordering::SeqCst);
+                        },
+                    );
+                    assert!(
+                        rejected
+                            .await
+                            .expect_err("foreign controller rejects")
+                            .is_cancelled()
+                    );
+                }),
+            )
+            .await
+            .expect("primary invocation");
+        assert!(!foreign_executed.load(Ordering::SeqCst));
+        assert_eq!(foreign.permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_marker_rejects_absent_and_foreign_capabilities() {
+        let primary = runtime(1, Duration::from_secs(1));
+        assert_eq!(
+            mark_invocation_dispatched(&primary),
+            Err(ControlledFailureKind::Cancelled)
+        );
+
+        let foreign = runtime(1, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let capability = primary
+            .admit_invocation("object_create", &cancellation)
+            .await
+            .expect("primary capability");
+        let wrote = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_wrote = Arc::clone(&wrote);
+        let result = primary
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async move {
+                    if mark_invocation_dispatched(&foreign).is_ok() {
+                        operation_wrote.store(true, Ordering::SeqCst);
+                    }
+                }),
+            )
+            .await;
+        assert!(result.is_ok());
+        assert!(!wrote.load(Ordering::SeqCst));
+        assert_eq!(primary.permits.available_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deadline_recheck_rejects_a_preempted_dispatch_claim() {
+        let runtime = runtime(1, Duration::from_millis(50));
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("object_create", &cancellation)
+            .await
+            .expect("admit invocation");
+        let deadline = capability.deadline();
+        let claimed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        *capability
+            .dispatch_claim_barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((Arc::clone(&claimed), Arc::clone(&release)));
+        let wrote = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_wrote = Arc::clone(&wrote);
+        let operation_runtime = runtime.clone();
+        let running_runtime = runtime.clone();
+        let running = tokio::spawn(async move {
+            running_runtime
+                .run_invocation(
+                    capability,
+                    &cancellation,
+                    Box::pin(async move {
+                        if mark_invocation_dispatched(&operation_runtime).is_ok() {
+                            operation_wrote.store(true, Ordering::SeqCst);
+                        }
+                    }),
+                )
+                .await
+        });
+        tokio::task::spawn_blocking(move || claimed.wait())
+            .await
+            .expect("claimed barrier");
+        tokio::time::sleep_until(deadline).await;
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release barrier");
+        let result = running.await.expect("invocation join");
+        assert!(result.is_ok());
+        assert!(!wrote.load(Ordering::SeqCst));
+        assert_eq!(runtime.permits.available_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parent_deadline_rejects_a_controller_dispatch_claim() {
+        let runtime = runtime(1, Duration::from_millis(50));
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("object_create", &cancellation)
+            .await
+            .expect("admit invocation");
+        let deadline = capability.deadline();
+        let claimed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        *capability
+            .dispatch_claim_barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((Arc::clone(&claimed), Arc::clone(&release)));
+        let wrote = Arc::new(AtomicBool::new(false));
+        let operation_wrote = Arc::clone(&wrote);
+        let controller_runtime = runtime.clone();
+        let running_runtime = runtime.clone();
+        let (controller_sender, controller_receiver) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(async move {
+            running_runtime
+                .run_invocation(
+                    capability,
+                    &cancellation,
+                    Box::pin(async move {
+                        let marker_runtime = controller_runtime.clone();
+                        let controller = controller_runtime.spawn_invocation_controller(
+                            "object_create",
+                            move || async move {
+                                if mark_invocation_dispatched(&marker_runtime).is_ok() {
+                                    operation_wrote.store(true, Ordering::SeqCst);
+                                }
+                            },
+                        );
+                        let _ = controller_sender.send(controller);
+                        std::future::pending::<()>().await;
+                    }),
+                )
+                .await
+        });
+        let controller = controller_receiver.await.expect("controller handle");
+        tokio::task::spawn_blocking(move || claimed.wait())
+            .await
+            .expect("claimed barrier");
+        tokio::time::sleep_until(deadline).await;
+        let failure = running
+            .await
+            .expect("invocation join")
+            .expect_err("deadline rejects claim");
+        assert_eq!(failure.kind, ControlledFailureKind::TimedOut);
+        assert!(!failure.dispatched);
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release barrier");
+        controller.await.expect("controller join");
+        assert!(!wrote.load(Ordering::SeqCst));
+        assert_eq!(runtime.permits.available_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parent_cancellation_rejects_a_controller_dispatch_claim() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("object_create", &cancellation)
+            .await
+            .expect("admit invocation");
+        let claimed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        *capability
+            .dispatch_claim_barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((Arc::clone(&claimed), Arc::clone(&release)));
+        let wrote = Arc::new(AtomicBool::new(false));
+        let operation_wrote = Arc::clone(&wrote);
+        let controller_runtime = runtime.clone();
+        let running_runtime = runtime.clone();
+        let operation_cancellation = cancellation.clone();
+        let (controller_sender, controller_receiver) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(async move {
+            running_runtime
+                .run_invocation(
+                    capability,
+                    &operation_cancellation,
+                    Box::pin(async move {
+                        let marker_runtime = controller_runtime.clone();
+                        let controller = controller_runtime.spawn_invocation_controller(
+                            "object_create",
+                            move || async move {
+                                if mark_invocation_dispatched(&marker_runtime).is_ok() {
+                                    operation_wrote.store(true, Ordering::SeqCst);
+                                }
+                            },
+                        );
+                        let _ = controller_sender.send(controller);
+                        std::future::pending::<()>().await;
+                    }),
+                )
+                .await
+        });
+        let controller = controller_receiver.await.expect("controller handle");
+        tokio::task::spawn_blocking(move || claimed.wait())
+            .await
+            .expect("claimed barrier");
+        cancellation.cancel();
+        let failure = running
+            .await
+            .expect("invocation join")
+            .expect_err("cancellation rejects claim");
+        assert_eq!(failure.kind, ControlledFailureKind::Cancelled);
+        assert!(!failure.dispatched);
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release barrier");
+        controller.await.expect("controller join");
+        assert!(!wrote.load(Ordering::SeqCst));
+        assert_eq!(runtime.permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn artifact_supervisors_fail_closed_without_matching_capability() {
+        let absent_runtime = runtime(1, Duration::from_secs(1));
+        let blocking_executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_executed = Arc::clone(&blocking_executed);
+        let receiver = absent_runtime.supervise_artifact_blocking(
+            move || {
+                operation_executed.store(true, Ordering::SeqCst);
+                Ok::<_, ArtifactToolError>(())
+            },
+            |_| {},
+        );
+        assert!(matches!(
+            receiver.await,
+            Ok(Err(ArtifactToolError::Indeterminate))
+        ));
+        assert!(!blocking_executed.load(Ordering::SeqCst));
+
+        let primary = runtime(1, Duration::from_secs(1));
+        let other = runtime(1, Duration::from_secs(1));
+        let key = [81; 32];
+        let fingerprint = [82; 32];
+        let mut admission = other
+            .admit_import_settlement(other.request_deadline())
+            .await
+            .expect("settlement admission");
+        assert!(matches!(
+            admission.reserve_import(other.artifact_operations(), key, fingerprint),
+            Ok(ImportIdempotency::Dispatch)
+        ));
+        let import_executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_executed = Arc::clone(&import_executed);
+        let cancellation = CancellationToken::new();
+        let capability = primary
+            .admit_invocation("file_import", &cancellation)
+            .await
+            .expect("invocation admission");
+        let receiver = primary
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async move {
+                    Some(
+                        other.supervise_import_settlement(key, admission, async move {
+                            task_executed.store(true, Ordering::SeqCst);
+                            Err(ArtifactToolError::Upstream)
+                        }),
+                    )
+                }),
+            )
+            .await
+            .expect("invocation result")
+            .expect("supervisor receiver");
+        assert!(matches!(
+            receiver.await,
+            Ok(Err(ArtifactToolError::Indeterminate))
+        ));
+        assert!(!import_executed.load(Ordering::SeqCst));
+        assert_eq!(primary.permits.available_permits(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn profile_selection_uses_candidates_from_one_anchor() {
+        let anchor =
+            InvocationAnchor::capture_durations(Duration::from_secs(30), Duration::from_secs(300));
+        assert_eq!(
+            anchor.select_tool("artifact_status").deadline(),
+            anchor.ordinary
+        );
+        for tool in LONG_ARTIFACT_TOOLS {
+            assert_eq!(
+                anchor.select_tool(tool).deadline(),
+                anchor.artifact,
+                "{tool}"
+            );
+        }
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(tokio::time::Instant::now(), anchor.ordinary);
+        assert_eq!(
+            anchor.artifact.duration_since(anchor.ordinary),
+            Duration::from_secs(270)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invocation_deadline_covers_permit_wait_and_preserves_dispatch_stage() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let held = runtime
+            .permits
+            .acquire()
+            .await
+            .expect("hold runtime permit");
+        let waiter_runtime = runtime.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_runtime
+                .admit_invocation("server_status", &CancellationToken::new())
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let failure = match waiter.await.expect("permit waiter join") {
+            Ok(_) => panic!("permit wait should expire"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.kind, ControlledFailureKind::TimedOut);
+        assert!(!failure.dispatched);
+        drop(held);
+
+        let capability = runtime
+            .admit_invocation("object_create", &CancellationToken::new())
+            .await
+            .expect("mutation admission");
+        let task_runtime = runtime.clone();
+        let running = tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            let marker_runtime = task_runtime.clone();
+            let operation = Box::pin(async move {
+                mark_invocation_dispatched(&marker_runtime).expect("dispatch");
+                std::future::pending::<()>().await;
+            });
+            task_runtime
+                .run_invocation(capability, &cancellation, operation)
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let failure = running
+            .await
+            .expect("invocation join")
+            .expect_err("invocation expires");
+        assert_eq!(failure.kind, ControlledFailureKind::TimedOut);
+        assert!(failure.dispatched);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_invocation_result_wins_at_exact_deadline() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("server_status", &cancellation)
+            .await
+            .expect("admit invocation");
+        let deadline = capability.deadline;
+        let running_runtime = runtime.clone();
+        let running = tokio::spawn(async move {
+            running_runtime
+                .run_invocation(
+                    capability,
+                    &cancellation,
+                    Box::pin(async move {
+                        tokio::time::sleep_until(deadline).await;
+                        42_u8
+                    }),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            running
+                .await
+                .expect("invocation join")
+                .expect("ready result"),
+            42
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_or_cancelled_capability_is_rejected_before_operation_poll() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("object_create", &cancellation)
+            .await
+            .expect("admit invocation");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_polled = Arc::clone(&polled);
+        let failure = runtime
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async move {
+                    operation_polled.store(true, Ordering::SeqCst);
+                }),
+            )
+            .await
+            .expect_err("expired invocation");
+        assert_eq!(failure.kind, ControlledFailureKind::TimedOut);
+        assert!(!failure.dispatched);
+        assert!(!polled.load(Ordering::SeqCst));
+
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("object_create", &cancellation)
+            .await
+            .expect("admit invocation");
+        cancellation.cancel();
+        let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_polled = Arc::clone(&polled);
+        let failure = runtime
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async move {
+                    operation_polled.store(true, Ordering::SeqCst);
+                }),
+            )
+            .await
+            .expect_err("cancelled invocation");
+        assert_eq!(failure.kind, ControlledFailureKind::Cancelled);
+        assert!(!failure.dispatched);
+        assert!(!polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exact_expiry_rejects_dispatch_but_ready_operation_result_wins() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("object_create", &cancellation)
+            .await
+            .expect("admit invocation");
+        let deadline = capability.deadline();
+        let sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_sent = Arc::clone(&sent);
+        let running_runtime = runtime.clone();
+        let marker_runtime = runtime.clone();
+        let running = tokio::spawn(async move {
+            running_runtime
+                .run_invocation(
+                    capability,
+                    &cancellation,
+                    Box::pin(async move {
+                        tokio::time::sleep_until(deadline).await;
+                        if mark_invocation_dispatched(&marker_runtime).is_ok() {
+                            operation_sent.store(true, Ordering::SeqCst);
+                        }
+                        "ready"
+                    }),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            running
+                .await
+                .expect("invocation join")
+                .expect("ready result"),
+            "ready"
+        );
+        assert!(!sent.load(Ordering::SeqCst));
     }
 }

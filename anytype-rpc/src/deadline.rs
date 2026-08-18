@@ -24,6 +24,10 @@ use tonic::{
     metadata::{Ascii, MetadataMap, MetadataValue},
 };
 
+tokio::task_local! {
+    static ENCLOSING_DEADLINE: GrpcEnclosingDeadline;
+}
+
 /// Process environment variable that overrides inherited gRPC deadlines.
 pub const ANYTYPE_GRPC_TIMEOUT_SECS: &str = "ANYTYPE_GRPC_TIMEOUT_SECS";
 /// Largest credential, ordinary, setup, idle, or lifetime deadline.
@@ -406,6 +410,17 @@ impl GrpcEnclosingDeadline {
     pub const fn instant(self) -> tokio::time::Instant {
         self.0
     }
+}
+
+/// Runs gRPC work under one caller-owned absolute deadline.
+///
+/// The deadline is applied by the transport layer to every generated call,
+/// including credential setup and calls whose request options are inferred.
+pub async fn scope_grpc_enclosing_deadline<F, T>(deadline: GrpcEnclosingDeadline, operation: F) -> T
+where
+    F: Future<Output = T>,
+{
+    ENCLOSING_DEADLINE.scope(deadline, operation).await
 }
 
 /// Per-request profile, outcome, and optional enclosing budget.
@@ -854,11 +869,19 @@ where
     }
 
     fn call(&mut self, mut request: http::Request<Body>) -> Self::Future {
-        let options = request
+        let mut options = request
             .extensions()
             .get::<GrpcCallOptions>()
             .copied()
             .unwrap_or_else(|| inferred_call_options(request.extensions().get::<GrpcMethod>()));
+        if let Ok(scoped) = ENCLOSING_DEADLINE.try_with(|deadline| *deadline) {
+            options.enclosing = Some(match options.enclosing {
+                Some(explicit) => {
+                    GrpcEnclosingDeadline::from_instant(explicit.instant().min(scoped.instant()))
+                }
+                None => scoped,
+            });
+        }
         let started = tokio::time::Instant::now();
         let caller_deadline = match request.headers().get(GRPC_TIMEOUT_HEADER) {
             Some(value) => match parse_grpc_timeout(value) {
@@ -2595,6 +2618,39 @@ mod tests {
         ));
         let source = error.source().expect("payload-free deadline source");
         assert!(!format!("{source:?}").contains("SECRET"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scoped_enclosing_deadline_caps_generated_header_and_local_wait() {
+        let (inner, calls, header) = scripted_service();
+        let mut service = GrpcDeadlineService::try_new(
+            inner,
+            GrpcTimeoutPolicy {
+                ordinary_unary: Some(Duration::from_secs(120)),
+                ..GrpcTimeoutPolicy::default()
+            },
+        )
+        .expect("valid policy");
+        let enclosing = GrpcEnclosingDeadline::from_now(Duration::from_secs(3))
+            .expect("representable enclosing deadline");
+        let call = tokio::spawn(async move {
+            scope_grpc_enclosing_deadline(enclosing, async move {
+                service.call(http::Request::new(Body::empty())).await
+            })
+            .await
+        });
+
+        assert_eq!(
+            header.await.expect("captured header").as_deref(),
+            Some("3000000u")
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(matches!(
+            call.await.expect("service task").expect_err("local timeout"),
+            GrpcDeadlineServiceError::Deadline(ref status)
+                if status.code() == Code::DeadlineExceeded
+        ));
     }
 
     #[tokio::test(start_paused = true)]

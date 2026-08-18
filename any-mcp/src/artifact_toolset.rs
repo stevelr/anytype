@@ -1265,7 +1265,13 @@ async fn roots(runtime: &RuntimeContext) -> Result<EffectiveRootRegistry, Artifa
         .ok_or(ArtifactToolError::MissingRoots)?;
     runtime
         .client_roots()
-        .effective(registry, runtime.request_timeout())
+        .effective(
+            registry,
+            runtime
+                .invocation_deadline()
+                .saturating_duration_since(std::time::Instant::now())
+                .min(runtime.request_timeout()),
+        )
         .await
         .map_err(|error| classify_root_error(&error))
 }
@@ -1956,10 +1962,10 @@ async fn file_import(
     }
     let owned_runtime = runtime.clone();
     let owned_cancellation = CancellationToken::new();
-    let operation_timeout = runtime.artifact_config().limits.operation_timeout;
+    let operation_deadline = runtime.invocation_deadline();
     let receiver = runtime.supervise_import_settlement(key, settlement_permit, async move {
-        match tokio::time::timeout(
-            operation_timeout,
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(operation_deadline),
             settle_reserved_import(
                 owned_runtime.clone(),
                 source,
@@ -2038,10 +2044,7 @@ async fn settle_reserved_import(
     if let Some(media_type) = declared_media_type.as_ref() {
         request = request.mime(media_type);
     }
-    if let Err(error) = source.mark_import_dispatched(&runtime).await {
-        runtime.artifact_operations().remove(key).await;
-        return Err(error);
-    }
+    begin_durable_artifact_dispatch(&runtime, key, source.mark_import_dispatched(&runtime)).await?;
     let uploaded = match request.upload().await {
         Ok(uploaded) => uploaded,
         Err(error) if mutation_rejection_is_definitive(&error) => {
@@ -2533,6 +2536,8 @@ async fn file_export(
                     return Err(error);
                 }
             };
+            crate::runtime::mark_invocation_dispatched(runtime)
+                .map_err(|_| ArtifactToolError::Upstream)?;
             let allocation = match staging
                 .allocate_export(
                     space_id.clone(),
@@ -2820,6 +2825,28 @@ impl PreparedDocument {
             .map_err(classify_staging_error)?;
         Ok(true)
     }
+}
+
+async fn begin_durable_artifact_dispatch<F>(
+    runtime: &RuntimeContext,
+    key: [u8; 32],
+    local_transition: F,
+) -> Result<(), ArtifactToolError>
+where
+    F: Future<Output = Result<(), ArtifactToolError>>,
+{
+    if crate::runtime::mark_invocation_dispatched(runtime).is_err() {
+        runtime.artifact_operations().remove(key).await;
+        return Err(ArtifactToolError::Upstream);
+    }
+    if local_transition.await.is_err() {
+        runtime
+            .artifact_operations()
+            .set_outcome(key, OperationOutcome::Indeterminate)
+            .await;
+        return Err(ArtifactToolError::Indeterminate);
+    }
+    Ok(())
 }
 
 async fn verify_document_source_before_dispatch(
@@ -3243,10 +3270,7 @@ async fn document_import_create(
         &source,
     )
     .await?;
-    if let Err(error) = source.mark_staged_dispatched(runtime).await {
-        runtime.artifact_operations().remove(key).await;
-        return Err(error);
-    }
+    begin_durable_artifact_dispatch(runtime, key, source.mark_staged_dispatched(runtime)).await?;
     let created = match request.create().await {
         Ok(created) => created,
         Err(error) if mutation_rejection_is_definitive(&error) => {
@@ -3485,10 +3509,7 @@ async fn document_import_update(
         &source,
     )
     .await?;
-    if let Err(error) = source.mark_staged_dispatched(runtime).await {
-        runtime.artifact_operations().remove(key).await;
-        return Err(error);
-    }
+    begin_durable_artifact_dispatch(runtime, key, source.mark_staged_dispatched(runtime)).await?;
     let updated = match runtime
         .client()
         .update_object(space_id.as_str(), object_id.as_str())
@@ -3805,6 +3826,8 @@ async fn document_export(
                     return Err(error);
                 }
             };
+            crate::runtime::mark_invocation_dispatched(runtime)
+                .map_err(|_| ArtifactToolError::Upstream)?;
             let allocation = match staging
                 .allocate_export(space_id.clone(), size, Some("text/markdown".to_owned()))
                 .await
@@ -3916,6 +3939,7 @@ async fn stage_allocate(
     }
     let media_type = normalize_media_type(input.media_type.as_ref().map(String::as_str))?;
     let space_id = resolve_space(runtime.client(), &input.space).await?;
+    crate::runtime::mark_invocation_dispatched(runtime).map_err(|_| ArtifactToolError::Upstream)?;
     let allocation = staging(runtime)?
         .allocate_import(
             space_id,
@@ -3942,6 +3966,7 @@ async fn stage_release(
     if runtime.is_read_only() {
         return Err(ArtifactToolError::ReadOnly);
     }
+    crate::runtime::mark_invocation_dispatched(runtime).map_err(|_| ArtifactToolError::Upstream)?;
     staging(runtime)?
         .release(&input.handle)
         .await
@@ -4185,8 +4210,8 @@ where
             );
             Err(ArtifactToolError::Indeterminate)
         },
-        result = tokio::time::timeout(
-            runtime.artifact_config().limits.operation_timeout,
+        result = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(runtime.invocation_deadline()),
             operation,
         ) => match result {
             Ok(result) => result,
@@ -4229,7 +4254,186 @@ fn decode_arguments<T: for<'de> Deserialize<'de>>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use anytype::prelude::{AnytypeClient, ClientConfig};
+
     use super::*;
+    use crate::runtime::{InvocationAnchor, StartupStatus};
+
+    fn dispatch_test_runtime(timeout: std::time::Duration) -> RuntimeContext {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("any-mcp-artifact-dispatch-test".to_owned()),
+            app_name: "any-mcp-artifact-dispatch-test".to_owned(),
+            ..ClientConfig::default()
+        })
+        .expect("test client");
+        RuntimeContext::from_parts(
+            client,
+            1,
+            timeout,
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+        )
+    }
+
+    async fn admit_artifact_test_invocation(
+        runtime: &RuntimeContext,
+        tool_name: &str,
+        cancellation: &CancellationToken,
+        timeout: std::time::Duration,
+    ) -> crate::runtime::InvocationCapability {
+        runtime
+            .scope_ingress(
+                InvocationAnchor::capture_durations(timeout, timeout),
+                runtime.admit_invocation(tool_name, cancellation),
+            )
+            .await
+            .expect("artifact invocation admission")
+    }
+
+    async fn run_between_dispatch_transition_race(tool_name: &'static str, cancel: bool) {
+        let timeout = std::time::Duration::from_millis(50);
+        let runtime = dispatch_test_runtime(timeout);
+        let cancellation = CancellationToken::new();
+        let capability =
+            admit_artifact_test_invocation(&runtime, tool_name, &cancellation, timeout).await;
+        let deadline = capability.deadline();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let local_transition_ran = Arc::new(AtomicBool::new(false));
+        let supervisor_runtime = runtime.clone();
+        let operation_runtime = runtime.clone();
+        let operation_cancellation = cancellation.clone();
+        let transition_entered = Arc::clone(&entered);
+        let transition_release = Arc::clone(&release);
+        let transition_ran = Arc::clone(&local_transition_ran);
+        let key = digest_fields(b"dispatch-transition-test", &[tool_name.as_bytes()]);
+        assert!(matches!(
+            runtime
+                .artifact_operations()
+                .reserve_import(key, [91; 32])
+                .await,
+            Ok(ImportIdempotency::Dispatch)
+        ));
+        let (supervisor_sender, supervisor_receiver) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(async move {
+            operation_runtime
+                .run_invocation(
+                    capability,
+                    &operation_cancellation,
+                    Box::pin(async move {
+                        let durable_runtime = supervisor_runtime.clone();
+                        let supervisor =
+                            supervisor_runtime.spawn_invocation_supervisor(async move {
+                                begin_durable_artifact_dispatch(&durable_runtime, key, async move {
+                                    transition_entered.notify_one();
+                                    transition_release.notified().await;
+                                    transition_ran.store(true, Ordering::SeqCst);
+                                    Ok(())
+                                })
+                                .await
+                            });
+                        let _ = supervisor_sender.send(supervisor);
+                        std::future::pending::<()>().await;
+                    }),
+                )
+                .await
+        });
+        let supervisor = supervisor_receiver.await.expect("supervisor handle");
+        entered.notified().await;
+        if cancel {
+            cancellation.cancel();
+        } else {
+            tokio::time::sleep_until(deadline).await;
+        }
+        let failure = running
+            .await
+            .expect("invocation join")
+            .expect_err("parent terminal event wins");
+        assert_eq!(
+            failure.kind,
+            if cancel {
+                ControlledFailureKind::Cancelled
+            } else {
+                ControlledFailureKind::TimedOut
+            }
+        );
+        assert!(failure.dispatched);
+        assert!(!local_transition_ran.load(Ordering::SeqCst));
+        release.notify_one();
+        assert_eq!(
+            supervisor.await.expect("supervisor join"),
+            Ok(()),
+            "{tool_name} local durable transition"
+        );
+        assert!(local_transition_ran.load(Ordering::SeqCst));
+        let recovery_cancellation = CancellationToken::new();
+        let recovery = runtime
+            .admit_invocation("server_status", &recovery_cancellation)
+            .await
+            .expect("invocation capacity recovered");
+        drop(recovery);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn artifact_deadline_between_global_and_local_dispatch_is_indeterminate() {
+        for tool_name in [FILE_IMPORT, DOCUMENT_IMPORT_CREATE, DOCUMENT_IMPORT_UPDATE] {
+            run_between_dispatch_transition_race(tool_name, false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn artifact_cancellation_between_global_and_local_dispatch_is_indeterminate() {
+        for tool_name in [FILE_IMPORT, DOCUMENT_IMPORT_CREATE, DOCUMENT_IMPORT_UPDATE] {
+            run_between_dispatch_transition_race(tool_name, true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn local_dispatch_failure_after_global_claim_is_indeterminate() {
+        for tool_name in [FILE_IMPORT, DOCUMENT_IMPORT_CREATE, DOCUMENT_IMPORT_UPDATE] {
+            let runtime = dispatch_test_runtime(std::time::Duration::from_secs(1));
+            let cancellation = CancellationToken::new();
+            let capability = admit_artifact_test_invocation(
+                &runtime,
+                tool_name,
+                &cancellation,
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+            let key = digest_fields(b"dispatch-local-failure", &[tool_name.as_bytes()]);
+            assert!(matches!(
+                runtime
+                    .artifact_operations()
+                    .reserve_import(key, [92; 32])
+                    .await,
+                Ok(ImportIdempotency::Dispatch)
+            ));
+            let result = runtime
+                .run_invocation(
+                    capability,
+                    &cancellation,
+                    Box::pin(begin_durable_artifact_dispatch(&runtime, key, async {
+                        Err(ArtifactToolError::NotFound)
+                    })),
+                )
+                .await
+                .expect("operation result");
+            assert_eq!(result, Err(ArtifactToolError::Indeterminate));
+            assert!(matches!(
+                runtime
+                    .artifact_operations()
+                    .reserve_import(key, [92; 32])
+                    .await,
+                Err(ArtifactToolError::Indeterminate)
+            ));
+        }
+    }
 
     #[test]
     fn contracts_are_closed_and_payload_free() {

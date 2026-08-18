@@ -260,8 +260,8 @@ async fn object_archive_with_verifier<Verify, VerifyFuture>(
     verify: Verify,
 ) -> CallToolResult
 where
-    Verify: FnOnce(AnytypeClient, VerifyConfig, ArchiveIdentity) -> VerifyFuture,
-    VerifyFuture: Future<Output = Result<(), AnytypeError>>,
+    Verify: FnOnce(AnytypeClient, VerifyConfig, ArchiveIdentity) -> VerifyFuture + Send,
+    VerifyFuture: Future<Output = Result<(), AnytypeError>> + Send,
 {
     if let Err(error) = require_mutation_access(access) {
         return tool_error(error.tool_error());
@@ -289,7 +289,7 @@ where
             .await?;
         let identity = checked_preflight_identity(current, space_id, object_id)?;
 
-        operation_progress.mark_dispatched();
+        operation_progress.mark_dispatched(runtime)?;
         match client
             .object(identity.space_id.as_str(), identity.object_id.as_str())
             .delete_once()
@@ -306,7 +306,7 @@ where
             .map_err(|_| HandlerError::new(ToolError::mutation_indeterminate()))?;
         Ok::<_, HandlerOperationError>(archive_output(&identity))
     });
-    execute_mutation_handler(
+    let operation = execute_mutation_handler(
         runtime,
         contract,
         OperationContext::new("object_archive"),
@@ -314,8 +314,15 @@ where
         &progress,
         operation,
         |output| async move { Ok(output) },
-    )
-    .await
+    );
+    let routed = runtime
+        .run_routed_invocation("object_archive", cancellation, Box::pin(operation))
+        .await;
+    match routed {
+        Ok(result) => result,
+        Err(failure) if failure.dispatched => tool_error(&ToolError::mutation_indeterminate()),
+        Err(_) => tool_error(&ToolError::upstream()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
