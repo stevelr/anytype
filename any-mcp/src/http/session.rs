@@ -72,9 +72,6 @@ const INITIALIZE_ACCEPTED_VERSIONS: [&str; 4] =
 const SSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// Reviewed `rmcp` SSE retry hint.
 const SSE_RETRY: Duration = Duration::from_secs(3);
-/// Idle margin added to `rmcp`'s five-minute session keep-alive before the
-/// principal binding and its admission permit are swept.
-const SESSION_SWEEP_AFTER: Duration = Duration::from_secs(300 + 60);
 /// Bounded number of cached per-principal server facades.
 const MAX_PRINCIPAL_SERVERS: usize = 64;
 
@@ -141,14 +138,13 @@ impl PrincipalServers {
 struct SessionEntry {
     principal: AuthorizedPrincipal,
     _permit: OwnedSemaphorePermit,
-    last_seen: Instant,
 }
 
 /// Principal-bound session registry enforcing the process session ceiling.
 ///
 /// Admission is reserved before `rmcp` creates a session and released
 /// exactly once when the binding is dropped: on failed initialize, DELETE,
-/// idle sweep, or process shutdown.
+/// reconciliation with `rmcp`'s session manager, or process shutdown.
 pub(crate) struct SessionRegistry {
     permits: Arc<Semaphore>,
     sessions: Mutex<HashMap<String, SessionEntry>>,
@@ -183,7 +179,6 @@ impl SessionRegistry {
             SessionEntry {
                 principal,
                 _permit: permit,
-                last_seen: Instant::now(),
             },
         );
     }
@@ -193,49 +188,31 @@ impl SessionRegistry {
     /// An unknown session and another principal's session are
     /// indistinguishable: both report absent.
     fn validate(&self, session_id: &str, principal: &AuthorizedPrincipal) -> bool {
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sessions
+            .get(session_id)
+            .is_some_and(|entry| &entry.principal == principal)
+    }
+
+    /// Removes one binding if still present, releasing its slot at most once.
+    fn remove(&self, session_id: &str) -> bool {
         let mut sessions = self
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match sessions.get_mut(session_id) {
-            Some(entry) if &entry.principal == principal => {
-                entry.last_seen = Instant::now();
-                true
-            }
-            _ => false,
-        }
+        sessions.remove(session_id).is_some()
     }
 
-    /// Removes one binding, releasing its session slot exactly once.
-    fn remove(&self, session_id: &str) {
-        let mut sessions = self
+    /// Snapshots bound IDs without holding the registry lock across I/O.
+    fn session_ids(&self) -> Vec<String> {
+        let sessions = self
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        sessions.remove(session_id);
-    }
-
-    /// Sweeps bindings idle past the `rmcp` keep-alive plus margin.
-    fn sweep(&self) -> Vec<String> {
-        self.sweep_at(Instant::now())
-    }
-
-    fn sweep_at(&self, now: Instant) -> Vec<String> {
-        let mut sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let expired = sessions
-            .iter()
-            .filter(|(_, entry)| {
-                now.saturating_duration_since(entry.last_seen) >= SESSION_SWEEP_AFTER
-            })
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for id in &expired {
-            sessions.remove(id);
-        }
-        expired
+        sessions.keys().cloned().collect()
     }
 
     #[cfg(test)]
@@ -250,6 +227,7 @@ pub(crate) struct StableBackend {
     session_manager: Arc<LocalSessionManager>,
     servers: PrincipalServers,
     registry: SessionRegistry,
+    reconciliation: tokio::sync::Mutex<()>,
 }
 
 impl StableBackend {
@@ -318,6 +296,7 @@ impl StableBackend {
             session_manager,
             servers: PrincipalServers::new(runtime),
             registry: SessionRegistry::new(config.max_sessions),
+            reconciliation: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -330,16 +309,56 @@ impl StableBackend {
         self.registry.available_slots()
     }
 
-    /// Handles one admitted stable-mode request.
-    pub(crate) async fn call(self: Arc<Self>, admitted: AdmittedRequest) -> Response<HttpBody> {
-        // Reclaim bindings whose rmcp sessions idled out.
-        for expired in self.registry.sweep() {
-            let manager = self.session_manager.clone();
-            tokio::spawn(async move {
-                let _ = manager.close_session(&expired.into()).await;
-            });
+    /// Reserves a session slot, reconciling stale registry bindings only when
+    /// the fast admission path finds the process ceiling full.
+    async fn reserve_session_slot(&self) -> Option<OwnedSemaphorePermit> {
+        if let Some(permit) = self.registry.try_reserve() {
+            return Some(permit);
         }
 
+        // Only one full-capacity caller probes rmcp at a time. Capacity may
+        // have been released while this caller waited, so recheck first.
+        let _reconciliation = self.reconciliation.lock().await;
+        if let Some(permit) = self.registry.try_reserve() {
+            return Some(permit);
+        }
+
+        let session_ids = self.registry.session_ids();
+        let checked = session_ids.len();
+        let mut absent = Vec::new();
+        let mut probe_errors = 0_usize;
+        for session_id in session_ids {
+            match self
+                .session_manager
+                .has_session(&session_id.clone().into())
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => absent.push(session_id),
+                Err(_) => probe_errors += 1,
+            }
+        }
+
+        // A concurrent DELETE may already have removed a binding. Conditional
+        // removal makes both paths idempotent and drops each permit at most
+        // once. Probe failures fail closed and retain their bindings.
+        let reclaimed = absent
+            .iter()
+            .filter(|session_id| self.registry.remove(session_id))
+            .count();
+        tracing::info!(
+            target: "any_mcp::http",
+            checked,
+            reclaimed,
+            probe_errors,
+            "http_session_reconciled"
+        );
+
+        self.registry.try_reserve()
+    }
+
+    /// Handles one admitted stable-mode request.
+    pub(crate) async fn call(self: Arc<Self>, admitted: AdmittedRequest) -> Response<HttpBody> {
         let AdmittedRequest {
             parts,
             body,
@@ -381,7 +400,7 @@ impl StableBackend {
             if !initialize_version_accepted(&body) {
                 return fixed_response(StatusCode::BAD_REQUEST, "Bad Request");
             }
-            match self.registry.try_reserve() {
+            match self.reserve_session_slot().await {
                 Some(permit) => Some(permit),
                 None => {
                     tracing::info!(target: "any_mcp::http", "http_capacity_rejected");
@@ -709,15 +728,28 @@ mod tests {
                 &alice,
             ))
             .await;
-        assert!(
-            deleted.status().is_success(),
-            "delete status {}",
-            deleted.status()
-        );
+        assert_eq!(deleted.status(), StatusCode::ACCEPTED);
         assert_eq!(backend.registry.available_slots(), 1);
 
-        // The deleted session is unknown afterwards, and the slot serves a
-        // new principal.
+        // DELETE releases the binding exactly once. Repeating it observes an
+        // unknown session and cannot release an additional permit.
+        let repeated_delete = backend
+            .clone()
+            .call(admitted(
+                Method::DELETE,
+                &[
+                    ("mcp-session-id", &session),
+                    ("mcp-protocol-version", "2025-11-25"),
+                ],
+                "",
+                &alice,
+            ))
+            .await;
+        assert_eq!(repeated_delete.status(), StatusCode::NOT_FOUND);
+        assert_eq!(backend.registry.available_slots(), 1);
+
+        // The deleted session remains unknown, and the slot serves a new
+        // principal.
         let gone = backend
             .clone()
             .call(admitted(
@@ -759,6 +791,132 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_initialize_reclaims_a_binding_absent_from_rmcp() {
+        let backend = backend(1);
+        let alice = principal("alice");
+        let stale_session = initialize_session(&backend, &alice).await;
+        assert_eq!(backend.registry.available_slots(), 0);
+
+        // Deterministically model rmcp's idle timeout: its worker owns the
+        // logical lifetime and removes the manager entry, while the admission
+        // binding remains until a full initialize reconciles the two stores.
+        backend
+            .session_manager
+            .close_session(&stale_session.clone().into())
+            .await
+            .expect("remove rmcp session");
+        assert!(
+            !backend
+                .session_manager
+                .has_session(&stale_session.clone().into())
+                .await
+                .expect("probe removed rmcp session")
+        );
+
+        let bob = principal("bob");
+        let replacement = initialize_session(&backend, &bob).await;
+        assert_ne!(replacement, stale_session);
+        assert_eq!(backend.registry.available_slots(), 0);
+
+        let gone = backend
+            .clone()
+            .call(admitted(
+                Method::POST,
+                &[
+                    ("mcp-session-id", &stale_session),
+                    ("mcp-protocol-version", "2025-11-25"),
+                ],
+                "{}",
+                &alice,
+            ))
+            .await;
+        assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stale_ceiling_one_reconciliation_admits_exactly_one_contender() {
+        const CONTENDERS: usize = 12;
+
+        let backend = backend(1);
+        let stale_session = initialize_session(&backend, &principal("stale-owner")).await;
+        backend
+            .session_manager
+            .close_session(&stale_session.into())
+            .await
+            .expect("remove stale rmcp session");
+
+        let start = Arc::new(tokio::sync::Barrier::new(CONTENDERS));
+        let mut contenders = Vec::with_capacity(CONTENDERS);
+        for index in 0..CONTENDERS {
+            let backend = backend.clone();
+            let start = start.clone();
+            contenders.push(tokio::spawn(async move {
+                let caller = principal(&format!("contender-{index}"));
+                start.wait().await;
+                let response = backend
+                    .call(admitted(
+                        Method::POST,
+                        &[],
+                        &initialize_body("2025-11-25"),
+                        &caller,
+                    ))
+                    .await;
+                let session = response
+                    .headers()
+                    .get(SESSION_ID_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let retry_after = response
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                (response.status(), session, retry_after, caller)
+            }));
+        }
+
+        let mut admitted_contender = None;
+        let mut rejected = 0_usize;
+        for contender in contenders {
+            let (status, session, retry_after, caller) = contender.await.expect("contender join");
+            match status {
+                StatusCode::OK => {
+                    assert!(
+                        admitted_contender.is_none(),
+                        "only one contender may take the slot"
+                    );
+                    assert!(retry_after.is_none());
+                    admitted_contender = Some((session.expect("admitted session id"), caller));
+                }
+                StatusCode::SERVICE_UNAVAILABLE => {
+                    assert!(session.is_none(), "a shed initialize must issue no session");
+                    assert_eq!(retry_after.as_deref(), Some("60"));
+                    rejected += 1;
+                }
+                other => panic!("unexpected initialize status {other}"),
+            }
+        }
+
+        assert_eq!(rejected, CONTENDERS - 1);
+        assert_eq!(backend.registry.available_slots(), 0);
+        let (session, caller) = admitted_contender.expect("one admitted contender");
+        let deleted = backend
+            .clone()
+            .call(admitted(
+                Method::DELETE,
+                &[
+                    ("mcp-session-id", &session),
+                    ("mcp-protocol-version", "2025-11-25"),
+                ],
+                "",
+                &caller,
+            ))
+            .await;
+        assert_eq!(deleted.status(), StatusCode::ACCEPTED);
+        assert_eq!(backend.registry.available_slots(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sessionless_get_and_delete_take_rmcp_fixed_statuses() {
         let backend = backend(2);
         let alice = principal("alice");
@@ -769,21 +927,6 @@ mod tests {
         );
         let response = backend.clone().call(get).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn registry_sweep_releases_slots_only_after_the_idle_margin() {
-        let registry = SessionRegistry::new(2);
-        let permit = registry.try_reserve().expect("reserve");
-        registry.bind("session-1".to_owned(), principal("alice"), permit);
-        assert_eq!(registry.available_slots(), 1);
-
-        let now = Instant::now();
-        assert!(registry.sweep_at(now + Duration::from_secs(300)).is_empty());
-        let swept = registry.sweep_at(now + SESSION_SWEEP_AFTER + Duration::from_secs(1));
-        assert_eq!(swept, vec!["session-1".to_owned()]);
-        assert_eq!(registry.available_slots(), 2);
-        assert!(!registry.validate("session-1", &principal("alice")));
     }
 
     #[test]
