@@ -594,6 +594,25 @@ impl StdioDriver {
     #[cfg(feature = "acceptance-harness")]
     fn initialize_with_client_roots(&mut self, roots: &[&Path]) -> Result<Arc<AtomicU64>, String> {
         let requests = self.install_client_roots(roots)?;
+        self.initialize_advertising_client_roots()?;
+        Ok(requests)
+    }
+
+    /// Initializes stable stdio with one deliberately invalid roots snapshot.
+    #[cfg(feature = "acceptance-harness")]
+    fn initialize_with_invalid_client_roots(&mut self) -> Result<Arc<AtomicU64>, String> {
+        if self.options.preview {
+            return Err("client roots narrow stable stdio sessions only".to_owned());
+        }
+        let requests = self.process.install_client_roots(vec![json!({
+            "uri": "https://client-root.invalid/redacted-sentinel"
+        })]);
+        self.initialize_advertising_client_roots()?;
+        Ok(requests)
+    }
+
+    #[cfg(feature = "acceptance-harness")]
+    fn initialize_advertising_client_roots(&mut self) -> Result<(), String> {
         let initialized = self.request(
             "initialize",
             json!({
@@ -607,7 +626,7 @@ impl StdioDriver {
         }
         self.process
             .notification("notifications/initialized", json!({}));
-        Ok(requests)
+        Ok(())
     }
 
     /// Installs a client-root answer that this session must never be asked for.
@@ -6530,7 +6549,7 @@ fn assert_artifact_server_log_clean(
     audit
 }
 
-/// Runs the two client-root protocol rows on production stable stdio children.
+/// Runs the client-root authority rows on production stable stdio children.
 ///
 /// The rows share the spawned artifact matrix's disposable space, fixture
 /// discipline, and server-log audit, so a divergence between a narrowed and an
@@ -6557,6 +6576,9 @@ async fn run_artifact_client_roots_rows(
             .map_err(|_| sentinel_assertion("create client-roots acceptance policy"))?,
         );
         record_artifact_fixture_log_needle(&policy, audit_needles)?;
+        if mode == ArtifactClientRootsMode::DisabledSnapshot {
+            record_artifact_log_needle(audit_needles, b"redacted-sentinel")?;
+        }
         let record = cleanup
             .get(index)
             .ok_or_else(|| sentinel_assertion("client-roots cleanup record missing"))?;
@@ -6571,12 +6593,20 @@ async fn run_artifact_client_roots_rows(
             let driver = guard
                 .as_mut()
                 .ok_or_else(|| sentinel_assertion("registered client-roots child disappeared"))?;
-            let roots = [policy.import_root()];
             match mode {
                 ArtifactClientRootsMode::ImportIntersection => {
+                    let roots = [policy.import_root()];
                     driver.initialize_with_client_roots(&roots)
                 }
+                ArtifactClientRootsMode::NestedIntersection => {
+                    let roots = [policy.local_roots_parent(), policy.import_root()];
+                    driver.initialize_with_client_roots(&roots)
+                }
+                ArtifactClientRootsMode::DisabledSnapshot => {
+                    driver.initialize_with_invalid_client_roots()
+                }
                 ArtifactClientRootsMode::StaticFallback => {
+                    let roots = [policy.import_root()];
                     let installed = driver.install_client_roots(&roots);
                     driver.initialize();
                     installed
@@ -6622,7 +6652,7 @@ async fn run_artifact_client_roots_rows(
 /// Each spawned control plane owns a private strict policy, exports through
 /// both data planes, and contributes one content-free evidence record. The
 /// records are compared for exact parity after every child has stopped. The
-/// same disposable space then carries the two client-root protocol rows.
+/// same disposable space then carries the client-root authority rows.
 #[cfg(feature = "acceptance-harness")]
 async fn run_artifacts_real_workflow() -> OptionalRealWorkflowRun {
     let cleanup: [Arc<Mutex<ChildCleanupRecord>>;

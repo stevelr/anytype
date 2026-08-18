@@ -435,6 +435,32 @@ impl fmt::Debug for EffectiveRootRegistry {
 }
 
 impl EffectiveRootRegistry {
+    /// Returns the number of import roots retained by this effective policy.
+    #[must_use]
+    pub(crate) fn import_root_count(&self) -> usize {
+        self.effective_root_count(RootCapabilityKind::Import)
+    }
+
+    /// Returns the number of export roots retained by this effective policy.
+    #[must_use]
+    pub(crate) fn export_root_count(&self) -> usize {
+        self.effective_root_count(RootCapabilityKind::Export)
+    }
+
+    fn effective_root_count(&self, kind: RootCapabilityKind) -> usize {
+        self.registry
+            .roots
+            .iter()
+            .filter(|(id, capability)| {
+                capability.kind == kind
+                    && self
+                        .client_allowed
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(*id))
+            })
+            .count()
+    }
+
     /// Opens one existing import file beneath an authorized retained root.
     ///
     /// # Errors

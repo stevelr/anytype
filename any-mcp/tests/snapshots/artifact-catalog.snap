@@ -152,6 +152,33 @@
       },
       "name": "artifact_status",
       "outputSchema": {
+        "$defs": {
+          "ArtifactLocalRootAuthority": {
+            "description": "Closed, path-free local-root authority categories.",
+            "oneOf": [
+              {
+                "const": "unavailable",
+                "description": "No local roots were activated for this process.",
+                "type": "string"
+              },
+              {
+                "const": "configured",
+                "description": "Every configured local root remains effective.",
+                "type": "string"
+              },
+              {
+                "const": "narrowed",
+                "description": "A valid client snapshot narrowed the configured roots.",
+                "type": "string"
+              },
+              {
+                "const": "disabled",
+                "description": "Client-root resolution failed closed for this session.",
+                "type": "string"
+              }
+            ]
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
         "properties": {
@@ -167,9 +194,9 @@
             "minimum": 0,
             "type": "integer"
           },
-          "local_roots_active": {
-            "description": "Whether local root capabilities were activated for this process.",
-            "type": "boolean"
+          "local_root_authority": {
+            "$ref": "#/$defs/ArtifactLocalRootAuthority",
+            "description": "Effective local-root authority for this session."
           },
           "staging_active": {
             "description": "Whether the supervised staging service is accepting requests.",
@@ -205,7 +232,7 @@
           }
         },
         "required": [
-          "local_roots_active",
+          "local_root_authority",
           "import_root_count",
           "export_root_count",
           "staging_configured",

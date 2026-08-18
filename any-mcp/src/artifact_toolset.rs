@@ -37,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 use crate::artifact_acceptance_gates::{ArtifactAcceptanceGatePoint, FirstChunkGateReader};
 
 use crate::{
+    artifact_client_roots::LocalRootAuthority,
     artifact_config::RelativeNativePath,
     artifact_roots::{
         AnchoredImport, AtomicExport, EffectiveRootRegistry, PositionalReader,
@@ -545,8 +546,8 @@ fn artifact_offset_schema(_: &mut SchemaGenerator) -> Schema {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ArtifactStatusOutput {
-    /// Whether local root capabilities were activated for this process.
-    local_roots_active: bool,
+    /// Effective local-root authority for this session.
+    local_root_authority: ArtifactLocalRootAuthority,
     /// Number of effective local import roots, without revealing their IDs.
     #[schemars(schema_with = "root_count_schema")]
     import_root_count: u32,
@@ -569,6 +570,31 @@ struct ArtifactStatusOutput {
     /// Number of validators whose executable and platform boundary were admitted.
     #[schemars(schema_with = "root_count_schema")]
     validator_available_count: u32,
+}
+
+/// Closed, path-free local-root authority categories.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ArtifactLocalRootAuthority {
+    /// No local roots were activated for this process.
+    Unavailable,
+    /// Every configured local root remains effective.
+    Configured,
+    /// A valid client snapshot narrowed the configured roots.
+    Narrowed,
+    /// Client-root resolution failed closed for this session.
+    Disabled,
+}
+
+impl From<LocalRootAuthority> for ArtifactLocalRootAuthority {
+    fn from(authority: LocalRootAuthority) -> Self {
+        match authority {
+            LocalRootAuthority::Unavailable => Self::Unavailable,
+            LocalRootAuthority::Configured => Self::Configured,
+            LocalRootAuthority::Narrowed => Self::Narrowed,
+            LocalRootAuthority::Disabled => Self::Disabled,
+        }
+    }
 }
 
 fn root_count_schema(_: &mut SchemaGenerator) -> Schema {
@@ -3950,18 +3976,34 @@ async fn stage_release(
 }
 
 async fn artifact_status(runtime: &RuntimeContext) -> ArtifactStatusOutput {
+    // Resolve local-root authority first. Stable stdio must begin or join its
+    // one terminal client-roots decision before unrelated staging awaits can
+    // delay the snapshot's absolute deadline.
+    let root_authority = match runtime.artifact_roots() {
+        Some(roots) => Some(
+            runtime
+                .client_roots()
+                .authority(roots, runtime.request_timeout())
+                .await,
+        ),
+        None => None,
+    };
     let (staging_available_bytes, staging_available_entries) = match runtime.artifact_staging() {
         Some(staging) => staging.available_quota().await,
         None => (0, 0),
     };
     ArtifactStatusOutput {
-        local_roots_active: runtime.artifact_roots().is_some(),
-        import_root_count: runtime
-            .artifact_roots()
-            .map_or(0, |roots| bounded_root_count(roots.import_root_count())),
-        export_root_count: runtime
-            .artifact_roots()
-            .map_or(0, |roots| bounded_root_count(roots.export_root_count())),
+        local_root_authority: root_authority
+            .as_ref()
+            .map_or(ArtifactLocalRootAuthority::Unavailable, |decision| {
+                decision.authority().into()
+            }),
+        import_root_count: root_authority.as_ref().map_or(0, |decision| {
+            bounded_root_count(decision.import_root_count())
+        }),
+        export_root_count: root_authority.as_ref().map_or(0, |decision| {
+            bounded_root_count(decision.export_root_count())
+        }),
         staging_configured: runtime
             .artifact_config()
             .staging()

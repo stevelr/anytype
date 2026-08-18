@@ -1613,6 +1613,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_clones_share_client_root_decisions_and_identity_forks_do_not() {
+        let runtime = runtime(1, Duration::from_secs(1));
+        let clone = runtime.clone();
+        let fork = runtime.fork_identity();
+
+        assert!(Arc::ptr_eq(&runtime.client_roots, &clone.client_roots));
+        assert!(!Arc::ptr_eq(&runtime.client_roots, &fork.client_roots));
+        assert!(!Arc::ptr_eq(&runtime.identity, &fork.identity));
+    }
+
+    #[test]
     fn artifact_generation_evidence_binds_canonical_space_policy() {
         let artifact = ArtifactConfig::default();
         let optional = OptionalToolsetSelection::default();

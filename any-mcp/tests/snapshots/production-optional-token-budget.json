@@ -5,37 +5,37 @@
     "compact_read_only": {
       "base_sha256": "a48ad91bbadf5998424432022add295fa273ac6584dc87032925c1ec303e452c",
       "base_tokens": 8369,
-      "selected_contribution_tokens": 12637,
-      "selected_sha256": "914060457c6d9604837d85a7a5f55efe92dc4e2955695c6838c14827dabc6cee",
-      "selected_tokens": 21006
+      "selected_contribution_tokens": 12746,
+      "selected_sha256": "f5e796c1d4d231a33f22285a393c3a7131ff47d5ebed007e322720a28987b8f3",
+      "selected_tokens": 21115
     },
     "compact_read_write": {
       "base_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
       "base_tokens": 9658,
-      "selected_contribution_tokens": 56191,
-      "selected_sha256": "d929ea49527dc82f157d2110561f93c0bc6e6c28a73cb40af565ce7538392a1f",
-      "selected_tokens": 65849
+      "selected_contribution_tokens": 56300,
+      "selected_sha256": "7a02c8d3d5ea8772633d943cea7df98b6572587a2f72d010a6a2597bcc46ccae",
+      "selected_tokens": 65958
     },
     "standard_read_only": {
       "base_sha256": "c1bef45de82bc2614a4981f1da260d01e29008d4ca1f7e41470803733f12a7e3",
       "base_tokens": 28880,
-      "selected_contribution_tokens": 12637,
-      "selected_sha256": "75f9bd8d221e8aa2b4b5f07bae341e201782a4a50a4238eed618f84aaa5383fb",
-      "selected_tokens": 41517
+      "selected_contribution_tokens": 12746,
+      "selected_sha256": "f4783901a0262cd6eca232d4a5049aea794631b1e7aaef72ac69bacf3393ee2c",
+      "selected_tokens": 41626
     },
     "standard_read_write": {
       "base_sha256": "4e03af8ea8a70e14b4d75cb4f3a979e3c871f0e784888b79a0ff38b820812342",
       "base_tokens": 36135,
-      "selected_contribution_tokens": 56191,
-      "selected_sha256": "4f5aed5ec47478216312b3b9e1695c6704505c811846000db65fcd560486b522",
-      "selected_tokens": 92326
+      "selected_contribution_tokens": 56300,
+      "selected_sha256": "0e3dff503c77c69a5c390ec4b30589dd6ccbbf7bf446c8144e14c2f77eabda49",
+      "selected_tokens": 92435
     }
   },
   "registry_budgets": {
     "artifacts": {
       "catalog_ceiling_tokens": 12000,
-      "domain_tokens": 8633,
-      "selected_contribution_tokens": 8889,
+      "domain_tokens": 8742,
+      "selected_contribution_tokens": 8998,
       "tool_count": 8
     },
     "body-blocks": {

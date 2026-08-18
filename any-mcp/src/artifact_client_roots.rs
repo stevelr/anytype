@@ -29,7 +29,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::Duration,
 };
@@ -37,7 +37,7 @@ use std::{
 #[allow(deprecated)]
 use rmcp::model::Root;
 use rmcp::{RoleServer, service::Peer};
-use tokio::sync::OnceCell;
+use tokio::sync::Notify;
 use url::Url;
 
 use crate::{
@@ -66,6 +66,31 @@ pub(crate) trait ClientRootsSource: Send + Sync {
 
     /// Requests exactly one `roots/list` snapshot.
     fn list_roots(&self) -> SnapshotFuture<'_>;
+}
+
+type IntersectionHandle = tokio::task::JoinHandle<Result<EffectiveRootRegistry, RootAccessError>>;
+
+/// Starts the bounded blocking client/static-root intersection.
+trait ClientRootsIntersection: Send + Sync {
+    fn spawn(
+        &self,
+        registry: RootRegistry,
+        paths: Vec<AbsoluteNativePath>,
+    ) -> Result<IntersectionHandle, ()>;
+}
+
+#[derive(Debug)]
+struct TokioClientRootsIntersection;
+
+impl ClientRootsIntersection for TokioClientRootsIntersection {
+    fn spawn(
+        &self,
+        registry: RootRegistry,
+        paths: Vec<AbsoluteNativePath>,
+    ) -> Result<IntersectionHandle, ()> {
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| ())?;
+        Ok(runtime.spawn_blocking(move || registry.intersect_client_roots(&paths)))
+    }
 }
 
 /// Production snapshot source backed by the initialized rmcp peer.
@@ -101,11 +126,196 @@ impl ClientRootsSource for PeerRootsSource {
 ///
 /// The gate is inert unless a transport enables it, so transports that do not
 /// carry a single terminal client session keep the static policy unchanged.
-#[derive(Default)]
 pub(crate) struct ClientRootsGate {
     enabled: AtomicBool,
     source: OnceLock<Arc<dyn ClientRootsSource>>,
-    decision: OnceCell<Option<EffectiveRootRegistry>>,
+    decision: OnceLock<Arc<DecisionSlot>>,
+    intersection: Arc<dyn ClientRootsIntersection>,
+}
+
+impl Default for ClientRootsGate {
+    fn default() -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+            source: OnceLock::new(),
+            decision: OnceLock::new(),
+            intersection: Arc::new(TokioClientRootsIntersection),
+        }
+    }
+}
+
+/// Path-free local-root authority reported by `artifact_status`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalRootAuthority {
+    /// Local roots cannot be used because none were activated.
+    Unavailable,
+    /// The complete configured root policy is effective.
+    Configured,
+    /// A valid client snapshot narrowed the configured root policy.
+    Narrowed,
+    /// Client-root resolution failed closed for this session.
+    Disabled,
+}
+
+/// One terminal root-authority decision shared by status and operations.
+#[derive(Clone, Debug)]
+pub(crate) struct RootAuthorityDecision {
+    authority: LocalRootAuthority,
+    effective: Option<EffectiveRootRegistry>,
+}
+
+impl RootAuthorityDecision {
+    fn unavailable(registry: &RootRegistry) -> Self {
+        Self {
+            authority: LocalRootAuthority::Unavailable,
+            effective: Some(registry.static_policy()),
+        }
+    }
+
+    fn configured(registry: &RootRegistry) -> Self {
+        Self {
+            authority: LocalRootAuthority::Configured,
+            effective: Some(registry.static_policy()),
+        }
+    }
+
+    fn narrowed(effective: EffectiveRootRegistry) -> Self {
+        Self {
+            authority: LocalRootAuthority::Narrowed,
+            effective: Some(effective),
+        }
+    }
+
+    fn disabled() -> Self {
+        Self {
+            authority: LocalRootAuthority::Disabled,
+            effective: None,
+        }
+    }
+
+    /// Returns the closed, path-free authority category.
+    pub(crate) const fn authority(&self) -> LocalRootAuthority {
+        self.authority
+    }
+
+    /// Returns the effective import-root count without revealing identities.
+    pub(crate) fn import_root_count(&self) -> usize {
+        self.effective
+            .as_ref()
+            .map_or(0, EffectiveRootRegistry::import_root_count)
+    }
+
+    /// Returns the effective export-root count without revealing identities.
+    pub(crate) fn export_root_count(&self) -> usize {
+        self.effective
+            .as_ref()
+            .map_or(0, EffectiveRootRegistry::export_root_count)
+    }
+
+    fn effective(&self) -> Result<EffectiveRootRegistry, RootAccessError> {
+        self.effective
+            .clone()
+            .ok_or_else(RootAccessError::client_roots)
+    }
+}
+
+/// Cancellation-independent publication slot for one session decision.
+struct DecisionSlot {
+    source: Option<Arc<dyn ClientRootsSource>>,
+    registry: RootRegistry,
+    deadline: tokio::time::Instant,
+    intersection: Arc<dyn ClientRootsIntersection>,
+    supervisor_started: AtomicBool,
+    publication: AtomicU8,
+    decision: OnceLock<RootAuthorityDecision>,
+    notify: Notify,
+}
+
+impl DecisionSlot {
+    const PENDING: u8 = 0;
+    const PUBLISHING: u8 = 1;
+    const PUBLISHED: u8 = 2;
+
+    fn new(
+        source: Option<Arc<dyn ClientRootsSource>>,
+        registry: RootRegistry,
+        deadline: tokio::time::Instant,
+        intersection: Arc<dyn ClientRootsIntersection>,
+    ) -> Self {
+        Self {
+            source,
+            registry,
+            deadline,
+            intersection,
+            supervisor_started: AtomicBool::new(false),
+            publication: AtomicU8::new(Self::PENDING),
+            decision: OnceLock::new(),
+            notify: Notify::new(),
+        }
+    }
+
+    fn start_supervisor(&self) -> bool {
+        self.supervisor_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn publish(&self, decision: RootAuthorityDecision) {
+        if self
+            .publication
+            .compare_exchange(
+                Self::PENDING,
+                Self::PUBLISHING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
+        let _ = self.decision.set(decision);
+        self.publication.store(Self::PUBLISHED, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) -> RootAuthorityDecision {
+        loop {
+            // Register before checking the terminal state so publication
+            // cannot land between the check and waiter registration.
+            let notified = self.notify.notified();
+            if self.publication.load(Ordering::Acquire) == Self::PUBLISHED
+                && let Some(decision) = self.decision.get()
+            {
+                return decision.clone();
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Publishes fail-closed authority when a detached supervisor is dropped.
+struct SupervisorPublicationGuard {
+    slot: Arc<DecisionSlot>,
+    armed: bool,
+}
+
+impl SupervisorPublicationGuard {
+    fn new(slot: Arc<DecisionSlot>) -> Self {
+        Self { slot, armed: true }
+    }
+
+    fn publish(mut self, decision: RootAuthorityDecision) {
+        self.slot.publish(decision);
+        self.armed = false;
+    }
+}
+
+impl Drop for SupervisorPublicationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.slot.publish(RootAuthorityDecision::disabled());
+        }
+    }
 }
 
 impl fmt::Debug for ClientRootsGate {
@@ -114,12 +324,25 @@ impl fmt::Debug for ClientRootsGate {
             .debug_struct("ClientRootsGate")
             .field("enabled", &self.is_enabled())
             .field("source_installed", &self.source.get().is_some())
-            .field("decision_frozen", &self.decision.initialized())
+            .field(
+                "decision_frozen",
+                &self.decision.get().is_some_and(|slot| {
+                    slot.publication.load(Ordering::Acquire) == DecisionSlot::PUBLISHED
+                }),
+            )
             .finish()
     }
 }
 
 impl ClientRootsGate {
+    #[cfg(test)]
+    fn with_intersection(intersection: Arc<dyn ClientRootsIntersection>) -> Self {
+        Self {
+            intersection,
+            ..Self::default()
+        }
+    }
+
     /// Enables client-root narrowing for this session.
     ///
     /// Only a transport that serves exactly one terminal client session may
@@ -165,39 +388,125 @@ impl ClientRootsGate {
         registry: &RootRegistry,
         timeout: Duration,
     ) -> Result<EffectiveRootRegistry, RootAccessError> {
-        if !self.is_enabled() {
-            return Ok(registry.static_policy());
-        }
-        self.decision
-            .get_or_init(|| self.resolve(registry, timeout))
-            .await
-            .clone()
-            .ok_or_else(RootAccessError::client_roots)
+        self.authority(registry, timeout).await.effective()
     }
 
-    async fn resolve(
+    /// Resolves the shared path-free status and operation authority decision.
+    pub(crate) async fn authority(
         &self,
         registry: &RootRegistry,
         timeout: Duration,
-    ) -> Option<EffectiveRootRegistry> {
-        let source = self.source.get()?;
-        if !source.advertises_roots() {
-            return Some(registry.static_policy());
+    ) -> RootAuthorityDecision {
+        if registry.import_root_count() == 0 && registry.export_root_count() == 0 {
+            return RootAuthorityDecision::unavailable(registry);
         }
-        let roots = tokio::time::timeout(timeout, source.list_roots())
-            .await
-            .ok()?
-            .ok()?;
-        let paths = parse_client_root_snapshot(&roots).ok()?;
-        // The intersection opens and walks every client root, so it runs on a
-        // blocking worker like every other artifact filesystem operation and a
-        // stalled mount cannot occupy an async worker thread. A blocking-worker
-        // failure is treated as an unusable snapshot, so the session denies
-        // local roots rather than falling back to the broader static policy.
-        let registry = registry.clone();
-        tokio::task::spawn_blocking(move || registry.intersect_client_roots(&paths).ok())
-            .await
-            .ok()?
+        if !self.is_enabled() {
+            return RootAuthorityDecision::configured(registry);
+        }
+
+        let deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(tokio::time::Instant::now);
+        let slot = self.decision_slot(registry, deadline);
+        if slot.start_supervisor() {
+            let supervisor_slot = Arc::clone(&slot);
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    let guard = SupervisorPublicationGuard::new(Arc::clone(&supervisor_slot));
+                    let supervisor = runtime.spawn(async move {
+                        let mut decision = resolve_authority(
+                            supervisor_slot.source.clone(),
+                            supervisor_slot.registry.clone(),
+                            supervisor_slot.deadline,
+                            Arc::clone(&supervisor_slot.intersection),
+                        )
+                        .await;
+                        // Expiry wins at equality, including when the final operation
+                        // became ready on the same scheduler tick.
+                        if tokio::time::Instant::now() >= supervisor_slot.deadline {
+                            decision = RootAuthorityDecision::disabled();
+                        }
+                        guard.publish(decision);
+                    });
+                    // DecisionSlot owns the completion signal, so the task
+                    // handle is deliberately detached from every waiter.
+                    drop(supervisor);
+                }
+                Err(_) => supervisor_slot.publish(RootAuthorityDecision::disabled()),
+            }
+        }
+        slot.wait().await
+    }
+
+    fn decision_slot(
+        &self,
+        registry: &RootRegistry,
+        deadline: tokio::time::Instant,
+    ) -> Arc<DecisionSlot> {
+        Arc::clone(self.decision.get_or_init(|| {
+            // The set-once initializer is the linearization point for source
+            // availability and budget. Every possible supervisor uses these
+            // frozen values even when another caller wins the start claim.
+            Arc::new(DecisionSlot::new(
+                self.source.get().cloned(),
+                registry.clone(),
+                deadline,
+                Arc::clone(&self.intersection),
+            ))
+        }))
+    }
+}
+
+async fn resolve_authority(
+    source: Option<Arc<dyn ClientRootsSource>>,
+    registry: RootRegistry,
+    deadline: tokio::time::Instant,
+    intersection: Arc<dyn ClientRootsIntersection>,
+) -> RootAuthorityDecision {
+    if tokio::time::Instant::now() >= deadline {
+        return RootAuthorityDecision::disabled();
+    }
+    let Some(source) = source else {
+        return RootAuthorityDecision::disabled();
+    };
+    if tokio::time::Instant::now() >= deadline {
+        return RootAuthorityDecision::disabled();
+    }
+    if !source.advertises_roots() {
+        return RootAuthorityDecision::configured(&registry);
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return RootAuthorityDecision::disabled();
+    }
+    let roots = match tokio::time::timeout_at(deadline, source.list_roots()).await {
+        Ok(Ok(roots)) => roots,
+        Ok(Err(())) | Err(_) => return RootAuthorityDecision::disabled(),
+    };
+    if tokio::time::Instant::now() >= deadline {
+        return RootAuthorityDecision::disabled();
+    }
+    let paths = match parse_client_root_snapshot(&roots) {
+        Ok(paths) => paths,
+        Err(_) => return RootAuthorityDecision::disabled(),
+    };
+    if tokio::time::Instant::now() >= deadline {
+        return RootAuthorityDecision::disabled();
+    }
+    // The blocking closure owns only the bounded intersection inputs. It has
+    // no decision slot, gate, or publication authority, so a timed-out result
+    // is inert even if an operating-system filesystem call remains blocked.
+    let intersection = match intersection.spawn(registry, paths) {
+        Ok(intersection) => intersection,
+        Err(()) => return RootAuthorityDecision::disabled(),
+    };
+    let effective = match tokio::time::timeout_at(deadline, intersection).await {
+        Ok(Ok(Ok(effective))) => effective,
+        Ok(Ok(Err(_)) | Err(_)) | Err(_) => return RootAuthorityDecision::disabled(),
+    };
+    if tokio::time::Instant::now() >= deadline {
+        RootAuthorityDecision::disabled()
+    } else {
+        RootAuthorityDecision::narrowed(effective)
     }
 }
 
@@ -308,7 +617,11 @@ fn file_url_path(_: &Url) -> Result<std::path::PathBuf, ClientRootsSnapshotError
 #[cfg(test)]
 #[allow(deprecated)]
 mod tests {
-    use std::{fs, path::Path, sync::atomic::AtomicUsize};
+    use std::{
+        fs,
+        path::Path,
+        sync::{Condvar, Mutex, atomic::AtomicUsize},
+    };
 
     use super::*;
     use crate::{
@@ -378,6 +691,109 @@ mod tests {
                 }
                 self.answer.clone().ok_or(())
             })
+        }
+    }
+
+    struct DeferredRoots {
+        calls: AtomicUsize,
+        answer: Vec<Root>,
+        release: Notify,
+    }
+
+    impl DeferredRoots {
+        fn new(answer: Vec<Root>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                answer,
+                release: Notify::new(),
+            }
+        }
+
+        async fn wait_until_called(&self) {
+            while self.calls.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    impl ClientRootsSource for DeferredRoots {
+        fn advertises_roots(&self) -> bool {
+            true
+        }
+
+        fn list_roots(&self) -> SnapshotFuture<'_> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async move {
+                self.release.notified().await;
+                Ok(self.answer.clone())
+            })
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum IntersectionMode {
+        Blocking,
+        Panic,
+        SpawnFailure,
+    }
+
+    struct ScriptedIntersection {
+        mode: IntersectionMode,
+        calls: AtomicUsize,
+        entered: AtomicBool,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl ScriptedIntersection {
+        fn new(mode: IntersectionMode) -> Self {
+            Self {
+                mode,
+                calls: AtomicUsize::new(0),
+                entered: AtomicBool::new(false),
+                release: Arc::new((Mutex::new(false), Condvar::new())),
+            }
+        }
+
+        async fn wait_until_entered(&self) {
+            while !self.entered.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        fn release(&self) {
+            let (lock, wake) = self.release.as_ref();
+            let mut released = lock.lock().expect("intersection release lock");
+            *released = true;
+            wake.notify_all();
+        }
+    }
+
+    impl ClientRootsIntersection for ScriptedIntersection {
+        fn spawn(
+            &self,
+            registry: RootRegistry,
+            paths: Vec<AbsoluteNativePath>,
+        ) -> Result<IntersectionHandle, ()> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            if matches!(self.mode, IntersectionMode::SpawnFailure) {
+                return Err(());
+            }
+            let mode = self.mode;
+            let release = Arc::clone(&self.release);
+            self.entered.store(true, Ordering::Release);
+            Ok(tokio::task::spawn_blocking(move || {
+                if matches!(mode, IntersectionMode::Panic) {
+                    panic!("scripted intersection panic");
+                }
+                if matches!(mode, IntersectionMode::Blocking) {
+                    let (lock, wake) = release.as_ref();
+                    let mut released = lock.lock().expect("intersection release lock");
+                    while !*released {
+                        released = wake.wait(released).expect("intersection release wait");
+                    }
+                }
+                registry.intersect_client_roots(&paths)
+            }))
         }
     }
 
@@ -490,6 +906,164 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn unavailable_runtime_publishes_one_disabled_decision_without_retry() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let gate = ClientRootsGate::default();
+        gate.enable();
+        let source = Arc::new(ScriptedRoots::advertised(vec![Root::new(directory_uri(
+            &import,
+        ))]));
+        gate.install_source(source.clone());
+
+        let first = futures::executor::block_on(gate.authority(&registry, Duration::from_secs(1)));
+        let repeated =
+            futures::executor::block_on(gate.authority(&registry, Duration::from_secs(1)));
+
+        assert_eq!(first.authority(), LocalRootAuthority::Disabled);
+        assert_eq!(repeated.authority(), LocalRootAuthority::Disabled);
+        assert_eq!(source.calls(), 0);
+        assert!(gate.decision.get().is_some_and(
+            |slot| slot.publication.load(Ordering::Acquire) == DecisionSlot::PUBLISHED
+        ));
+
+        drop(repeated);
+        drop(first);
+        drop(gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn slot_initialization_freezes_source_before_a_later_caller_claims_start() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let gate = ClientRootsGate::default();
+        gate.enable();
+        let frozen_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+        // This models the initializer being preempted before it can claim the
+        // supervisor. The later caller may claim start but must consume the
+        // missing source frozen by this first initialization.
+        let initialized = gate.decision_slot(&registry, frozen_deadline);
+        let late = Arc::new(ScriptedRoots::advertised(vec![Root::new(directory_uri(
+            &import,
+        ))]));
+        gate.install_source(late.clone());
+        let decision = gate.authority(&registry, Duration::from_secs(60)).await;
+
+        assert!(initialized.source.is_none());
+        assert_eq!(initialized.deadline, frozen_deadline);
+        assert!(initialized.supervisor_started.load(Ordering::Acquire));
+        assert_eq!(decision.authority(), LocalRootAuthority::Disabled);
+        assert_eq!(late.calls(), 0);
+
+        drop(decision);
+        drop(initialized);
+        drop(gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn later_caller_cannot_extend_the_frozen_deadline() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let gate = Arc::new(ClientRootsGate::default());
+        gate.enable();
+        let source = Arc::new(DeferredRoots::new(vec![Root::new(directory_uri(&import))]));
+        gate.install_source(source.clone());
+
+        let first_gate = Arc::clone(&gate);
+        let first_registry = registry.clone();
+        let first = tokio::spawn(async move {
+            first_gate
+                .authority(&first_registry, Duration::from_secs(5))
+                .await
+        });
+        source.wait_until_called().await;
+        tokio::time::advance(Duration::from_secs(4)).await;
+
+        let later_gate = Arc::clone(&gate);
+        let later_registry = registry.clone();
+        let later = tokio::spawn(async move {
+            later_gate
+                .authority(&later_registry, Duration::from_secs(60))
+                .await
+        });
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        assert_eq!(
+            first.await.expect("first deadline waiter").authority(),
+            LocalRootAuthority::Disabled
+        );
+        assert_eq!(
+            later.await.expect("later deadline waiter").authority(),
+            LocalRootAuthority::Disabled
+        );
+        assert_eq!(source.calls.load(Ordering::Acquire), 1);
+
+        drop(gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[test]
+    fn runtime_teardown_drops_the_supervisor_into_one_disabled_publication() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let gate = Arc::new(ClientRootsGate::default());
+        gate.enable();
+        let source = Arc::new(DeferredRoots::new(vec![Root::new(directory_uri(&import))]));
+        gate.install_source(source.clone());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let waiter_gate = Arc::clone(&gate);
+            let waiter_registry = registry.clone();
+            let waiter = tokio::spawn(async move {
+                waiter_gate
+                    .authority(&waiter_registry, Duration::from_secs(60))
+                    .await
+            });
+            source.wait_until_called().await;
+            drop(waiter);
+        });
+        drop(runtime);
+
+        let decision =
+            futures::executor::block_on(gate.authority(&registry, Duration::from_secs(60)));
+        assert_eq!(decision.authority(), LocalRootAuthority::Disabled);
+        assert_eq!(source.calls.load(Ordering::Acquire), 1);
+        assert!(gate.decision.get().is_some_and(
+            |slot| slot.publication.load(Ordering::Acquire) == DecisionSlot::PUBLISHED
+        ));
+
+        drop(decision);
+        drop(gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[test]
+    fn production_intersection_spawn_without_a_runtime_fails_closed() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+
+        assert!(
+            TokioClientRootsIntersection
+                .spawn(registry.clone(), Vec::new())
+                .is_err()
+        );
+
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
     }
 
     #[tokio::test]
@@ -682,6 +1256,350 @@ mod tests {
         drop(gate);
         drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn configured_narrowed_empty_and_disabled_decisions_report_effective_counts() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+
+        let direct = ClientRootsGate::default()
+            .authority(&registry, Duration::from_secs(1))
+            .await;
+        assert_eq!(direct.authority(), LocalRootAuthority::Configured);
+        assert_eq!(
+            (direct.import_root_count(), direct.export_root_count()),
+            (1, 1)
+        );
+
+        let narrowed_gate = ClientRootsGate::default();
+        narrowed_gate.enable();
+        narrowed_gate.install_source(Arc::new(ScriptedRoots::advertised(vec![Root::new(
+            directory_uri(&import),
+        )])));
+        let narrowed = narrowed_gate
+            .authority(&registry, Duration::from_secs(1))
+            .await;
+        assert_eq!(narrowed.authority(), LocalRootAuthority::Narrowed);
+        assert_eq!(
+            (narrowed.import_root_count(), narrowed.export_root_count()),
+            (1, 0)
+        );
+
+        let empty_gate = ClientRootsGate::default();
+        empty_gate.enable();
+        empty_gate.install_source(Arc::new(ScriptedRoots::advertised(Vec::new())));
+        let empty = empty_gate
+            .authority(&registry, Duration::from_secs(1))
+            .await;
+        assert_eq!(empty.authority(), LocalRootAuthority::Narrowed);
+        assert_eq!(
+            (empty.import_root_count(), empty.export_root_count()),
+            (0, 0)
+        );
+
+        let disabled_gate = ClientRootsGate::default();
+        disabled_gate.enable();
+        disabled_gate.install_source(Arc::new(ScriptedRoots::failing()));
+        let disabled = disabled_gate
+            .authority(&registry, Duration::from_secs(1))
+            .await;
+        assert_eq!(disabled.authority(), LocalRootAuthority::Disabled);
+        assert_eq!(
+            (disabled.import_root_count(), disabled.export_root_count()),
+            (0, 0)
+        );
+
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn rootless_policy_is_unavailable_without_client_work() {
+        let config = ArtifactConfig::from_toml("schema_version = 1\n[spaces]\nread_only = false\n")
+            .expect("rootless config");
+        let registry = RootRegistry::activate(&config).expect("activate rootless config");
+        let gate = ClientRootsGate::default();
+        gate.enable();
+        let source = Arc::new(ScriptedRoots::failing());
+        gate.install_source(source.clone());
+
+        let decision = gate.authority(&registry, Duration::from_secs(1)).await;
+
+        assert_eq!(decision.authority(), LocalRootAuthority::Unavailable);
+        assert_eq!(
+            (decision.import_root_count(), decision.export_root_count()),
+            (0, 0)
+        );
+        assert_eq!(source.calls(), 0);
+        assert_eq!(
+            decision
+                .effective()
+                .expect("empty static policy")
+                .open_import("inbox", &relative("source.bin"), 64)
+                .expect_err("rootless refusal")
+                .kind(),
+            RootAccessErrorKind::Missing
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_every_waiter_does_not_cancel_the_single_supervisor() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let gate = Arc::new(ClientRootsGate::default());
+        gate.enable();
+        let source = Arc::new(DeferredRoots::new(vec![Root::new(directory_uri(&import))]));
+        gate.install_source(source.clone());
+
+        let mut waiters = Vec::new();
+        for _ in 0..32 {
+            let gate = Arc::clone(&gate);
+            let registry = registry.clone();
+            waiters.push(tokio::spawn(async move {
+                gate.authority(&registry, Duration::from_secs(5)).await
+            }));
+        }
+        source.wait_until_called().await;
+        for waiter in waiters {
+            waiter.abort();
+        }
+        source.release.notify_one();
+
+        let decision = gate.authority(&registry, Duration::from_secs(5)).await;
+        assert_eq!(decision.authority(), LocalRootAuthority::Narrowed);
+        assert_eq!(source.calls.load(Ordering::Acquire), 1);
+
+        drop(decision);
+        drop(gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_intersection_keeps_one_shared_supervisor() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let intersection = Arc::new(ScriptedIntersection::new(IntersectionMode::Blocking));
+        let gate = Arc::new(ClientRootsGate::with_intersection(intersection.clone()));
+        gate.enable();
+        gate.install_source(Arc::new(ScriptedRoots::advertised(vec![Root::new(
+            directory_uri(&import),
+        )])));
+
+        let waiter_gate = Arc::clone(&gate);
+        let waiter_registry = registry.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_gate
+                .authority(&waiter_registry, Duration::from_secs(5))
+                .await
+        });
+        intersection.wait_until_entered().await;
+        waiter.abort();
+        intersection.release();
+
+        let decision = gate.authority(&registry, Duration::from_secs(5)).await;
+        assert_eq!(decision.authority(), LocalRootAuthority::Narrowed);
+        assert_eq!(intersection.calls.load(Ordering::Acquire), 1);
+
+        drop(decision);
+        drop(gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn resolution_before_source_install_is_terminally_disabled() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let gate = ClientRootsGate::default();
+        gate.enable();
+
+        let first = gate.authority(&registry, Duration::from_secs(1)).await;
+        assert_eq!(first.authority(), LocalRootAuthority::Disabled);
+
+        let late = Arc::new(ScriptedRoots::advertised(vec![Root::new(directory_uri(
+            &import,
+        ))]));
+        gate.install_source(late.clone());
+        let repeated = gate.authority(&registry, Duration::from_secs(1)).await;
+        assert_eq!(repeated.authority(), LocalRootAuthority::Disabled);
+        assert_eq!(late.calls(), 0);
+
+        drop(repeated);
+        drop(first);
+        drop(gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn status_and_operation_order_share_the_same_terminal_decision() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+
+        let status_first = ClientRootsGate::default();
+        status_first.enable();
+        let status_source = Arc::new(ScriptedRoots::advertised(vec![Root::new(directory_uri(
+            &import,
+        ))]));
+        status_first.install_source(status_source.clone());
+        let status_decision = status_first
+            .authority(&registry, Duration::from_secs(1))
+            .await;
+        let status_effective = status_first
+            .effective(&registry, Duration::from_secs(1))
+            .await
+            .expect("status-first effective roots");
+
+        let operation_first = ClientRootsGate::default();
+        operation_first.enable();
+        let operation_source = Arc::new(ScriptedRoots::advertised(vec![Root::new(directory_uri(
+            &import,
+        ))]));
+        operation_first.install_source(operation_source.clone());
+        let operation_effective = operation_first
+            .effective(&registry, Duration::from_secs(1))
+            .await
+            .expect("operation-first effective roots");
+        let operation_decision = operation_first
+            .authority(&registry, Duration::from_secs(1))
+            .await;
+
+        assert_eq!(status_decision.authority(), operation_decision.authority());
+        assert_eq!(
+            (
+                status_decision.import_root_count(),
+                status_decision.export_root_count()
+            ),
+            (
+                operation_decision.import_root_count(),
+                operation_decision.export_root_count()
+            )
+        );
+        assert_eq!(
+            (
+                status_effective.import_root_count(),
+                status_effective.export_root_count()
+            ),
+            (
+                operation_effective.import_root_count(),
+                operation_effective.export_root_count()
+            )
+        );
+        assert_eq!(status_source.calls(), 1);
+        assert_eq!(operation_source.calls(), 1);
+
+        drop(operation_effective);
+        drop(status_effective);
+        drop(operation_first);
+        drop(status_first);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completion_one_tick_before_deadline_wins_but_equality_disables() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+
+        let before_gate = Arc::new(ClientRootsGate::default());
+        before_gate.enable();
+        let before_source = Arc::new(DeferredRoots::new(vec![Root::new(directory_uri(&import))]));
+        before_gate.install_source(before_source.clone());
+        let waiter_gate = Arc::clone(&before_gate);
+        let waiter_registry = registry.clone();
+        let before = tokio::spawn(async move {
+            waiter_gate
+                .authority(&waiter_registry, Duration::from_secs(5))
+                .await
+        });
+        before_source.wait_until_called().await;
+        tokio::time::advance(Duration::from_secs(5) - Duration::from_nanos(1)).await;
+        before_source.release.notify_one();
+        let before = before.await.expect("one-tick-before waiter");
+        assert_eq!(before.authority(), LocalRootAuthority::Narrowed);
+
+        let equal_gate = Arc::new(ClientRootsGate::default());
+        equal_gate.enable();
+        let equal_source = Arc::new(DeferredRoots::new(vec![Root::new(directory_uri(&import))]));
+        equal_gate.install_source(equal_source.clone());
+        let waiter_gate = Arc::clone(&equal_gate);
+        let waiter_registry = registry.clone();
+        let equal = tokio::spawn(async move {
+            waiter_gate
+                .authority(&waiter_registry, Duration::from_secs(5))
+                .await
+        });
+        equal_source.wait_until_called().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        equal_source.release.notify_one();
+        let equal = equal.await.expect("deadline-equality waiter");
+        assert_eq!(equal.authority(), LocalRootAuthority::Disabled);
+
+        drop(equal);
+        drop(before);
+        drop(equal_gate);
+        drop(before_gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_blocking_intersection_cannot_publish_late() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let intersection = Arc::new(ScriptedIntersection::new(IntersectionMode::Blocking));
+        let gate = Arc::new(ClientRootsGate::with_intersection(intersection.clone()));
+        gate.enable();
+        gate.install_source(Arc::new(ScriptedRoots::advertised(vec![Root::new(
+            directory_uri(&import),
+        )])));
+        let waiter_gate = Arc::clone(&gate);
+        let waiter_registry = registry.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_gate
+                .authority(&waiter_registry, Duration::from_secs(5))
+                .await
+        });
+        intersection.wait_until_entered().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let timed_out = waiter.await.expect("timed-out waiter");
+        assert_eq!(timed_out.authority(), LocalRootAuthority::Disabled);
+
+        intersection.release();
+        tokio::task::yield_now().await;
+        let repeated = gate.authority(&registry, Duration::from_secs(5)).await;
+        assert_eq!(repeated.authority(), LocalRootAuthority::Disabled);
+        assert_eq!(intersection.calls.load(Ordering::Acquire), 1);
+
+        drop(repeated);
+        drop(timed_out);
+        drop(gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn intersection_spawn_failure_and_join_panic_disable_without_panicking() {
+        for mode in [IntersectionMode::SpawnFailure, IntersectionMode::Panic] {
+            let (base, import, export) = temporary_tree();
+            let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+            let intersection = Arc::new(ScriptedIntersection::new(mode));
+            let gate = ClientRootsGate::with_intersection(intersection);
+            gate.enable();
+            gate.install_source(Arc::new(ScriptedRoots::advertised(vec![Root::new(
+                directory_uri(&import),
+            )])));
+
+            let decision = gate.authority(&registry, Duration::from_secs(1)).await;
+            assert_eq!(decision.authority(), LocalRootAuthority::Disabled);
+
+            drop(decision);
+            drop(gate);
+            drop(registry);
+            fs::remove_dir_all(base).expect("cleanup");
+        }
     }
 
     #[test]
