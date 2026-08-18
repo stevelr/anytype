@@ -24,6 +24,8 @@ endblock title %} {% block content %}
     permanently removes every archived object in the selected space.
     <code>space enable-sharing</code>
     exposes a space through its public sharing controls.
+    <code>body delete</code>
+    removes the named block and its descendants after checking the expected subtree size.
   </aside>
 
   <div class="quickref-nav" aria-label="Quick-reference contents">
@@ -34,6 +36,7 @@ endblock title %} {% block content %}
       <li><a href="#spaces">Spaces</a></li>
       <li><a href="#tasks">Tasks</a></li>
       <li><a href="#objects">Objects and search</a></li>
+      <li><a href="#body">Body blocks and discussions</a></li>
       <li><a href="#markdown">Markdown editing</a></li>
       <li><a href="#chats">Chats</a></li>
       <li><a href="#files">Files</a></li>
@@ -235,6 +238,75 @@ anyr search --space "Work" --text "meeting notes" --table</code></pre>
           <div class="entry">
             <h3>Archive an object</h3>
             <pre><code>anyr object delete "Work" "$OBJECT_ID"</code></pre>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section id="body">
+      <h2>Body blocks and discussions</h2>
+      <p>
+        These diagnostics require HTTP and gRPC access. Object and block operands are exact IDs.
+      </p>
+      <details open>
+        <summary>Show commands</summary>
+        <div class="commands">
+          <div class="entry">
+            <h3>Discover or attach a page discussion</h3>
+            <pre><code>anyr object discussion get "Work" "$OBJECT_ID" --pretty
+anyr object discussion attach "Work" "$OBJECT_ID" --pretty</code></pre>
+            <p>
+              <code>get</code> returns an <code>absent</code> or <code>attached</code>
+              state. <code>attach</code> creates the derived discussion when absent and
+              returns the verified discussion ID.
+            </p>
+          </div>
+          <div class="entry">
+            <h3>List or inspect exact body blocks</h3>
+            <pre><code>anyr body list "Work" "$OBJECT_ID" --table
+anyr body show "Work" "$OBJECT_ID" "$BLOCK_ID" --pretty</code></pre>
+            <p>
+              List output preserves document order and reports each block's parent and
+              sibling position.
+            </p>
+          </div>
+          <div class="entry">
+            <h3>Create a rich block</h3>
+            <pre><code>anyr body create "Work" "$OBJECT_ID" "$ROOT_BLOCK_ID" \
+  last-child --block @- &lt;&lt;'JSON'
+{"content":{"kind":"callout","text":"Check this","icon":{"type":"emoji","content":"💡"}},"background_color":"grey"}
+JSON</code></pre>
+            <p>
+              <code>--block</code> accepts literal JSON, <code>@FILE</code>,
+              <code>@-</code>, or <code>-</code> for standard input.
+            </p>
+          </div>
+          <div class="entry">
+            <h3>Update one typed block field</h3>
+            <pre><code>anyr body update "Work" "$OBJECT_ID" "$BLOCK_ID" --change \
+  '{"kind":"text","text":"Checked","marks":[]}'</code></pre>
+            <p>
+              Changes cover text and marks, style, checkbox state, colors, callout
+              icons, embeds, link appearance, and alignment.
+            </p>
+          </div>
+          <div class="entry">
+            <h3>Move a block relative to another block</h3>
+            <pre><code>anyr body move "Work" "$OBJECT_ID" "$BLOCK_ID" \
+  "$TARGET_BLOCK_ID" before</code></pre>
+            <p>
+              Positions are <code>before</code>, <code>after</code>,
+              <code>first-child</code>, and <code>last-child</code>.
+            </p>
+          </div>
+          <div class="entry">
+            <h3>Delete an exact block subtree</h3>
+            <pre><code>anyr body delete "Work" "$OBJECT_ID" "$BLOCK_ID" \
+  --expected-subtree-blocks 1 --confirm</code></pre>
+            <p>
+              The command rereads the body and refuses deletion when the current
+              subtree size differs from the supplied count.
+            </p>
           </div>
         </div>
       </details>
