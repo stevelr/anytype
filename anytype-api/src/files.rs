@@ -16,6 +16,7 @@ use anytype_rpc::{
         file::{discard_preload, download, upload},
         object::search_with_meta,
     },
+    deadline::{GrpcCallOptions, GrpcTimeoutClass, GrpcTimeoutOutcome, with_grpc_call_options},
     model,
 };
 use bytes::Bytes;
@@ -40,7 +41,7 @@ use crate::{
     client::AnytypeClient,
     error::AnytypeError,
     filters::{Filter, Sort, SortDirection},
-    grpc_util::{ensure_error_ok, grpc_status, with_token_request},
+    grpc_util::{ensure_error_ok, grpc_status, grpc_status_for, with_token_request},
     paged::{PagedResult, PaginatedResponse, PaginationMeta},
 };
 
@@ -1542,13 +1543,20 @@ impl FileDownloadRequest<'_> {
             error!("download rpc error: {err}");
             err
         })?;
+        let request = with_grpc_call_options(request, GrpcCallOptions::long_read());
+        let started = std::time::Instant::now();
 
         let response = commands
             .file_download(request)
             .await
             .map_err(|err| {
-                error!("download error grpc_status {err:?}");
-                grpc_status(err)
+                error!(code = %err.code(), "download gRPC request failed");
+                grpc_status_for(
+                    err,
+                    GrpcTimeoutClass::LongUnary,
+                    GrpcTimeoutOutcome::ReadAborted,
+                    started.elapsed(),
+                )
             })?
             .into_inner();
 
@@ -1857,10 +1865,19 @@ impl FileDiscardPreloadRequest<'_> {
             space_id: self.space_id,
         };
         let request = with_token_request(Request::new(request), grpc.token())?;
+        let request = with_grpc_call_options(request, GrpcCallOptions::cleanup());
+        let started = std::time::Instant::now();
         let response = commands
             .file_discard_preload(request)
             .await
-            .map_err(grpc_status)?
+            .map_err(|status| {
+                grpc_status_for(
+                    status,
+                    GrpcTimeoutClass::Cleanup,
+                    GrpcTimeoutOutcome::MutationIndeterminate,
+                    started.elapsed(),
+                )
+            })?
             .into_inner();
         ensure_error_ok(response.error.as_ref(), "file discard preload")?;
         Ok(())
@@ -2259,10 +2276,25 @@ async fn upload_file(
         created_in_context_ref: created_in_context_ref.unwrap_or_default(),
     };
     let request = with_token_request(Request::new(request), grpc.token())?;
+    let request = with_grpc_call_options(
+        request,
+        GrpcCallOptions::new(
+            GrpcTimeoutClass::LongUnary,
+            GrpcTimeoutOutcome::MutationIndeterminate,
+        ),
+    );
+    let started = std::time::Instant::now();
     let response = commands
         .file_upload(request)
         .await
-        .map_err(grpc_status)?
+        .map_err(|status| {
+            grpc_status_for(
+                status,
+                GrpcTimeoutClass::LongUnary,
+                GrpcTimeoutOutcome::MutationIndeterminate,
+                started.elapsed(),
+            )
+        })?
         .into_inner();
     ensure_error_ok(response.error.as_ref(), "file upload")?;
     let details = response.details.unwrap_or_default();

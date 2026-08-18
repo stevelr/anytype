@@ -16,6 +16,7 @@ use anytype_rpc::{
         rpc::process::{subscribe as process_subscribe, unsubscribe as process_unsubscribe},
     },
     client::AnytypeGrpcClient,
+    deadline::{GrpcCallOptions, with_grpc_call_options},
 };
 use tokio::sync::mpsc;
 use tonic::Request;
@@ -265,6 +266,7 @@ impl ProcessWatcher {
         let mut request =
             with_token_request(Request::new(process_unsubscribe::Request {}), grpc.token())?;
         request.set_timeout(self.timeouts.event_stream_connect_timeout);
+        let request = with_grpc_call_options(request, GrpcCallOptions::cleanup());
         let response = commands
             .process_unsubscribe(request)
             .await
@@ -369,8 +371,10 @@ impl ProcessWatcher {
                 };
                 if request.log_progress {
                     debug!(
-                        "process event progress: process={} done={} total={} message={}",
-                        process.id, progress.done, progress.total, progress.message
+                        class = "process_progress",
+                        done = progress.done,
+                        total = progress.total,
+                        "process event progress observed"
                     );
                 }
             }
@@ -429,10 +433,7 @@ async fn open_session_events(
     grpc: &AnytypeGrpcClient,
     connect_timeout: Duration,
 ) -> Result<tonic::Streaming<Event>> {
-    let request = StreamRequest {
-        token: grpc.token().to_string(),
-    };
-    let request = with_token_request(Request::new(request), grpc.token())?;
+    let request = session_event_request(grpc.token())?;
     let response = tokio::time::timeout(
         connect_timeout,
         grpc.client_commands().listen_session_events(request),
@@ -447,6 +448,17 @@ async fn open_session_events(
     .map_err(grpc_status)?
     .into_inner();
     Ok(response)
+}
+
+fn session_event_request(token: &str) -> Result<Request<StreamRequest>> {
+    let request = StreamRequest {
+        token: token.to_owned(),
+    };
+    let request = with_token_request(Request::new(request), token)?;
+    Ok(with_grpc_call_options(
+        request,
+        GrpcCallOptions::stream_setup(),
+    ))
 }
 
 async fn wait_for_next_event(
@@ -492,19 +504,156 @@ async fn wait_for_next_event(
         Ok(Some(event)) => Ok(Some(event)),
         Ok(None) => Ok(None),
         Err(err) => {
-            debug!("session event stream read failed; reconnecting: {err:#}");
+            log_stream_read_failure(&err);
             Ok(None)
         }
     }
 }
 
+fn log_stream_read_failure(error: &tonic::Status) {
+    debug!(
+        code = %error.code(),
+        class = "stream_read",
+        "session event stream read failed; reconnecting"
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex, Once},
+    };
+
     use anytype_rpc::anytype::{
         Event, event::Message as EventMessage, event::message::Value as EventValue,
     };
+    use tracing::Dispatch;
+    use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt};
 
     use super::*;
+
+    static TRACE_TEST_INTEREST: Once = Once::new();
+
+    fn ensure_trace_interest() {
+        TRACE_TEST_INTEREST.call_once(|| {
+            let subscriber =
+                tracing_subscriber::registry().with(tracing_subscriber::filter::LevelFilter::TRACE);
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Capture {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("capture lock").clone())
+                .expect("diagnostics are UTF-8")
+        }
+    }
+
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::writer::MakeWriter<'writer> for Capture {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture() -> (Dispatch, Capture) {
+        ensure_trace_interest();
+        let output = Capture::default();
+        let layer = tracing_fmt::layer()
+            .with_writer(output.clone())
+            .with_target(true)
+            .with_ansi(false);
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(layer);
+        (Dispatch::new(subscriber), output)
+    }
+
+    #[test]
+    fn stream_read_failure_log_redacts_hostile_status_details() {
+        let (dispatch, output) = capture();
+        tracing::dispatcher::with_default(&dispatch, || {
+            log_stream_read_failure(&tonic::Status::internal("HOSTILE_WATCHER_SECRET"));
+        });
+        let output = output.contents();
+        assert!(output.contains("Internal"));
+        assert!(output.contains("stream_read"));
+        assert!(!output.contains("HOSTILE_WATCHER_SECRET"));
+    }
+
+    #[test]
+    fn progress_log_redacts_hostile_process_id_and_message() {
+        use anytype_rpc::anytype::{event::process, model, model::process as model_process};
+
+        let hostile_id = "HOSTILE_PROCESS_ID\n\u{1b}[31m";
+        let hostile_message = "HOSTILE_PROGRESS_MESSAGE\r\n\t\u{7}";
+        let event = Event {
+            messages: vec![EventMessage {
+                space_id: "space-test".to_owned(),
+                value: Some(EventValue::ProcessNew(process::New {
+                    process: Some(model::Process {
+                        id: hostile_id.to_owned(),
+                        state: model_process::State::Running as i32,
+                        progress: Some(model_process::Progress {
+                            total: 10,
+                            done: 4,
+                            message: hostile_message.to_owned(),
+                        }),
+                        space_id: "space-test".to_owned(),
+                        error: String::new(),
+                        message: Some(model_process::Message::Import(model_process::Import {})),
+                    }),
+                })),
+            }],
+            context_id: String::new(),
+            initiator: None,
+            trace_id: String::new(),
+        };
+        let request =
+            ProcessWatchRequest::new(ProcessKind::Import, "space-test").log_progress(true);
+        let mut watcher = ProcessWatcher::default();
+        let (dispatch, output) = capture();
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            watcher
+                .process_event(&event, &request)
+                .expect("hostile progress event reduces");
+        });
+
+        let output = output.contents();
+        assert!(output.contains("process_progress"));
+        assert!(output.contains("done=4"));
+        assert!(output.contains("total=10"));
+        assert!(!output.contains("HOSTILE_PROCESS_ID"));
+        assert!(!output.contains("HOSTILE_PROGRESS_MESSAGE"));
+        assert_eq!(
+            watcher.progress().last_process_id.as_deref(),
+            Some(hostile_id)
+        );
+        assert_eq!(
+            watcher.progress().last_progress_message.as_deref(),
+            Some(hostile_message)
+        );
+    }
 
     fn import_finish_event(space_id: &str, objects_count: i64) -> Event {
         Event {
@@ -591,5 +740,16 @@ mod tests {
         assert!(!observed);
         assert_eq!(watcher.progress().import_finish_events, 0);
         assert_eq!(watcher.progress().import_finish_objects, 0);
+    }
+
+    #[test]
+    fn session_event_setup_uses_only_the_local_setup_budget() {
+        let request = session_event_request("test-token").expect("valid session event request");
+
+        assert!(request.metadata().get("grpc-timeout").is_none());
+        assert_eq!(
+            request.extensions().get::<GrpcCallOptions>(),
+            Some(&GrpcCallOptions::stream_setup())
+        );
     }
 }

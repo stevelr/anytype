@@ -13,6 +13,10 @@ use crate::anytype::rpc::object::list_export::Request as ObjectListExportRequest
 use crate::anytype::rpc::object::show::Request as ObjectShowRequest;
 use crate::auth::with_token;
 use crate::client::AnytypeGrpcClient;
+use crate::deadline::{
+    GrpcCallOptions, GrpcDeadlineError, GrpcTimeoutClass, GrpcTimeoutOutcome,
+    with_grpc_call_options,
+};
 pub use crate::error::BackupError;
 pub use crate::model::export::Format as ExportFormat;
 
@@ -127,7 +131,20 @@ impl AnytypeGrpcClient {
             md_include_properties_and_schema: options.md_include_properties_and_schema,
         };
         let request = with_token(Request::new(request), self.token())?;
-        let response = commands.object_list_export(request).await?.into_inner();
+        let request = with_grpc_call_options(request, GrpcCallOptions::long_read());
+        let started = std::time::Instant::now();
+        let response = commands
+            .object_list_export(request)
+            .await
+            .map_err(|status| {
+                backup_deadline_or_status(
+                    status,
+                    GrpcTimeoutClass::LongUnary,
+                    GrpcTimeoutOutcome::ReadAborted,
+                    started.elapsed(),
+                )
+            })?
+            .into_inner();
 
         if let Some(error) = response.error
             && error.code != 0
@@ -179,7 +196,20 @@ impl AnytypeGrpcClient {
             ..Default::default()
         };
         let request = with_token(Request::new(request), self.token())?;
-        let response = commands.object_show(request).await?.into_inner();
+        let request = with_grpc_call_options(request, GrpcCallOptions::ordinary_read());
+        let started = std::time::Instant::now();
+        let response = commands
+            .object_show(request)
+            .await
+            .map_err(|status| {
+                backup_deadline_or_status(
+                    status,
+                    GrpcTimeoutClass::OrdinaryUnary,
+                    GrpcTimeoutOutcome::ReadAborted,
+                    started.elapsed(),
+                )
+            })?
+            .into_inner();
 
         if let Some(error) = response.error
             && error.code != 0
@@ -222,6 +252,18 @@ impl AnytypeGrpcClient {
 
         Ok(name)
     }
+}
+
+fn backup_deadline_or_status(
+    status: tonic::Status,
+    class: GrpcTimeoutClass,
+    outcome: GrpcTimeoutOutcome,
+    elapsed: std::time::Duration,
+) -> BackupError {
+    GrpcDeadlineError::from_status(&status, class, outcome, elapsed).map_or_else(
+        || BackupError::BackupRpc { source: status },
+        |source| BackupError::Deadline { source },
+    )
 }
 
 fn generated_target_name(prefix: &str, space_name: &str, zip: bool) -> String {

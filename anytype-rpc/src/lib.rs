@@ -52,6 +52,8 @@ pub mod backup;
 pub mod client;
 /// Helpers for headless config-based auth.
 pub mod config;
+/// Logical gRPC deadline configuration and enforcement.
+pub mod deadline;
 /// Error types for gRPC operations.
 pub mod error;
 /// Helpers for dataview view metadata.

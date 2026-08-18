@@ -17,6 +17,7 @@ use std::{future::Future, sync::Arc};
 
 use anytype_rpc::client::default_grpc_endpoint;
 use anytype_rpc::client::{AnytypeGrpcClient, AnytypeGrpcConfig};
+use anytype_rpc::deadline::GrpcTimeoutPolicy;
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -131,6 +132,13 @@ pub struct ClientConfig {
     /// fields inside it disable their individual boundaries.
     pub http_timeouts: Option<HttpTimeoutPolicy>,
 
+    /// Logical gRPC deadline policy.
+    ///
+    /// `None` inherits `ANYTYPE_GRPC_TIMEOUT_SECS` and then the library
+    /// defaults. A supplied policy ignores that environment variable; `None`
+    /// fields inside it disable their individual boundaries.
+    pub grpc_timeouts: Option<GrpcTimeoutPolicy>,
+
     /// Maximum consecutive 429 retries before failing for replay-safe HTTP
     /// methods (0 disables this rate-limit-specific cap).
     ///
@@ -172,6 +180,7 @@ impl std::fmt::Debug for ClientConfig {
             .field("limits", &self.limits)
             .field("response_limits", &self.response_limits)
             .field("http_timeouts", &self.http_timeouts)
+            .field("grpc_timeouts", &self.grpc_timeouts)
             .field("rate_limit_max_retries", &self.rate_limit_max_retries)
             .field("disable_cache", &self.disable_cache)
             .field("verify_configured", &self.verify.is_some())
@@ -191,6 +200,7 @@ impl Default for ClientConfig {
             limits: ValidationLimits::default(),
             response_limits: ResponseLimits::default(),
             http_timeouts: None,
+            grpc_timeouts: None,
             rate_limit_max_retries: std::env::var(RATE_LIMIT_MAX_RETRIES_ENV)
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
@@ -227,6 +237,18 @@ impl ClientConfig {
     pub fn http_timeouts(self, policy: HttpTimeoutPolicy) -> Self {
         Self {
             http_timeouts: Some(policy),
+            ..self
+        }
+    }
+
+    /// Sets an explicit logical gRPC deadline policy.
+    ///
+    /// Explicit policy ignores `ANYTYPE_GRPC_TIMEOUT_SECS`. Use `None` on an
+    /// individual policy field to disable that boundary.
+    #[must_use]
+    pub fn grpc_timeouts(self, policy: GrpcTimeoutPolicy) -> Self {
+        Self {
+            grpc_timeouts: Some(policy),
             ..self
         }
     }
@@ -351,6 +373,12 @@ impl AnytypeClient {
     /// ```
     pub fn with_client(builder: reqwest::ClientBuilder, config: ClientConfig) -> Result<Self> {
         let resolved_http_timeouts = HttpTimeoutPolicy::resolve(config.http_timeouts)?;
+        let resolved_grpc_timeouts =
+            GrpcTimeoutPolicy::resolve(config.grpc_timeouts).map_err(|source| {
+                AnytypeError::Validation {
+                    message: source.to_string(),
+                }
+            })?;
         let base_url = config.base_url.clone().unwrap_or_else(|| {
             std::env::var(ANYTYPE_URL_ENV).unwrap_or_else(|_| ANYTYPE_DESKTOP_URL.to_string())
         });
@@ -395,6 +423,7 @@ impl AnytypeClient {
                 keystore_service: Some(keystore_service),
                 grpc_endpoint: Some(grpc_endpoint),
                 http_timeouts: Some(resolved_http_timeouts),
+                grpc_timeouts: Some(resolved_grpc_timeouts),
                 // other values unchanged
                 ..config
             },
@@ -468,7 +497,8 @@ impl AnytypeClient {
             .as_ref()
             .map_or_else(AnytypeGrpcConfig::default, |endpoint| {
                 AnytypeGrpcConfig::new(endpoint.to_owned())
-            });
+            })
+            .grpc_timeouts(self.config.grpc_timeouts.unwrap_or_default());
 
         get_or_try_init(&self.grpc, || self.create_grpc_client(&grpc_config)).await
     }
@@ -501,6 +531,7 @@ impl AnytypeClient {
         use anytype_rpc::{
             anytype::rpc::account::local_link::list_apps::Request as ListAppsRequest,
             auth::with_token,
+            deadline::{GrpcCallOptions, with_grpc_call_options},
         };
         use tonic::Request;
 
@@ -510,11 +541,18 @@ impl AnytypeClient {
         let request = with_token(request, grpc.token()).map_err(|err| AnytypeError::Auth {
             message: err.to_string(),
         })?;
+        let request = with_grpc_call_options(request, GrpcCallOptions::ordinary_read());
+        let started = std::time::Instant::now();
         let response = commands
             .account_local_link_list_apps(request)
             .await
-            .map_err(|status| AnytypeError::Other {
-                message: format!("gRPC request failed: {status}"),
+            .map_err(|status| {
+                crate::grpc_util::grpc_status_for(
+                    status,
+                    anytype_rpc::deadline::GrpcTimeoutClass::OrdinaryUnary,
+                    anytype_rpc::deadline::GrpcTimeoutOutcome::ReadAborted,
+                    started.elapsed(),
+                )
             })?
             .into_inner();
 
@@ -780,34 +818,49 @@ fn extract_port(line: &str) -> Option<u16> {
     after_colon.parse().ok()
 }
 
+/// Total local budget for connecting and completing the unauthenticated probe.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+const GRPC_PORT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+async fn bounded_grpc_port_probe<F>(probe: F) -> bool
+where
+    F: Future<Output = bool>,
+{
+    tokio::time::timeout(GRPC_PORT_PROBE_TIMEOUT, probe)
+        .await
+        .unwrap_or(false)
+}
+
 /// Try an unauthenticated `AppGetVersion` call on the given port.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn probe_grpc_port(port: u16) -> bool {
     use anytype_rpc::anytype::{
         ClientCommandsClient, rpc::app::get_version::Request as AppGetVersionRequest,
     };
-    use std::time::Duration;
     use tonic::transport::Endpoint;
 
-    let endpoint = match Endpoint::from_shared(format!("http://127.0.0.1:{port}")) {
-        Ok(ep) => ep.connect_timeout(Duration::from_secs(2)),
-        Err(_) => return false,
-    };
-
-    let channel = match endpoint.connect().await {
-        Ok(ch) => ch,
-        Err(_) => return false,
-    };
-
-    let mut client = ClientCommandsClient::new(channel);
-    client
-        .app_get_version(tonic::Request::new(AppGetVersionRequest {}))
-        .await
-        .is_ok()
+    bounded_grpc_port_probe(async move {
+        let endpoint = match Endpoint::from_shared(format!("http://127.0.0.1:{port}")) {
+            Ok(endpoint) => endpoint,
+            Err(_) => return false,
+        };
+        let channel = match endpoint.connect().await {
+            Ok(channel) => channel,
+            Err(_) => return false,
+        };
+        let mut client = ClientCommandsClient::new(channel);
+        client
+            .app_get_version(tonic::Request::new(AppGetVersionRequest {}))
+            .await
+            .is_ok()
+    })
+    .await
 }
 
 #[cfg(test)]
 mod find_grpc_tests {
+    use std::ffi::OsString;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -816,14 +869,36 @@ mod find_grpc_tests {
     use tokio::sync::Mutex;
 
     use super::{
-        GrpcCredential, extract_port, first_responsive_port, get_or_try_init, lsof_listen_ports,
-        lsof_listen_ports_with, parse_lsof_output, select_grpc_credential,
+        GRPC_PORT_PROBE_TIMEOUT, GrpcCredential, bounded_grpc_port_probe, extract_port,
+        first_responsive_port, get_or_try_init, lsof_listen_ports, lsof_listen_ports_with,
+        parse_lsof_output, select_grpc_credential,
     };
     use crate::{
         client::{AnytypeClient, ClientConfig},
         error::AnytypeError,
         keystore::GrpcCredentials,
     };
+    use anytype_rpc::deadline::GrpcTimeoutPolicy;
+
+    struct EnvironmentRestore {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl Drop for EnvironmentRestore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => {
+                    // SAFETY: environment-mutating tests in this module are serialized.
+                    unsafe { std::env::set_var(self.key, value) };
+                }
+                None => {
+                    // SAFETY: environment-mutating tests in this module are serialized.
+                    unsafe { std::env::remove_var(self.key) };
+                }
+            }
+        }
+    }
 
     #[test]
     fn extract_port_ipv4() {
@@ -893,6 +968,26 @@ mod find_grpc_tests {
         assert_eq!(*observed.lock().await, vec![31001, 31002]);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn grpc_port_probe_budget_includes_stalled_logical_probe_after_connection() {
+        let (connected, connection_observed) = tokio::sync::oneshot::channel();
+        let probe = tokio::spawn(async move {
+            bounded_grpc_port_probe(async move {
+                let _ = connected.send(());
+                std::future::pending::<bool>().await
+            })
+            .await
+        });
+
+        connection_observed
+            .await
+            .expect("synthetic connection completed");
+        tokio::time::advance(GRPC_PORT_PROBE_TIMEOUT - std::time::Duration::from_millis(1)).await;
+        assert!(!probe.is_finished());
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert!(!probe.await.expect("probe task"));
+    }
+
     #[tokio::test]
     async fn cache_initialization_is_reused_and_serialized() {
         let slot = Mutex::new(None);
@@ -941,6 +1036,50 @@ mod find_grpc_tests {
             select_grpc_credential(&empty),
             Err(AnytypeError::GrpcUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn invalid_grpc_policy_fails_before_client_side_effects() {
+        let config = ClientConfig::default().grpc_timeouts(GrpcTimeoutPolicy {
+            cleanup: Some(std::time::Duration::from_secs(31)),
+            ..GrpcTimeoutPolicy::default()
+        });
+        assert!(matches!(
+            AnytypeClient::with_config(config),
+            Err(AnytypeError::Validation { .. })
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn absent_api_policy_resolves_grpc_environment_override() {
+        let key = anytype_rpc::deadline::ANYTYPE_GRPC_TIMEOUT_SECS;
+        let _restore = EnvironmentRestore {
+            key,
+            previous: std::env::var_os(key),
+        };
+        // SAFETY: this test is serialized with every test that mutates process environment.
+        unsafe { std::env::set_var(key, "17") };
+
+        let id = std::process::id();
+        let path = std::env::temp_dir().join(format!("anytype-grpc-env-policy-{id}.db"));
+        let mut config = ClientConfig::default().app_name("grpc-environment-policy");
+        config.keystore = Some(format!("file:path={}", path.display()));
+        config.keystore_service = Some(format!("grpc-environment-policy-{id}"));
+        let client = AnytypeClient::with_config(config).expect("construct client with env policy");
+        let policy = client
+            .get_config()
+            .grpc_timeouts
+            .expect("client retains resolved policy");
+        assert_eq!(
+            policy.ordinary_unary,
+            Some(std::time::Duration::from_secs(17))
+        );
+        assert_eq!(policy.long_unary, Some(std::time::Duration::from_secs(17)));
+
+        for suffix in ["", "-shm", "-wal"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
     }
 
     #[tokio::test]
