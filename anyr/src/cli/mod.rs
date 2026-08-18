@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use std::path::{Path, PathBuf};
+use std::{future::Future, pin::Pin, time::Duration};
 
 #[cfg(feature = "mcp")]
 use std::ffi::OsString;
@@ -22,6 +23,7 @@ use clap_complete::Generator;
 pub mod auth;
 pub mod chat;
 pub mod common;
+mod deadline;
 pub mod file;
 pub mod init_cli;
 pub mod list;
@@ -1757,11 +1759,132 @@ pub struct AppContext {
     pub output: Output,
     //pub base_url: String,
     pub date_format: String,
+    workflow_deadline: deadline::WorkflowDeadline,
+}
+
+impl AppContext {
+    pub(super) fn collect_all<'a, F, T, E>(
+        &'a self,
+        future: F,
+    ) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>
+    where
+        F: Future<Output = std::result::Result<T, E>> + Send + 'a,
+        T: Send + 'a,
+        E: Into<anyhow::Error> + Send + 'a,
+    {
+        let deadline = self.workflow_deadline;
+        Box::pin(async move {
+            deadline
+                .run("anyr --all workflow; read was aborted", future)
+                .await?
+                .map_err(Into::into)
+        })
+    }
+}
+
+fn command_uses_explicit_all(command: &Commands) -> bool {
+    let pagination = match command {
+        Commands::Space(SpaceArgs {
+            command: SpaceCommands::List { pagination, .. },
+        })
+        | Commands::Object(ObjectArgs {
+            command: ObjectCommands::List { pagination, .. },
+        })
+        | Commands::Type(TypeArgs {
+            command: TypeCommands::List { pagination, .. },
+        })
+        | Commands::Property(PropertyArgs {
+            command: PropertyCommands::List { pagination, .. },
+        })
+        | Commands::Member(MemberArgs {
+            command: MemberCommands::List { pagination, .. },
+        })
+        | Commands::Tag(TagArgs {
+            command: TagCommands::List { pagination, .. },
+        })
+        | Commands::Template(TemplateArgs {
+            command: TemplateCommands::List { pagination, .. },
+        })
+        | Commands::List(ListArgs {
+            command:
+                ListCommands::Objects { pagination, .. } | ListCommands::Views { pagination, .. },
+        })
+        | Commands::File(FileArgs {
+            command: FileCommands::List { pagination, .. } | FileCommands::Search { pagination, .. },
+        })
+        | Commands::Search(SearchArgs { pagination, .. }) => pagination,
+        Commands::Chat(ChatArgs { command, .. }) => match command.as_ref() {
+            ChatCommands::List { pagination, .. }
+            | ChatCommands::Messages(ChatMessagesArgs {
+                command: ChatMessagesCommands::Search { pagination, .. },
+            }) => pagination,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    pagination.all
+}
+
+#[cfg(test)]
+mod workflow_deadline_selection_tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_all_commands_select_the_aggregate_deadline() {
+        for args in [
+            vec!["anyr", "object", "list", "space", "--all"],
+            vec!["anyr", "search", "--all"],
+            vec![
+                "anyr", "chat", "messages", "search", "space", "chat", "query", "--all",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("parse explicit --all command");
+            assert!(command_uses_explicit_all(&cli.command));
+        }
+
+        for args in [
+            vec!["anyr", "object", "list", "space"],
+            vec!["anyr", "tag", "get", "space", "property", "name"],
+            vec!["anyr", "view", "objects", "--view", "view", "space", "type"],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("parse ordinary command");
+            assert!(!command_uses_explicit_all(&cli.command));
+        }
+    }
 }
 
 pub async fn run(mut cli: Cli) -> Result<()> {
     validate_output_flags(&cli)?;
     apply_init_cli_endpoint_defaults(&mut cli);
+
+    let workflow_deadline = if command_uses_explicit_all(&cli.command) {
+        deadline::WorkflowDeadline::from_env(
+            "ANYR_WORKFLOW_TIMEOUT_SECS",
+            Duration::from_mins(30),
+            Duration::from_hours(1),
+            true,
+        )?
+    } else {
+        deadline::WorkflowDeadline::disabled()
+    };
+    let init_cli_deadline = if matches!(cli.command, Commands::InitCli { .. }) {
+        Some(init_cli::workflow_deadline_from_env()?)
+    } else {
+        None
+    };
+    #[cfg(feature = "backup")]
+    let backup_workflow_deadline = match &cli.command {
+        Commands::Backup(
+            command @ (anyback_reader::cli::Commands::Create(_)
+            | anyback_reader::cli::Commands::Export(_)
+            | anyback_reader::cli::Commands::Restore(_)
+            | anyback_reader::cli::Commands::Import(_)),
+        ) => {
+            let _ = command;
+            Some(anyback_reader::cli::WorkflowDeadline::from_env()?)
+        }
+        _ => None,
+    };
 
     if let Commands::Completions { shell } = &cli.command {
         return write_completions(*shell, &mut std::io::stdout().lock());
@@ -1791,15 +1914,23 @@ pub async fn run(mut cli: Cli) -> Result<()> {
         client,
         output,
         date_format,
+        workflow_deadline,
     };
 
     match cli.command {
         Commands::Completions { shell } => write_completions(shell, &mut std::io::stdout().lock()),
         Commands::InitCli { join, save_env } => {
-            init_cli::handle(&ctx, join.as_deref(), save_env.as_deref()).await
+            let deadline = init_cli_deadline.context("init-cli workflow deadline missing")?;
+            Box::pin(init_cli::handle(
+                &ctx,
+                join.as_deref(),
+                save_env.as_deref(),
+                deadline,
+            ))
+            .await
         }
         Commands::Auth(args) => auth::handle(&ctx, args).await,
-        Commands::Chat(args) => chat::handle(&ctx, args).await,
+        Commands::Chat(args) => Box::pin(chat::handle(&ctx, args)).await,
         Commands::Space(args) => space::handle(&ctx, args).await,
         Commands::Object(args) => object::handle(&ctx, args).await,
         Commands::File(args) => file::handle(&ctx, args).await,
@@ -1815,7 +1946,14 @@ pub async fn run(mut cli: Cli) -> Result<()> {
         #[cfg(feature = "backup")]
         Commands::Backup(args) => {
             let output = backup_output(&ctx.output);
-            anyback_reader::cli::run_command(args, ctx.client, output).await
+            if let Some(deadline) = backup_workflow_deadline {
+                Box::pin(anyback_reader::cli::run_command_with_deadline(
+                    args, ctx.client, output, deadline,
+                ))
+                .await
+            } else {
+                anyback_reader::cli::run_command(args, ctx.client, output).await
+            }
         }
         #[cfg(feature = "mcp")]
         Commands::Mcp(_) => unreachable!("MCP is dispatched before the standard runtime"),

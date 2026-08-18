@@ -37,7 +37,9 @@ pub async fn handle(ctx: &AppContext, args: super::ObjectArgs) -> Result<()> {
             }
 
             if pagination.all {
-                let items = request.list().await?.collect_all().await?;
+                let items = ctx
+                    .collect_all(async { request.list().await?.collect_all().await })
+                    .await?;
                 if ctx.output.format() == OutputFormat::Table {
                     return ctx.output.emit_table(&items);
                 }

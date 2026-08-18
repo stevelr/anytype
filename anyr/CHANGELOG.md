@@ -46,6 +46,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Bound aggregate `--all` operations with one 30-minute workflow deadline and
+  `init-cli` with one 120-second deadline across its subprocess, verification,
+  and join phases. Timeout overrides use strict finite ranges; child failures
+  terminate and reap the direct child plus its owned Windows Job or Unix process
+  group, and report dispatched mutations as indeterminate. Unix descendants can
+  escape that boundary with `setsid` or `setpgid`. Cleanup that exceeds its bound
+  transfers ownership to a durable OS-thread reaper rather than abandoning the
+  child when the command runtime shuts down.
 - Sort subcommand lists alphabetically throughout the `anyr` help tree.
 - Let disposable headless live workflows select the Anytype CLI through
   `ANYTYPE_CLI_BIN`, defaulting to `anytype` on `PATH`.

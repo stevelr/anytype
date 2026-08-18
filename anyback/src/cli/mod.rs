@@ -1,10 +1,9 @@
 use std::{
     collections::BTreeSet,
-    fs,
+    fs::{self, OpenOptions},
     io::IsTerminal,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use crate::archive::{
@@ -17,7 +16,7 @@ use anytype::{
     prelude::*,
     process_watcher::{
         ProcessCompletionFallback, ProcessKind, ProcessWatchCancelToken, ProcessWatchProgress,
-        ProcessWatchRequest, ProcessWatcher, ProcessWatcherTimeouts,
+        ProcessWatchRequest, ProcessWatcher,
     },
     validation::looks_like_object_id,
 };
@@ -34,24 +33,27 @@ use clap::{Args, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 #[cfg(feature = "snapshot-import")]
 use prost::Message;
+use same_file::Handle as FileIdentity;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+mod deadline;
 pub mod decode;
 #[cfg(feature = "tui")]
 mod inspector;
 pub mod output;
 
+pub use deadline::WorkflowDeadline;
 pub use output::{CommandOutput, OutputMode, TextBuilder};
 
 use decode::{
     ExpandedSnapshotEntry, ImportEventProgressReport, ImportReport, MANIFEST_NAME, Manifest,
-    ManifestSummary, ObjectDescriptor, ObjectImportError, detail_value, format_datetime_display,
-    format_last_modified, manifest_sidecar_path, manifest_summary, parse_expanded_entries,
-    parse_snapshot_details_from_pb, parse_snapshot_details_from_pb_json, read_manifest_from_reader,
-    read_manifest_from_sidecar, read_manifest_prefer_sidecar,
+    ManifestSummary, ObjectDescriptor, ObjectImportError, archive_binding_from_file, detail_value,
+    format_datetime_display, format_last_modified, manifest_sidecar_path, manifest_summary,
+    parse_expanded_entries, parse_snapshot_details_from_pb, parse_snapshot_details_from_pb_json,
+    read_manifest_from_reader, read_manifest_from_sidecar, read_manifest_prefer_sidecar,
 };
 
 const TMP_BACKUP_PREFIX: &str = "anyback_tmp";
@@ -385,6 +387,19 @@ pub struct AppContext {
     pub output: CommandOutput,
 }
 
+struct WorkflowContext {
+    app: AppContext,
+    deadline: WorkflowDeadline,
+}
+
+impl std::ops::Deref for WorkflowContext {
+    type Target = AppContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.app
+    }
+}
+
 /// Commands that render an interactive terminal UI and therefore cannot be
 /// redirected, formatted, or silenced by the standard output contract.
 #[must_use]
@@ -528,8 +543,29 @@ pub async fn run_command(
     client: AnytypeClient,
     output: CommandOutput,
 ) -> Result<()> {
+    let deadline = if matches!(
+        &command,
+        Commands::Create(_) | Commands::Export(_) | Commands::Restore(_) | Commands::Import(_)
+    ) {
+        WorkflowDeadline::from_env()?
+    } else {
+        WorkflowDeadline::local_command()
+    };
+    Box::pin(run_command_with_deadline(command, client, output, deadline)).await
+}
+
+/// Executes a backup command with timeout configuration captured before client construction.
+pub async fn run_command_with_deadline(
+    command: Commands,
+    client: AnytypeClient,
+    output: CommandOutput,
+    deadline: WorkflowDeadline,
+) -> Result<()> {
     validate_command_output(&command, &output)?;
-    let ctx = AppContext { client, output };
+    let ctx = WorkflowContext {
+        app: AppContext { client, output },
+        deadline,
+    };
 
     match command {
         Commands::Create(args) | Commands::Export(args) => handle_backup_create(&ctx, args).await,
@@ -543,18 +579,25 @@ pub async fn run_command(
     }
 }
 
-async fn handle_backup_create(ctx: &AppContext, args: BackupCreateArgs) -> Result<()> {
+async fn handle_backup_create(ctx: &WorkflowContext, args: BackupCreateArgs) -> Result<()> {
     validate_backup_args(&args)?;
+    ctx.deadline.ensure_read_remaining()?;
     let export_options = backup_export_options(&args);
 
     let progress = ProgressReporter::new(&ctx.output, "Starting backup");
-    let space = resolve_space(&ctx.client, &args.space).await?;
+    let space = ctx
+        .deadline
+        .run_read(resolve_space(&ctx.client, &args.space))
+        .await??;
     let backup_target = resolve_backup_target(&args, &space.id)?;
     validate_archive_output(&ctx.output, &backup_target.archive_path, "created archive")?;
     progress.set_message("Resolved destination space");
 
     progress.set_message("Collecting object metadata");
-    let selection = resolve_backup_selection(ctx, &space, &args).await?;
+    let selection = ctx
+        .deadline
+        .run_read(resolve_backup_selection(ctx, &space, &args))
+        .await??;
 
     progress.set_message("Exporting archive");
     let mut backup_builder = ctx
@@ -576,13 +619,13 @@ async fn handle_backup_create(ctx: &AppContext, args: BackupCreateArgs) -> Resul
         backup_builder = backup_builder.object_ids(object_ids);
     }
 
-    let backup = backup_builder
-        .backup()
-        .await
-        .context("export request failed")?;
-    finalize_backup_output_path(&backup.output_path, &backup_target.archive_path)?;
-    progress.finish("Backup completed");
-
+    let backup = ctx
+        .deadline
+        .run_export(backup_builder.backup())
+        .await?
+        .context(
+            "export request failed; read was aborted and a server-side export artifact may exist",
+        )?;
     let manifest = Manifest {
         schema_version: 1,
         tool: format!("anyback/{}", env!("CARGO_PKG_VERSION")),
@@ -599,24 +642,60 @@ async fn handle_backup_create(ctx: &AppContext, args: BackupCreateArgs) -> Resul
         until: selection.until,
         until_display: selection.until_display,
         type_ids: selection.type_ids,
+        archive_size: None,
+        archive_sha256: None,
     };
 
-    write_manifest_sidecar(&backup_target.archive_path, &manifest)?;
-    // Ensure archive+manifest writes are flushed to disk before subsequent operations.
-    sync_filesystem_after_archive_write();
-
-    let report = serde_json::json!({
-        "archive": backup_target.archive_path,
-        "exported": backup.exported,
-        "requested": manifest.objects.len(),
-    });
-    ctx.output.emit(&report, || {
-        format!(
-            "archive={} exported={}",
-            backup_target.archive_path.display(),
-            backup.exported
+    let source_path = backup.output_path.clone();
+    let archive_path = backup_target.archive_path.clone();
+    let publication_manifest = manifest.clone();
+    ctx.deadline
+        .run_read_publication(
+            "backup workflow timed out after export; read was aborted and a server-side export artifact may exist",
+            move || prepare_backup_artifacts(source_path, archive_path, &publication_manifest),
+            commit_backup_artifacts,
         )
-    })
+        .await?;
+    progress.finish("Backup completed");
+    publish_backup_result(
+        ctx,
+        backup_target.archive_path,
+        backup.exported,
+        manifest.objects.len(),
+    )
+    .await
+}
+
+async fn publish_backup_result(
+    ctx: &WorkflowContext,
+    archive_path: PathBuf,
+    exported: i32,
+    requested: usize,
+) -> Result<()> {
+    let report = serde_json::json!({
+        "archive": archive_path.clone(),
+        "exported": exported,
+        "requested": requested,
+    });
+    let output = ctx.output.clone();
+    let report_archive_path = archive_path;
+    ctx.deadline
+        .run_read_publication(
+            "backup workflow timed out after export; read was aborted and a server-side export artifact may exist",
+            move || {
+                let Some(rendered) = output.render(&report, || {
+                    format!(
+                        "archive={} exported={exported}",
+                        report_archive_path.display()
+                    )
+                })? else {
+                    return Ok(output::PreparedOutput::Quiet);
+                };
+                output.prepare_rendered(rendered)
+            },
+            CommandOutput::commit_prepared,
+        )
+        .await
 }
 
 fn validate_backup_args(args: &BackupCreateArgs) -> Result<()> {
@@ -1005,21 +1084,244 @@ fn resolve_backup_target(args: &BackupCreateArgs, space_id: &str) -> Result<Back
     })
 }
 
-fn finalize_backup_output_path(source: &Path, dest: &Path) -> Result<()> {
-    if source == dest {
-        return Ok(());
+struct PreparedBackupPublication {
+    source: PathBuf,
+    staged_archive: PathBuf,
+    archive_identity: FileIdentity,
+    dest: PathBuf,
+    sidecar: PathBuf,
+    staged_sidecar: PathBuf,
+    sidecar_identity: FileIdentity,
+}
+
+impl Drop for PreparedBackupPublication {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.source);
+        let _ = fs::remove_file(&self.staged_archive);
+        let _ = fs::remove_file(&self.staged_sidecar);
     }
-    std::fs::rename(source, dest).with_context(|| {
-        format!(
-            "failed to move backup output from {} to {}",
-            source.display(),
-            dest.display()
+}
+
+fn prepare_backup_artifacts(
+    source: PathBuf,
+    dest: PathBuf,
+    manifest: &Manifest,
+) -> Result<PreparedBackupPublication> {
+    prepare_backup_artifacts_with_hook(source, dest, manifest, |_| Ok(()))
+}
+
+fn prepare_backup_artifacts_with_hook(
+    source: PathBuf,
+    dest: PathBuf,
+    manifest: &Manifest,
+    after_archive_stage: impl FnOnce(&Path) -> Result<()>,
+) -> Result<PreparedBackupPublication> {
+    ensure!(
+        source != dest,
+        "backup staging path unexpectedly equals destination"
+    );
+    let mut source_file = fs::File::open(&source)
+        .with_context(|| format!("failed to open staged archive {}", source.display()))?;
+    let (mut archive_stage, archive_stage_path) = create_backup_staging_file(&dest, "archive")?;
+    if let Err(error) =
+        io::copy(&mut source_file, &mut archive_stage).and_then(|_| archive_stage.sync_all())
+    {
+        drop(archive_stage);
+        let _ = fs::remove_file(&archive_stage_path);
+        return Err(error).context("failed to copy and sync owned backup archive staging file");
+    }
+    if let Err(error) = after_archive_stage(&archive_stage_path) {
+        drop(archive_stage);
+        let _ = fs::remove_file(&archive_stage_path);
+        return Err(error).context("backup archive staging barrier failed");
+    }
+    let (archive_size, archive_sha256) = match archive_binding_from_file(&mut archive_stage) {
+        Ok(binding) => binding,
+        Err(error) => {
+            drop(archive_stage);
+            let _ = fs::remove_file(&archive_stage_path);
+            return Err(error).context("failed to bind staged backup archive handle");
+        }
+    };
+    let archive_identity = match FileIdentity::from_file(archive_stage) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = fs::remove_file(&archive_stage_path);
+            return Err(error).context("failed to retain staged backup archive identity");
+        }
+    };
+    let mut bound_manifest = manifest.clone();
+    bound_manifest.archive_size = Some(archive_size);
+    bound_manifest.archive_sha256 = Some(archive_sha256);
+    let text = match serde_json::to_vec_pretty(&bound_manifest) {
+        Ok(text) => text,
+        Err(error) => {
+            let _ = fs::remove_file(&archive_stage_path);
+            return Err(error).context("failed to serialize bound backup manifest");
+        }
+    };
+
+    let sidecar_path = manifest_sidecar_path(&dest);
+    let (mut stage, stage_path) = match create_backup_staging_file(&sidecar_path, "manifest") {
+        Ok(staging) => staging,
+        Err(error) => {
+            let _ = fs::remove_file(&archive_stage_path);
+            return Err(error);
+        }
+    };
+    if let Err(error) = stage.write_all(&text).and_then(|()| stage.sync_all()) {
+        drop(stage);
+        let _ = fs::remove_file(&archive_stage_path);
+        let _ = fs::remove_file(&stage_path);
+        return Err(error).context("failed to sync staged backup manifest");
+    }
+    let sidecar_identity = match FileIdentity::from_file(stage) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = fs::remove_file(&archive_stage_path);
+            let _ = fs::remove_file(&stage_path);
+            return Err(error).context("failed to retain staged backup manifest identity");
+        }
+    };
+
+    Ok(PreparedBackupPublication {
+        source,
+        staged_archive: archive_stage_path,
+        archive_identity,
+        dest,
+        sidecar: sidecar_path,
+        staged_sidecar: stage_path,
+        sidecar_identity,
+    })
+}
+
+fn commit_backup_artifacts(
+    prepared: PreparedBackupPublication,
+    authority: deadline::PublicationCommit,
+) -> Result<()> {
+    commit_backup_artifacts_with_hook(prepared, authority, || Ok(()))
+}
+
+fn commit_backup_artifacts_with_hook(
+    mut prepared: PreparedBackupPublication,
+    authority: deadline::PublicationCommit,
+    after_manifest_claim: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    authority.commit(|| {
+        ensure!(
+            !prepared.dest.exists(),
+            "backup archive destination already exists: {}",
+            prepared.dest.display()
+        );
+        claim_owned_staging_file(
+            &prepared.staged_sidecar,
+            &prepared.sidecar,
+            &prepared.sidecar_identity,
         )
-    })?;
+        .with_context(|| {
+            format!(
+                "failed to publish backup manifest {} without overwriting an existing destination",
+                prepared.sidecar.display()
+            )
+        })?;
+
+        let finish = after_manifest_claim()
+            .and_then(|()| ensure_file_owned(&prepared.sidecar, &prepared.sidecar_identity))
+            .and_then(|()| {
+                claim_owned_staging_file(
+                    &prepared.staged_archive,
+                    &prepared.dest,
+                    &prepared.archive_identity,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to publish backup archive {} without overwriting an existing destination",
+                        prepared.dest.display()
+                    )
+                })
+            });
+        if let Err(error) = finish {
+            remove_file_if_owned(&prepared.sidecar, &prepared.sidecar_identity).with_context(|| {
+                format!(
+                    "backup publication failed ({error}); refused to remove a manifest path no longer owned by this publication"
+                )
+            })?;
+            return Err(error);
+        }
+
+        fs::remove_file(&prepared.source).context("failed to remove original archive staging file")?;
+        fs::remove_file(&prepared.staged_archive)
+            .context("failed to remove owned archive staging file")?;
+        fs::remove_file(&prepared.staged_sidecar)
+            .context("failed to remove owned manifest staging file")?;
+        prepared.source.clear();
+        prepared.staged_archive.clear();
+        prepared.staged_sidecar.clear();
+        Ok(())
+    })
+}
+
+fn claim_owned_staging_file(
+    staging: &Path,
+    destination: &Path,
+    identity: &FileIdentity,
+) -> Result<()> {
+    ensure_file_owned(staging, identity).context("staging identity changed before publication")?;
+    fs::hard_link(staging, destination)?;
+    ensure_file_owned(destination, identity)
+        .context("published file identity does not match its owned staging file")?;
     Ok(())
 }
 
-async fn handle_restore_apply(ctx: &AppContext, args: RestoreApplyArgs) -> Result<()> {
+fn ensure_file_owned(path: &Path, identity: &FileIdentity) -> Result<()> {
+    let current = FileIdentity::from_path(path).context("failed to inspect file identity")?;
+    ensure!(&current == identity, "file identity changed");
+    Ok(())
+}
+
+fn remove_file_if_owned(path: &Path, identity: &FileIdentity) -> Result<()> {
+    let current = match FileIdentity::from_path(path) {
+        Ok(current) => current,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("failed to inspect publication rollback target"),
+    };
+    ensure!(
+        &current == identity,
+        "publication rollback target identity changed"
+    );
+    fs::remove_file(path).context("failed to remove owned publication path")
+}
+
+fn create_backup_staging_file(destination: &Path, purpose: &str) -> Result<(fs::File, PathBuf)> {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let name = destination
+        .file_name()
+        .ok_or_else(|| anyhow!("backup manifest destination must name a file"))?;
+    for nonce in 0..100_u32 {
+        let path = parent.join(format!(
+            ".{}.anyback-stage-{}-{nonce}",
+            name.to_string_lossy(),
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((file, path)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to create backup {purpose} staging file"));
+            }
+        }
+    }
+    bail!("failed to allocate backup {purpose} staging file")
+}
+
+async fn handle_restore_apply(ctx: &WorkflowContext, args: RestoreApplyArgs) -> Result<()> {
+    ctx.deadline.ensure_restore_preflight_remaining()?;
     let progress = ProgressReporter::new(&ctx.output, "Starting restore");
     let (cancel_sender, mut cancel_state) = new_import_cancel_channel();
     let signal_forwarder = spawn_import_cancel_signal_forwarder(cancel_sender);
@@ -1029,32 +1331,23 @@ async fn handle_restore_apply(ctx: &AppContext, args: RestoreApplyArgs) -> Resul
             .space
             .as_deref()
             .ok_or_else(|| anyhow!("--space is required"))?;
-        let space = resolve_space(&ctx.client, space_name_or_id).await?;
+        let space = ctx
+            .deadline
+            .run_restore_preflight(resolve_space(&ctx.client, space_name_or_id))
+            .await??;
         progress.set_message("Resolved destination space");
-        let plan = build_import_plan(archive, args.objects.as_deref())?;
+        let archive_owned = archive.to_path_buf();
+        let objects_owned = args.objects.clone();
+        let plan = ctx
+            .deadline
+            .run_restore_preflight(tokio::task::spawn_blocking(move || {
+                build_import_plan(&archive_owned, objects_owned.as_deref())
+            }))
+            .await?
+            .context("restore preflight worker failed")??;
         if args.dry_run {
             progress.finish("Restore preflight completed");
-            let payload = serde_json::json!({
-                "dry_run": true,
-                "archive": archive,
-                "space_id": space.id,
-                "requested": plan.selected_ids.len(),
-                "manifest_present": plan.manifest.is_some(),
-            });
-            ctx.output.emit(&payload, || {
-                format!(
-                    "dry-run ok archive={} space={} requested={} manifest={}",
-                    archive.display(),
-                    space.id,
-                    plan.selected_ids.len(),
-                    if plan.manifest.is_some() {
-                        "present"
-                    } else {
-                        "missing"
-                    }
-                )
-            })?;
-            return Ok(());
+            return publish_restore_dry_run(ctx, archive, &space.id, &plan).await;
         }
         progress.set_message("Importing archive");
         let mut report = init_import_report(archive, &space.id, &plan.selected_ids);
@@ -1070,6 +1363,7 @@ async fn handle_restore_apply(ctx: &AppContext, args: RestoreApplyArgs) -> Resul
             &mut cancel_state,
         )
         .await?;
+        ctx.deadline.ensure_mutation_remaining()?;
         let response = aggregate_import_responses(&execution.responses);
         report.event_progress = execution.event_progress;
         apply_import_response(
@@ -1079,15 +1373,84 @@ async fn handle_restore_apply(ctx: &AppContext, args: RestoreApplyArgs) -> Resul
             plan.manifest.as_ref(),
         );
         progress.finish("Restore completed");
-        write_report(&report, args.log.as_deref())?;
+        ctx.deadline.ensure_mutation_remaining()?;
+        if let Some(path) = args.log.clone() {
+            let report_for_file = report.clone();
+            ctx.deadline
+                .run_mutation_publication(
+                    move || prepare_report(&report_for_file, &path),
+                    CommandOutput::commit_prepared,
+                )
+                .await?;
+        }
         log_report_summary(&report);
-        ctx.output
-            .emit(&report, || render_report_summary(&report))?;
+        publish_restore_result(ctx, report).await?;
         Ok(())
     }
     .await;
     signal_forwarder.abort();
     result
+}
+
+async fn publish_restore_dry_run(
+    ctx: &WorkflowContext,
+    archive: &Path,
+    space_id: &str,
+    plan: &ImportPlan,
+) -> Result<()> {
+    let archive = archive.to_path_buf();
+    let space_id = space_id.to_string();
+    let requested = plan.selected_ids.len();
+    let manifest_present = plan.manifest.is_some();
+    let payload = serde_json::json!({
+        "dry_run": true,
+        "archive": archive.clone(),
+        "space_id": space_id.clone(),
+        "requested": requested,
+        "manifest_present": manifest_present,
+    });
+    let output = ctx.output.clone();
+    ctx.deadline
+        .run_read_publication(
+            "restore workflow timed out before mutation dispatch",
+            move || {
+                let Some(rendered) = output.render(&payload, || {
+                    format!(
+                        "dry-run ok archive={} space={} requested={} manifest={}",
+                        archive.display(),
+                        space_id,
+                        requested,
+                        if manifest_present {
+                            "present"
+                        } else {
+                            "missing"
+                        }
+                    )
+                })?
+                else {
+                    return Ok(output::PreparedOutput::Quiet);
+                };
+                output.prepare_rendered(rendered)
+            },
+            CommandOutput::commit_prepared,
+        )
+        .await
+}
+
+async fn publish_restore_result(ctx: &WorkflowContext, report: ImportReport) -> Result<()> {
+    let output = ctx.output.clone();
+    ctx.deadline
+        .run_mutation_publication(
+            move || {
+                let Some(rendered) = output.render(&report, || render_report_summary(&report))?
+                else {
+                    return Ok(output::PreparedOutput::Quiet);
+                };
+                output.prepare_rendered(rendered)
+            },
+            CommandOutput::commit_prepared,
+        )
+        .await
 }
 
 struct ImportPlan {
@@ -1116,7 +1479,7 @@ struct ImportChunkLimits {
 }
 
 fn build_import_plan(archive: &Path, objects_spec: Option<&str>) -> Result<ImportPlan> {
-    let manifest = read_manifest_from_archive(archive).ok();
+    let manifest = read_manifest_from_archive(archive)?;
     let selected_ids = if let Some(spec) = objects_spec {
         let ids = load_object_ids_spec(spec)?;
         ensure!(!ids.is_empty(), "no object ids supplied to --objects");
@@ -1174,20 +1537,6 @@ fn process_progress_to_report(progress: ProcessWatchProgress) -> ImportEventProg
     }
 }
 
-fn parse_timeout_env_secs(name: &str, default: Duration) -> Result<Duration> {
-    match std::env::var(name) {
-        Ok(raw) => {
-            let secs = raw
-                .parse::<u64>()
-                .with_context(|| format!("invalid {name} value: {raw}"))?;
-            ensure!(secs > 0, "{name} must be > 0");
-            Ok(Duration::from_secs(secs))
-        }
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(err) => Err(anyhow!("failed to read {name}: {err}")),
-    }
-}
-
 #[cfg(feature = "tui")]
 fn parse_cache_size(raw: &str) -> Result<usize> {
     let input = raw.trim();
@@ -1213,28 +1562,6 @@ fn parse_cache_size(raw: &str) -> Result<usize> {
         .checked_mul(multiplier)
         .ok_or_else(|| anyhow!("cache size is too large"))?;
     usize::try_from(bytes).context("cache size exceeds platform limits")
-}
-
-fn import_event_timeouts_from_env() -> Result<ProcessWatcherTimeouts> {
-    let defaults = ProcessWatcherTimeouts::default();
-    Ok(ProcessWatcherTimeouts {
-        event_stream_connect_timeout: parse_timeout_env_secs(
-            "ANYBACK_EVENT_STREAM_CONNECT_TIMEOUT",
-            defaults.event_stream_connect_timeout,
-        )?,
-        process_start_timeout: parse_timeout_env_secs(
-            "ANYBACK_PROCESS_START_TIMEOUT",
-            defaults.process_start_timeout,
-        )?,
-        process_idle_timeout: parse_timeout_env_secs(
-            "ANYBACK_PROCESS_IDLE_TIMEOUT",
-            defaults.process_idle_timeout,
-        )?,
-        process_done_timeout: parse_timeout_env_secs(
-            "ANYBACK_PROCESS_DONE_TIMEOUT",
-            defaults.process_done_timeout,
-        )?,
-    })
 }
 
 #[cfg(feature = "snapshot-import")]
@@ -1458,7 +1785,7 @@ fn format_import_api_error(description: &str, error_code: i64) -> String {
 
 #[cfg(feature = "snapshot-import")]
 async fn execute_object_import_batches(
-    ctx: &AppContext,
+    ctx: &WorkflowContext,
     space_id: &str,
     batches: Vec<Vec<import_request::Snapshot>>,
     import_mode: ImportModeArg,
@@ -1466,14 +1793,25 @@ async fn execute_object_import_batches(
     interactive_output: bool,
     cancel_state: &mut ImportCancelState,
 ) -> Result<ImportExecutionOutcome> {
-    let grpc = ctx.client.grpc_client().await?;
+    let grpc = ctx
+        .deadline
+        .run_restore_preflight(ctx.client.grpc_client())
+        .await??;
     let mut commands = grpc.client_commands();
-    let timeouts = import_event_timeouts_from_env()?;
-    let mut tracker = ProcessWatcher::subscribe(&grpc, timeouts).await?;
+    let timeouts = ctx.deadline.process_timeouts()?;
+    let mut tracker = ctx
+        .deadline
+        .run_restore_preflight(ProcessWatcher::subscribe(&grpc, timeouts))
+        .await??;
     let watch_request = import_watch_request(space_id, interactive_output);
     let import_result: Result<_> = async {
         let mut responses = Vec::with_capacity(batches.len());
         for batch in batches {
+            ctx.deadline.ensure_restore_preflight_remaining()?;
+            let generation = tracker.begin_generation().context(
+                "failed to establish import process event generation before mutation dispatch",
+            )?;
+            ctx.deadline.ensure_restore_preflight_remaining()?;
             let request = ObjectImportRequest {
                 space_id: space_id.to_string(),
                 snapshots: batch,
@@ -1489,15 +1827,28 @@ async fn execute_object_import_batches(
             let request = with_token(tonic::Request::new(request), grpc.token())
                 .map_err(|err| anyhow!("failed to attach gRPC token: {err}"))?;
 
-            let response = commands
-                .object_import(request)
-                .await
-                .context("object import RPC failed")
+            let response = ctx
+                .deadline
+                .run_mutation(commands.object_import(request))
+                .await?
+                .context("object import RPC failed; mutation outcome is indeterminate")
                 .map(tonic::Response::into_inner)?;
-            tracker
-                .wait_for_process(&grpc, &watch_request, Some(cancel_state.receiver_mut()))
-                .await
-                .context("timed out waiting for import process completion event")?;
+            let correlation = tracker
+                .correlate_generation(generation, &response.collection_id)
+                .context(
+                    "import response could not be correlated to process completion; mutation outcome is indeterminate",
+                )?;
+            ctx.deadline
+                .run_mutation(tracker.wait_for_generation(
+                    &grpc,
+                    &watch_request,
+                    correlation,
+                    Some(cancel_state.receiver_mut()),
+                ))
+                .await?
+                .context(
+                    "import process completion failed; mutation outcome is indeterminate",
+                )?;
             responses.push(response);
         }
         Ok(ImportExecutionOutcome {
@@ -1521,7 +1872,7 @@ async fn execute_object_import_batches(
 }
 
 async fn execute_object_import_path(
-    ctx: &AppContext,
+    ctx: &WorkflowContext,
     space_id: &str,
     archive_path: &Path,
     import_mode: ImportModeArg,
@@ -1530,10 +1881,16 @@ async fn execute_object_import_path(
     cancel_state: &mut ImportCancelState,
 ) -> Result<ImportExecutionOutcome> {
     let import_paths = pb_import_paths(archive_path)?;
-    let grpc = ctx.client.grpc_client().await?;
+    let grpc = ctx
+        .deadline
+        .run_restore_preflight(ctx.client.grpc_client())
+        .await??;
     let mut commands = grpc.client_commands();
-    let timeouts = import_event_timeouts_from_env()?;
-    let mut tracker = ProcessWatcher::subscribe(&grpc, timeouts).await?;
+    let timeouts = ctx.deadline.process_timeouts()?;
+    let mut tracker = ctx
+        .deadline
+        .run_restore_preflight(ProcessWatcher::subscribe(&grpc, timeouts))
+        .await??;
     let watch_request = import_watch_request(space_id, interactive_output);
     let request = ObjectImportRequest {
         space_id: space_id.to_string(),
@@ -1552,17 +1909,35 @@ async fn execute_object_import_path(
         })),
     };
     let import_result: Result<_> = async {
+        ctx.deadline.ensure_restore_preflight_remaining()?;
+        let generation = tracker.begin_generation().context(
+            "failed to establish import process event generation before mutation dispatch",
+        )?;
+        ctx.deadline.ensure_restore_preflight_remaining()?;
         let request = with_token(tonic::Request::new(request), grpc.token())
             .map_err(|err| anyhow!("failed to attach gRPC token: {err}"))?;
-        let response = commands
-            .object_import(request)
-            .await
-            .context("object import RPC failed")
+        let response = ctx
+            .deadline
+            .run_mutation(commands.object_import(request))
+            .await?
+            .context("object import RPC failed; mutation outcome is indeterminate")
             .map(tonic::Response::into_inner)?;
-        tracker
-            .wait_for_process(&grpc, &watch_request, Some(cancel_state.receiver_mut()))
-            .await
-            .context("timed out waiting for import process completion event")?;
+        let correlation = tracker
+            .correlate_generation(generation, &response.collection_id)
+            .context(
+                "import response could not be correlated to process completion; mutation outcome is indeterminate",
+            )?;
+        ctx.deadline
+            .run_mutation(tracker.wait_for_generation(
+                &grpc,
+                &watch_request,
+                correlation,
+                Some(cancel_state.receiver_mut()),
+            ))
+            .await?
+            .context(
+                "import process completion failed; mutation outcome is indeterminate",
+            )?;
         Ok(ImportExecutionOutcome {
             responses: vec![response],
             event_progress: None,
@@ -1593,7 +1968,7 @@ fn import_watch_request(space_id: &str, interactive_output: bool) -> ProcessWatc
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_object_import(
-    ctx: &AppContext,
+    ctx: &WorkflowContext,
     space_id: &str,
     archive_path: &Path,
     explicit_object_selection: bool,
@@ -2296,10 +2671,10 @@ impl ProgressReporter {
     }
 }
 
-fn read_manifest_from_archive(path: &Path) -> Result<Manifest> {
+fn read_manifest_from_archive(path: &Path) -> Result<Option<Manifest>> {
     let (sidecar_manifest, sidecar_error) = read_manifest_from_sidecar(path);
     if let Some(manifest) = sidecar_manifest {
-        return Ok(manifest);
+        return Ok(Some(manifest));
     }
     if let Some(err) = sidecar_error {
         bail!(
@@ -2311,31 +2686,12 @@ fn read_manifest_from_archive(path: &Path) -> Result<Manifest> {
     let reader = ArchiveReader::from_path(path)?;
     let (manifest, manifest_error) = read_manifest_from_reader(&reader);
     if let Some(manifest) = manifest {
-        return Ok(manifest);
+        return Ok(Some(manifest));
     }
     if let Some(err) = manifest_error {
         bail!("invalid manifest in archive {}: {err}", path.display());
     }
-    bail!("manifest missing from archive {}", path.display())
-}
-
-fn write_manifest_sidecar(path: &Path, manifest: &Manifest) -> Result<()> {
-    let text = serde_json::to_string_pretty(manifest)?;
-    let sidecar_path = manifest_sidecar_path(path);
-    if let Some(parent) = sidecar_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(&sidecar_path, text)
-        .with_context(|| format!("failed to write {}", sidecar_path.display()))?;
-    Ok(())
-}
-
-fn sync_filesystem_after_archive_write() {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        nix::unistd::sync();
-    }
+    Ok(None)
 }
 
 fn descriptors_from_selection(
@@ -2401,13 +2757,12 @@ fn render_report_summary(report: &ImportReport) -> String {
     text.finish()
 }
 
-fn write_report(report: &ImportReport, path: Option<&Path>) -> Result<()> {
-    if let Some(path) = path {
-        let text = serde_json::to_string_pretty(report)?;
-        std::fs::write(path, text)
-            .with_context(|| format!("failed to write report to {}", path.display()))?;
-    }
-    Ok(())
+fn prepare_report(report: &ImportReport, path: &Path) -> Result<output::PreparedOutput> {
+    let output = CommandOutput::new(OutputMode::Pretty, Some(path.to_path_buf()));
+    let rendered = output
+        .render(report, String::new)?
+        .ok_or_else(|| anyhow!("report output was unexpectedly suppressed"))?;
+    output.prepare_rendered(rendered)
 }
 
 fn sanitize_path_component(input: &str) -> String {
@@ -2465,6 +2820,272 @@ mod tests {
         assert!(
             err.to_string().contains("failed to read object list file"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    fn publication_test_manifest() -> Manifest {
+        Manifest {
+            schema_version: 1,
+            tool: "anyback/test".to_string(),
+            created_at: "1970-01-01T00:00:00Z".to_string(),
+            created_at_display: None,
+            source_space_id: "space-test".to_string(),
+            source_space_name: "Test".to_string(),
+            format: "pb".to_string(),
+            object_count: 0,
+            objects: Vec::new(),
+            mode: Some("full".to_string()),
+            since: None,
+            since_display: None,
+            until: None,
+            until_display: None,
+            type_ids: None,
+            archive_size: None,
+            archive_sha256: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_publication_refuses_existing_destination() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("stage.zip");
+        let destination = temp.path().join("backup.zip");
+        fs::write(&source, b"new archive").expect("source");
+        fs::write(&destination, b"existing archive").expect("destination");
+        let manifest = publication_test_manifest();
+        let error = WorkflowDeadline::local_command()
+            .run_read_publication(
+                "test timeout",
+                move || prepare_backup_artifacts(source, destination, &manifest),
+                commit_backup_artifacts,
+            )
+            .await
+            .expect_err("existing destination must not be replaced");
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(
+            fs::read(temp.path().join("backup.zip")).expect("destination"),
+            b"existing archive"
+        );
+        assert!(
+            !manifest_sidecar_path(&temp.path().join("backup.zip")).exists(),
+            "an archive collision must not leave an orphan manifest"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_blocking_publication_cannot_report_success_or_replace_output() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let destination = temp.path().join("result.json");
+        fs::write(&destination, b"existing").expect("destination");
+        let output = CommandOutput::new(OutputMode::Pretty, Some(destination.clone()));
+        let deadline = WorkflowDeadline::new(
+            Some(std::time::Duration::from_millis(20)),
+            ProcessWatcherTimeouts::default(),
+        );
+        let result = deadline
+            .run_read_publication(
+                "publication timed out",
+                move || output.prepare_rendered("replacement".to_string()),
+                |prepared, authority| {
+                    // Models descheduling after the worker completes but before
+                    // the caller-owned commit reaches its final boundary.
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                    CommandOutput::commit_prepared(prepared, authority)
+                },
+            )
+            .await;
+        assert!(result.is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(fs::read(destination).expect("destination"), b"existing");
+    }
+
+    #[tokio::test]
+    async fn claimed_commit_is_joined_across_deadline_instead_of_timing_out() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let destination = temp.path().join("claimed");
+        let committed = destination.clone();
+        let deadline = WorkflowDeadline::new(
+            Some(std::time::Duration::from_millis(20)),
+            ProcessWatcherTimeouts::default(),
+        );
+        deadline
+            .run_read_publication(
+                "publication timed out",
+                || Ok(()),
+                move |(), authority| {
+                    authority.commit(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(60));
+                        fs::write(committed, b"committed")?;
+                        Ok(())
+                    })
+                },
+            )
+            .await
+            .expect("a commit claimed before expiry reaches terminal finalization");
+        assert_eq!(fs::read(destination).expect("committed"), b"committed");
+    }
+
+    #[test]
+    fn crash_before_manifest_claim_publishes_neither_artifact() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("stage.zip");
+        let destination = temp.path().join("backup.zip");
+        fs::write(&source, b"archive").expect("source");
+        let prepared =
+            prepare_backup_artifacts(source, destination.clone(), &publication_test_manifest())
+                .expect("prepare");
+        drop(prepared);
+        assert!(!destination.exists());
+        assert!(!manifest_sidecar_path(&destination).exists());
+    }
+
+    #[test]
+    fn staging_path_swap_cannot_change_bound_or_published_archive() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("stage.zip");
+        let destination = temp.path().join("backup.zip");
+        let retained = temp.path().join("retained-original.zip");
+        fs::write(&source, b"owned archive bytes").expect("source");
+        let retained_for_hook = retained.clone();
+        let prepared = prepare_backup_artifacts_with_hook(
+            source,
+            destination.clone(),
+            &publication_test_manifest(),
+            move |staging| {
+                fs::rename(staging, &retained_for_hook)?;
+                fs::write(staging, b"foreign swapped bytes")?;
+                Ok(())
+            },
+        )
+        .expect("prepare retains the opened archive handle");
+
+        let bound: Manifest = serde_json::from_slice(
+            &fs::read(&prepared.staged_sidecar).expect("bound staged manifest"),
+        )
+        .expect("parse bound manifest");
+        let (expected_size, expected_digest) =
+            decode::archive_binding(&retained).expect("binding for retained original archive");
+        assert_eq!(bound.archive_size, Some(expected_size));
+        assert_eq!(
+            bound.archive_sha256.as_deref(),
+            Some(expected_digest.as_str())
+        );
+        assert!(
+            ensure_file_owned(&prepared.staged_archive, &prepared.archive_identity).is_err(),
+            "the swapped pathname must not satisfy the retained opened identity"
+        );
+        drop(prepared);
+        assert!(!destination.exists());
+        assert!(!manifest_sidecar_path(&destination).exists());
+    }
+
+    #[test]
+    fn crash_after_manifest_claim_cannot_bind_a_missing_or_foreign_archive() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("stage.zip");
+        let destination = temp.path().join("backup.zip");
+        fs::write(&source, b"archive").expect("source");
+        let prepared =
+            prepare_backup_artifacts(source, destination.clone(), &publication_test_manifest())
+                .expect("prepare");
+        claim_owned_staging_file(
+            &prepared.staged_sidecar,
+            &prepared.sidecar,
+            &prepared.sidecar_identity,
+        )
+        .expect("manifest claim");
+        drop(prepared);
+        assert!(!destination.exists());
+        let (manifest, missing_error) = read_manifest_from_sidecar(&destination);
+        assert!(manifest.is_none());
+        assert_eq!(
+            missing_error.as_deref(),
+            Some("sidecar archive binding could not be verified")
+        );
+        fs::write(&destination, b"foreign archive").expect("foreign archive");
+        let (manifest, mismatch_error) = read_manifest_from_sidecar(&destination);
+        assert!(manifest.is_none());
+        assert_eq!(
+            mismatch_error.as_deref(),
+            Some("sidecar archive binding does not match the selected archive")
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_archive_and_manifest_have_a_valid_binding() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("stage.zip");
+        let destination = temp.path().join("backup.zip");
+        fs::write(&source, b"archive").expect("source");
+        let result_path = destination.clone();
+        WorkflowDeadline::local_command()
+            .run_read_publication(
+                "test timeout",
+                move || prepare_backup_artifacts(source, destination, &publication_test_manifest()),
+                commit_backup_artifacts,
+            )
+            .await
+            .expect("publish bound pair");
+        let (manifest, error) = read_manifest_from_sidecar(&result_path);
+        assert!(error.is_none());
+        assert!(manifest.is_some());
+    }
+
+    #[tokio::test]
+    async fn concurrent_archive_replacement_is_preserved_without_an_orphan_manifest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("stage.zip");
+        let destination = temp.path().join("backup.zip");
+        fs::write(&source, b"archive").expect("source");
+        let hook_path = destination.clone();
+        let assertion_path = destination.clone();
+        let result = WorkflowDeadline::local_command()
+            .run_read_publication(
+                "test timeout",
+                move || prepare_backup_artifacts(source, destination, &publication_test_manifest()),
+                move |prepared, authority| {
+                    commit_backup_artifacts_with_hook(prepared, authority, move || {
+                        fs::write(&hook_path, b"foreign archive replacement")?;
+                        Ok(())
+                    })
+                },
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(&assertion_path).expect("replacement"),
+            b"foreign archive replacement"
+        );
+        assert!(!manifest_sidecar_path(&assertion_path).exists());
+    }
+
+    #[tokio::test]
+    async fn concurrent_manifest_replacement_is_preserved_without_published_archive() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("stage.zip");
+        let destination = temp.path().join("backup.zip");
+        fs::write(&source, b"archive").expect("source");
+        let replacement_path = manifest_sidecar_path(&destination);
+        let hook_path = replacement_path.clone();
+        let assertion_archive = destination.clone();
+        let result = WorkflowDeadline::local_command()
+            .run_read_publication(
+                "test timeout",
+                move || prepare_backup_artifacts(source, destination, &publication_test_manifest()),
+                move |prepared, authority| {
+                    commit_backup_artifacts_with_hook(prepared, authority, move || {
+                        fs::remove_file(&hook_path).expect("remove owned manifest claim");
+                        fs::write(&hook_path, b"foreign manifest replacement")?;
+                        Ok(())
+                    })
+                },
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!assertion_archive.exists());
+        assert_eq!(
+            fs::read(replacement_path).expect("replacement"),
+            b"foreign manifest replacement"
         );
     }
 
@@ -2985,6 +3606,8 @@ mod tests {
             until: None,
             until_display: None,
             type_ids: None,
+            archive_size: None,
+            archive_sha256: None,
         };
 
         let text = serde_json::to_string(&manifest).unwrap();
@@ -3169,13 +3792,56 @@ mod tests {
     }
 
     #[test]
+    fn build_import_plan_rejects_present_invalid_or_mismatched_sidecar() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp.path().join("archive.zip");
+        {
+            let file = fs::File::create(&zip_path).expect("archive file");
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file(
+                    "objects/bafyreiaebddr63d7sye3eggmtkyeioqxftoaipobsynceksj6faedvd2xi.pb",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .expect("archive entry");
+            writer.write_all(b"payload").expect("archive payload");
+            writer.finish().expect("finish archive");
+        }
+        let sidecar = manifest_sidecar_path(&zip_path);
+        fs::write(&sidecar, b"{not-json").expect("invalid sidecar");
+        let invalid = match build_import_plan(&zip_path, None) {
+            Ok(_) => panic!("a present invalid sidecar must fail restore planning"),
+            Err(error) => error.to_string(),
+        };
+        assert!(invalid.contains("invalid sidecar manifest"));
+
+        let mut mismatched = publication_test_manifest();
+        mismatched.archive_size = Some(1);
+        mismatched.archive_sha256 = Some("00".repeat(32));
+        fs::write(
+            &sidecar,
+            serde_json::to_vec(&mismatched).expect("serialize mismatched sidecar"),
+        )
+        .expect("mismatched sidecar");
+        let mismatch = match build_import_plan(&zip_path, None) {
+            Ok(_) => panic!("a binding mismatch must fail restore planning"),
+            Err(error) => error.to_string(),
+        };
+        assert!(mismatch.contains("does not match"));
+    }
+
+    #[test]
     fn build_import_plan_uses_archive_path_directly() {
         let temp = tempfile::tempdir().unwrap();
         let objects_dir = temp.path().join("objects");
         std::fs::create_dir_all(&objects_dir).unwrap();
         let id = "bafyreiaebddr63d7sye3eggmtkyeioqxftoaipobsynceksj6faedvd2xi";
         std::fs::write(objects_dir.join(format!("{id}.pb")), b"payload").unwrap();
-        std::fs::write(temp.path().join("manifest.json"), r#"{"schema_version":1}"#).unwrap();
+        std::fs::write(
+            temp.path().join("manifest.json"),
+            serde_json::to_vec(&publication_test_manifest()).unwrap(),
+        )
+        .unwrap();
 
         let plan = build_import_plan(temp.path(), None).unwrap();
         assert_eq!(plan.import_path, temp.path());
@@ -3251,15 +3917,6 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].len(), 2);
         assert_eq!(batches[1].len(), 1);
-    }
-
-    #[test]
-    fn parse_timeout_env_secs_rejects_zero() {
-        let key = "ANYBACK_TEST_TIMEOUT_ENV";
-        unsafe { std::env::set_var(key, "0") };
-        let err = parse_timeout_env_secs(key, Duration::from_secs(5)).unwrap_err();
-        unsafe { std::env::remove_var(key) };
-        assert!(err.to_string().contains("must be > 0"));
     }
 
     #[cfg(feature = "tui")]

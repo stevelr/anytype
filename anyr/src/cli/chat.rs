@@ -52,7 +52,8 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                         );
                     }
                     let result = if pagination.all {
-                        collect_all_grpc_chats(ctx, Some(&space_id), Some(&text)).await?
+                        ctx.collect_all(collect_all_grpc_chats(ctx, Some(&space_id), Some(&text)))
+                            .await?
                     } else {
                         ctx.client
                             .chats()
@@ -78,7 +79,8 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                         request = request.filter(filter);
                     }
                     let items = if pagination.all {
-                        request.list().await?.collect_all().await?
+                        ctx.collect_all(async { request.list().await?.collect_all().await })
+                            .await?
                     } else {
                         request.list().await?.into_response().items
                     };
@@ -89,7 +91,8 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                     bail!("--filter requires --space (single-space REST listing)");
                 }
                 let result = if pagination.all {
-                    collect_all_grpc_chats(ctx, None, Some(&text)).await?
+                    ctx.collect_all(collect_all_grpc_chats(ctx, None, Some(&text)))
+                        .await?
                 } else {
                     ctx.client
                         .chats()
@@ -106,7 +109,8 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                     bail!("--filter requires --space (single-space REST listing)");
                 }
                 let result = if pagination.all {
-                    collect_all_grpc_chats(ctx, None, None).await?
+                    ctx.collect_all(collect_all_grpc_chats(ctx, None, None))
+                        .await?
                 } else {
                     ctx.client
                         .chats()
@@ -504,7 +508,10 @@ pub async fn handle(ctx: &AppContext, args: super::ChatArgs) -> Result<()> {
                     .await?
                     .chat_id;
                 let mut page = if pagination.all {
-                    collect_all_message_search_results(ctx, &space_id, &chat_id, &query).await?
+                    ctx.collect_all(collect_all_message_search_results(
+                        ctx, &space_id, &chat_id, &query,
+                    ))
+                    .await?
                 } else {
                     ctx.client
                         .chats()
