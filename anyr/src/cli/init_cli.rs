@@ -49,6 +49,7 @@ pub(super) async fn handle(
     ctx: &AppContext,
     join: Option<&str>,
     save_env: Option<&Path>,
+    force: bool,
     deadline: WorkflowDeadline,
 ) -> Result<()> {
     if let Some(invite) = join {
@@ -66,7 +67,11 @@ pub(super) async fn handle(
         .duration_since(UNIX_EPOCH)
         .context("system clock is before the Unix epoch")?
         .as_secs();
-    let cli_credentials = load_reusable_cli_credentials(None)?;
+    let cli_credentials = if force {
+        None
+    } else {
+        load_reusable_cli_credentials(None)?
+    };
     let account_name = if cli_credentials.is_none() {
         Some(account_name(std::env::var_os("ANY_USER"), timestamp)?)
     } else {
@@ -286,16 +291,32 @@ fn load_reusable_cli_credentials(path: Option<&Path>) -> Result<Option<GrpcCrede
         .transpose()
 }
 
+/// Explains how to proceed when the Anytype CLI config exists but cannot be
+/// reused because a credential is missing (typically because the CLI stored
+/// the account key in an OS keychain rather than in `config.json`).
+const CLI_CONFIG_UNUSABLE_HINT: &str = "An Anytype CLI config was found, but anyr cannot reuse it. \
+Either enter the account key with `anyr auth set-grpc --account-key` (or `--bip39`), \
+or run `anyr init-cli --force` to ignore the existing config and create a new account.";
+
 fn validate_reusable_cli_credentials(credentials: &GrpcCredentials) -> Result<GrpcCredentials> {
     let account_id = credentials
         .account_id()
         .filter(|value| valid_credential(value))
-        .context("Anytype CLI config does not contain a valid accountId")?
+        .with_context(|| {
+            format!(
+                "Anytype CLI config does not contain a valid accountId. {CLI_CONFIG_UNUSABLE_HINT}"
+            )
+        })?
         .to_owned();
     let account_key = credentials
         .account_key()
         .filter(|value| valid_credential(value))
-        .context("Anytype CLI config does not contain a valid accountKey")?
+        .with_context(|| {
+            format!(
+                "Anytype CLI config does not contain accountKey (it may be stored in the OS keychain \
+instead of config.json). {CLI_CONFIG_UNUSABLE_HINT}"
+            )
+        })?
         .to_owned();
     Ok(GrpcCredentials::from_account_key(account_key).with_account_id(account_id))
 }
@@ -1153,12 +1174,17 @@ mod tests {
         ])
         .expect("parse init-cli");
         match cli.command {
-            Commands::InitCli { join, save_env } => {
+            Commands::InitCli {
+                join,
+                save_env,
+                force,
+            } => {
                 assert_eq!(
                     join.as_deref(),
                     Some("anytype://invite/?cid=test&key=value")
                 );
                 assert_eq!(save_env.as_deref(), Some(Path::new("/tmp/anyr.env")));
+                assert!(!force);
             }
             command => panic!("unexpected command: {command:?}"),
         }
@@ -1413,12 +1439,17 @@ esac
             validate_reusable_cli_credentials(&GrpcCredentials::from_account_key(ACCOUNT_KEY))
                 .is_err()
         );
+        let missing_key = validate_reusable_cli_credentials(
+            &GrpcCredentials::default().with_account_id(ACCOUNT_ID),
+        )
+        .expect_err("missing accountKey is rejected")
+        .to_string();
         assert!(
-            validate_reusable_cli_credentials(
-                &GrpcCredentials::default().with_account_id(ACCOUNT_ID)
-            )
-            .is_err()
+            missing_key.contains("does not contain accountKey"),
+            "{missing_key}"
         );
+        assert!(missing_key.contains("anyr auth set-grpc"), "{missing_key}");
+        assert!(missing_key.contains("init-cli --force"), "{missing_key}");
     }
 
     #[test]

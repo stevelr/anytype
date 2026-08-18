@@ -8,6 +8,23 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- `anyr init-cli --force` ignores an existing Anytype CLI config
+  (`~/.anytype/config.json`) and creates a new account instead of reusing it.
+- When `init-cli` finds a CLI config without `accountKey` (the Anytype CLI
+  keeps the key in the OS keychain on macOS and desktop Linux), the error now
+  says so and points at `anyr auth set-grpc --account-key` / `--bip39` or
+  `anyr init-cli --force`.
+- Default HTTP endpoint selection: with no `--url` / `ANYTYPE_URL`, `init-cli`
+  targets the headless server (`http://127.0.0.1:31012`); other commands target
+  the headless server when gRPC credentials are stored in the selected keystore
+  and otherwise the desktop app (`http://127.0.0.1:31009`).
+
+### Changed
+
+- Credentials are stored as one keystore entry per service instead of four
+  (see the `anytype` crate changelog), so OS keychains prompt once per
+  application. Existing keystores migrate automatically on first use.
+
 - Add the Anytype Toolbox Zola documentation site, with task-oriented `anyr`
   installation, quick-reference, Markdown export, and Rust-library guides.
 - Publish cargo-dist archives, checksums, shell and PowerShell installers, and

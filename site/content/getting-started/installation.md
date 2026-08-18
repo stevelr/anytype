@@ -64,7 +64,14 @@ anyr init-cli
 `init-cli` reuses the server account when its config is present, creates a fresh
 HTTP token, stores both credential families, and verifies authenticated HTTP and
 gRPC access. Use `ANYTYPE_CLI_BIN` when the `anytype` executable is not on
-`PATH`.
+`PATH`. If the CLI config exists but its account key lives in the OS keychain
+(macOS, desktop Linux), either enter the key with
+`anyr auth set-grpc --account-key` or run `anyr init-cli --force` to create a
+new account.
+
+Once gRPC credentials are stored, `anyr` commands default to the headless
+server's HTTP port (`31012`) instead of the desktop app (`31009`); set
+`ANYTYPE_URL` or `--url` to choose explicitly.
 
 ## Confirm the connection
 

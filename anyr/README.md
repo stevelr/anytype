@@ -144,7 +144,7 @@ These options apply to most commands.
     <tr>
       <td rowspan="2">Server endpoints</td>
       <td><code>--url URL</code></td>
-      <td>HTTP endpoint. Default: <code>http://127.0.0.1:31009</code></td>
+      <td>HTTP endpoint. Default: <code>http://127.0.0.1:31012</code> (headless cli) when gRPC credentials are stored in the keystore, else <code>http://127.0.0.1:31009</code> (desktop app)</td>
       <td>ANYTYPE_URL</td>
     </tr>
     <tr>
@@ -543,7 +543,12 @@ nix build
 
 Configuration can be set with command-line parameters or environment variables.
 
-- **Url** The default url is the desktop client `http://127.0.0.1:31009`. Override with `--url` or the environment variable `ANYTYPE_URL`.
+- **Url** Override with `--url` or the environment variable `ANYTYPE_URL`. When
+  neither is set, `anyr` picks a default: `init-cli` always targets the headless
+  cli server `http://127.0.0.1:31012`; every other command targets the headless
+  server when gRPC credentials are already stored in the selected keystore
+  (meaning the Anytype CLI is in use), and otherwise the desktop app
+  `http://127.0.0.1:31009`.
 
 - **Key Storage** The default key storage method should work on most platforms. Options for overriding the defaults are described below in [Key storage](#key-storage).
 
@@ -569,7 +574,12 @@ anyr ARGS ...
   from the account key instead of retaining the config's session token. This
   preserves the server's existing account and spaces. An unreadable,
   malformed, or incomplete config stops initialization; only a missing config
-  permits `anytype auth create` to create a new account. Set
+  permits `anytype auth create` to create a new account. If the config exists
+  but has no `accountKey` (for example on macOS or desktop Linux, where the
+  Anytype CLI keeps the key in the OS keychain), the error explains the two
+  ways forward: enter the key with `anyr auth set-grpc --account-key` (or
+  `--bip39`), or run `anyr init-cli --force` to ignore the existing config and
+  create a new account. Set
   `ANYTYPE_CLI_BIN` to an alternate executable path when `anytype` is not on
   `PATH`. A new account is named `bot_<timestamp>`; set `ANY_USER` to choose
   it explicitly. To join a space during setup, use `anyr init-cli --join

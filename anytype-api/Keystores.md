@@ -5,8 +5,10 @@ Keystores store authentication tokens for http and grpc endpoints. Various imple
 The internal interface for a keystore is defined by the `keyring_core` crate. Data is stored as a tuple (service, user, secret).
 
 - "service", is a string name, used to keep keys isolated between different applications. Service is also displayed in OS prompts to allow access to data in keyrings.
-- "user" represents the kind of secret, to distinguish, for example, an http auth token from a grpc session token.
-- "secret" is the value of the token. In anytype, secrets are always valid utf8 strings.
+- "user" names the entry within the service. anytype stores **all** credentials for a service (HTTP token, gRPC account id, account key, and session token) in a single entry, `user = "credentials"`, whose secret is a small JSON document (`{"v":1,"http_token":...,"account_id":...,"account_key":...,"session_token":...}`; absent fields are omitted).
+- "secret" is the value of the entry. In anytype, secrets are always valid utf8 strings.
+
+Storing every credential in one entry means an OS keyring (macOS Keychain, Secret Service, Windows Credential Manager) asks for access once per application rather than once per credential. Keystores written by earlier versions, which used one entry per credential (`http_token`, `account_id`, `account_key`, `session_token`), are still read and are migrated to the single entry the first time they are accessed.
 
 Keystores can store keys for multiple processes and multiple service ids.
 

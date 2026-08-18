@@ -39,7 +39,8 @@ pub mod view;
 
 // default keyring service and default config subdir for storing key file
 const DEFAULT_KEYRING_SERVICE: &str = "anyr"; // env!("CARGO_BIN_NAME");
-const HEADLESS_HTTP_URL: &str = "http://127.0.0.1:31012";
+const HEADLESS_HTTP_URL: &str = ANYTYPE_HEADLESS_URL;
+const DESKTOP_HTTP_URL: &str = ANYTYPE_DESKTOP_URL;
 const HEADLESS_GRPC_ENDPOINT: &str = "http://127.0.0.1:31010";
 
 /// date strftime-inspired format
@@ -51,7 +52,8 @@ const DEFAULT_TABLE_DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 #[command(author, version, about = "anyr: list, search, and manipulate Anytype objects", long_about = None)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
-    /// API endpoint URL. Default: environment `ANYTYPE_URL` or <http://127.0.0.1:31009> (desktop app)
+    /// API endpoint URL. Default: environment `ANYTYPE_URL`; otherwise <http://127.0.0.1:31012>
+    /// (headless cli) when gRPC credentials are stored in the keystore, else <http://127.0.0.1:31009> (desktop app)
     #[arg(short = 'u', long, env = "ANYTYPE_URL")]
     pub url: Option<String>,
 
@@ -118,6 +120,10 @@ pub enum Commands {
         /// Save initialized credentials as a sourceable POSIX shell environment file
         #[arg(long, value_name = "FILE")]
         save_env: Option<PathBuf>,
+
+        /// Ignore an existing Anytype CLI config (~/.anytype/config.json) and create a new account
+        #[arg(long)]
+        force: bool,
     },
 
     /// Authentication commands
@@ -1826,6 +1832,54 @@ fn command_uses_explicit_all(command: &Commands) -> bool {
 }
 
 #[cfg(test)]
+mod default_http_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn stored_grpc_credentials_select_the_headless_http_endpoint() {
+        assert_eq!(select_default_http_endpoint(true), ANYTYPE_HEADLESS_URL);
+        assert_eq!(select_default_http_endpoint(false), ANYTYPE_DESKTOP_URL);
+    }
+
+    #[test]
+    fn explicit_url_is_never_replaced() {
+        let mut cli =
+            Cli::try_parse_from(["anyr", "--url", "http://example.test:1", "auth", "status"])
+                .expect("parse");
+        // keystore spec that cannot be opened must not matter when --url is given
+        cli.keystore = Some("file:path=/nonexistent/dir/keys.db".to_owned());
+        apply_default_http_endpoint(&mut cli);
+        assert_eq!(cli.url.as_deref(), Some("http://example.test:1"));
+    }
+
+    #[test]
+    fn env_keystore_without_grpc_credentials_selects_the_desktop_endpoint() {
+        let mut cli =
+            Cli::try_parse_from(["anyr", "--keystore", "env", "auth", "status"]).expect("parse");
+        // The `env` keystore reads ANYTYPE_KEY_* variables; none are set for this test process,
+        // so no gRPC credentials are present.
+        cli.url = None;
+        if std::env::var_os("ANYTYPE_KEY_ACCOUNT_KEY").is_none()
+            && std::env::var_os("ANYTYPE_KEY_SESSION_TOKEN").is_none()
+        {
+            apply_default_http_endpoint(&mut cli);
+            assert_eq!(cli.url.as_deref(), Some(ANYTYPE_DESKTOP_URL));
+        }
+    }
+
+    #[test]
+    fn init_cli_defaults_to_the_headless_endpoints() {
+        let mut cli = Cli::try_parse_from(["anyr", "init-cli", "--force"]).expect("parse");
+        cli.url = None;
+        cli.grpc = None;
+        apply_init_cli_endpoint_defaults(&mut cli);
+        assert_eq!(cli.url.as_deref(), Some(ANYTYPE_HEADLESS_URL));
+        assert_eq!(cli.grpc.as_deref(), Some(HEADLESS_GRPC_ENDPOINT));
+        assert!(matches!(cli.command, Commands::InitCli { force: true, .. }));
+    }
+}
+
+#[cfg(test)]
 mod workflow_deadline_selection_tests {
     use super::*;
 
@@ -1907,7 +1961,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
 
     let date_format = resolve_table_date_format(&cli);
 
-    let client = build_client(&cli)?;
+    let client = build_client(&mut cli)?;
 
     let ctx = AppContext {
         //base_url: client.get_http_endpoint().to_string(),
@@ -1919,12 +1973,17 @@ pub async fn run(mut cli: Cli) -> Result<()> {
 
     match cli.command {
         Commands::Completions { shell } => write_completions(shell, &mut std::io::stdout().lock()),
-        Commands::InitCli { join, save_env } => {
+        Commands::InitCli {
+            join,
+            save_env,
+            force,
+        } => {
             let deadline = init_cli_deadline.context("init-cli workflow deadline missing")?;
             Box::pin(init_cli::handle(
                 &ctx,
                 join.as_deref(),
                 save_env.as_deref(),
+                force,
                 deadline,
             ))
             .await
@@ -2154,6 +2213,37 @@ fn apply_init_cli_endpoint_defaults(cli: &mut Cli) {
     }
 }
 
+/// Chooses the default HTTP endpoint when neither `--url` nor `ANYTYPE_URL` is set.
+///
+/// `init-cli` always targets the headless server (see
+/// [`apply_init_cli_endpoint_defaults`]). Every other command prefers the
+/// headless server when gRPC credentials are already stored in the selected
+/// keystore (which means the Anytype CLI is in use), and otherwise targets the
+/// desktop app.
+fn apply_default_http_endpoint(cli: &mut Cli) {
+    if cli.url.is_some() {
+        return;
+    }
+    let keystore_has_grpc = KeyStore::new(
+        cli.keystore_service
+            .as_deref()
+            .unwrap_or(DEFAULT_KEYRING_SERVICE),
+        cli.keystore.as_deref().unwrap_or(""),
+    )
+    .and_then(|keystore| keystore.get_grpc_credentials())
+    .is_ok_and(|creds| creds.has_creds());
+    cli.url = Some(select_default_http_endpoint(keystore_has_grpc).to_owned());
+}
+
+/// Headless server when gRPC credentials are stored, otherwise the desktop app.
+fn select_default_http_endpoint(keystore_has_grpc: bool) -> &'static str {
+    if keystore_has_grpc {
+        HEADLESS_HTTP_URL
+    } else {
+        DESKTOP_HTTP_URL
+    }
+}
+
 /// Rejects ambiguous or self-cancelling global output requests.
 pub fn validate_output_flags(cli: &Cli) -> Result<()> {
     let requested: Vec<&str> = [
@@ -2252,7 +2342,8 @@ fn resolve_table_date_format(cli: &Cli) -> String {
         .unwrap_or_else(|| DEFAULT_TABLE_DATE_FORMAT.to_string())
 }
 
-fn build_client(cli: &Cli) -> Result<AnytypeClient> {
+fn build_client(cli: &mut Cli) -> Result<AnytypeClient> {
+    apply_default_http_endpoint(cli);
     let config = ClientConfig {
         base_url: cli.url.clone(),
         keystore: cli.keystore.clone(),

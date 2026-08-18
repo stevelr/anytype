@@ -3,20 +3,125 @@
 //! Provides cross-platform storage backends for API keys:
 //! - **Keyring**: OS-native secure credential stores (Keychain/Secret Service/Credential Manager)
 //! - **File**: File-based storage in user config directory (less secure, for compatibility)
+//!
+//! All credentials for a service (HTTP token plus the gRPC account id, account
+//! key, and session token) are stored together in **one** keystore entry
+//! (`user = "credentials"`) as a small JSON document. Keeping them in a single
+//! entry means an OS keyring asks the user for access once per application,
+//! not once per credential. Stores written by earlier versions, which kept one
+//! entry per credential, are read transparently and migrated to the single
+//! entry on first access.
 
 use std::path::Path;
 use std::{collections::HashMap, fmt, sync::Arc};
 
 use keyring_core::CredentialStore;
-use tracing::{debug, error};
+use serde::{Deserialize, Serialize};
+use tracing::{debug, error, warn};
 use zeroize::Zeroize;
 
 use crate::error::KeyStoreError;
 
+/// Keystore entry (`user`) holding the combined credential document.
+const KEY_CREDENTIALS: &str = "credentials";
+/// Current schema version of the combined credential document.
+const CREDENTIALS_FORMAT_VERSION: u32 = 1;
+
+// Legacy per-credential entries (pre-0.5). Read for migration only.
 const KEY_HTTP_TOKEN: &str = "http_token";
 const KEY_ACCOUNT_ID: &str = "account_id";
 const KEY_ACCOUNT_KEY: &str = "account_key";
 const KEY_SESSION_TOKEN: &str = "session_token";
+const LEGACY_KEYS: [&str; 4] = [
+    KEY_HTTP_TOKEN,
+    KEY_ACCOUNT_ID,
+    KEY_ACCOUNT_KEY,
+    KEY_SESSION_TOKEN,
+];
+
+/// On-disk/in-keyring representation of every credential for one service.
+///
+/// Fields that are `None` are omitted from the JSON so the document only
+/// carries what is configured.
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct StoredCredentials {
+    #[serde(default, rename = "v")]
+    version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    http_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_token: Option<String>,
+}
+
+impl StoredCredentials {
+    fn is_empty(&self) -> bool {
+        self.http_token.is_none()
+            && self.account_id.is_none()
+            && self.account_key.is_none()
+            && self.session_token.is_none()
+    }
+
+    fn http(&self) -> HttpCredentials {
+        HttpCredentials {
+            token: self.http_token.clone(),
+        }
+    }
+
+    fn grpc(&self) -> GrpcCredentials {
+        GrpcCredentials {
+            account_id: self.account_id.clone(),
+            account_key: self.account_key.clone(),
+            session_token: self.session_token.clone(),
+        }
+    }
+
+    fn parse(json: &str) -> Result<Self, KeyStoreError> {
+        serde_json::from_str(json).map_err(|err| KeyStoreError::Config {
+            message: format!("stored credentials entry is not valid: {err}"),
+        })
+    }
+
+    fn to_json(&self) -> Result<String, KeyStoreError> {
+        let mut document = self.clone();
+        document.version = CREDENTIALS_FORMAT_VERSION;
+        let json = serde_json::to_string(&document).map_err(|err| KeyStoreError::Config {
+            message: format!("cannot serialize credentials: {err}"),
+        });
+        document.zeroize();
+        json
+    }
+}
+
+impl fmt::Debug for StoredCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredCredentials")
+            .field("v", &self.version)
+            .field(KEY_HTTP_TOKEN, &fmt_masked(self.http_token.as_ref()))
+            .field(KEY_ACCOUNT_ID, &self.account_id)
+            .field(KEY_ACCOUNT_KEY, &fmt_masked(self.account_key.as_ref()))
+            .field(KEY_SESSION_TOKEN, &fmt_masked(self.session_token.as_ref()))
+            .finish()
+    }
+}
+
+impl Zeroize for StoredCredentials {
+    fn zeroize(&mut self) {
+        for field in [
+            &mut self.http_token,
+            &mut self.account_id,
+            &mut self.account_key,
+            &mut self.session_token,
+        ] {
+            if let Some(value) = field.as_mut() {
+                value.zeroize();
+            }
+        }
+    }
+}
 
 /// Type of keystore - builtin or external
 #[derive(Clone, PartialEq, Eq)]
@@ -365,25 +470,21 @@ fn store_from_env(service: &str) -> std::result::Result<Arc<CredentialStore>, Ke
         message: "cannot create default sample store".to_string(),
     })?;
 
-    if let Ok(http_token) = std::env::var("ANYTYPE_KEY_HTTP_TOKEN") {
-        let entry = sample.build(service, KEY_HTTP_TOKEN, None)?;
-        entry.set_password(&http_token)?;
+    let mut credentials = StoredCredentials {
+        version: CREDENTIALS_FORMAT_VERSION,
+        http_token: std::env::var("ANYTYPE_KEY_HTTP_TOKEN").ok(),
+        account_id: std::env::var("ANYTYPE_KEY_ACCOUNT_ID").ok(),
+        account_key: std::env::var("ANYTYPE_KEY_ACCOUNT_KEY").ok(),
+        session_token: std::env::var("ANYTYPE_KEY_SESSION_TOKEN").ok(),
+    };
+    if !credentials.is_empty() {
+        let mut json = credentials.to_json()?;
+        let entry = sample.build(service, KEY_CREDENTIALS, None)?;
+        let stored = entry.set_password(&json);
+        json.zeroize();
+        stored?;
     }
-
-    if let Ok(account_id) = std::env::var("ANYTYPE_KEY_ACCOUNT_ID") {
-        let entry = sample.build(service, KEY_ACCOUNT_ID, None)?;
-        entry.set_password(&account_id)?;
-    }
-
-    if let Ok(account_key) = std::env::var("ANYTYPE_KEY_ACCOUNT_KEY") {
-        let entry = sample.build(service, KEY_ACCOUNT_KEY, None)?;
-        entry.set_password(&account_key)?;
-    }
-
-    if let Ok(session_token) = std::env::var("ANYTYPE_KEY_SESSION_TOKEN") {
-        let entry = sample.build(service, KEY_SESSION_TOKEN, None)?;
-        entry.set_password(&session_token)?;
-    }
+    credentials.zeroize();
 
     Ok(sample)
 }
@@ -535,6 +636,70 @@ impl KeyStore {
         }
     }
 
+    /// Loads the combined credential document.
+    ///
+    /// When the combined entry is absent, the legacy per-credential entries are
+    /// read instead and, if any exist, migrated into the combined entry. A
+    /// failed migration is logged and does not fail the read: the credentials
+    /// are still returned, and migration is retried on the next access.
+    fn load_credentials(&self) -> Result<StoredCredentials, KeyStoreError> {
+        if let Some(mut json) = self.get_key(KEY_CREDENTIALS)? {
+            let parsed = StoredCredentials::parse(&json);
+            json.zeroize();
+            return parsed;
+        }
+        let legacy = StoredCredentials {
+            version: 0,
+            http_token: self.get_key(KEY_HTTP_TOKEN)?,
+            account_id: self.get_key(KEY_ACCOUNT_ID)?,
+            account_key: self.get_key(KEY_ACCOUNT_KEY)?,
+            session_token: self.get_key(KEY_SESSION_TOKEN)?,
+        };
+        if !legacy.is_empty() {
+            debug!(
+                service = &self.service,
+                "migrating legacy per-credential entries to the combined credentials entry"
+            );
+            if let Err(err) = self.save_credentials(&legacy) {
+                warn!(
+                    service = &self.service,
+                    "credential migration deferred: {err}"
+                );
+            }
+        }
+        Ok(legacy)
+    }
+
+    /// Writes the combined credential document (or removes it when empty) and
+    /// removes any legacy per-credential entries.
+    ///
+    /// Legacy removal is best-effort: an entry that survives is ignored on later
+    /// reads because the combined entry takes precedence.
+    fn save_credentials(&self, credentials: &StoredCredentials) -> Result<(), KeyStoreError> {
+        if credentials.is_empty() {
+            self.remove_key(KEY_CREDENTIALS)?;
+        } else {
+            let mut json = credentials.to_json()?;
+            let stored = self.put_key(KEY_CREDENTIALS, &json);
+            json.zeroize();
+            stored?;
+        }
+        self.remove_legacy_keys();
+        Ok(())
+    }
+
+    fn remove_legacy_keys(&self) {
+        for name in LEGACY_KEYS {
+            if let Err(err) = self.remove_key(name) {
+                debug!(
+                    service = &self.service,
+                    user = name,
+                    "legacy credential entry not removed: {err}"
+                );
+            }
+        }
+    }
+
     /// Looks up http auth token.
     /// If connection with keystore succeeded, returns Ok, even if no token exists
     /// for the current service.
@@ -543,15 +708,17 @@ impl KeyStore {
     /// connecting with the keystore (such as user biometric auth failure for os keyring,
     /// or file permission error for file-based keystore)
     pub fn get_http_credentials(&self) -> Result<HttpCredentials, KeyStoreError> {
-        let token = self.get_key(KEY_HTTP_TOKEN)?;
-        if token.is_none() {
+        let mut stored = self.load_credentials()?;
+        let http = stored.http();
+        stored.zeroize();
+        if !http.has_creds() {
             debug!(
                 service = &self.service,
                 id = &self.id(),
                 "get_http_creds: no token",
             );
         }
-        Ok(HttpCredentials { token })
+        Ok(http)
     }
 
     /// Looks up grpc auth credentials.
@@ -562,11 +729,10 @@ impl KeyStore {
     /// connecting with the keystore (such as user biometric auth failure for os keyring,
     /// or file permission error for file-based keystore)
     pub fn get_grpc_credentials(&self) -> Result<GrpcCredentials, KeyStoreError> {
-        Ok(GrpcCredentials {
-            account_id: self.get_key(KEY_ACCOUNT_ID)?,
-            account_key: self.get_key(KEY_ACCOUNT_KEY)?,
-            session_token: self.get_key(KEY_SESSION_TOKEN)?,
-        })
+        let mut stored = self.load_credentials()?;
+        let grpc = stored.grpc();
+        stored.zeroize();
+        Ok(grpc)
     }
 
     /// Checks a test-owned byte buffer for every configured credential
@@ -599,49 +765,64 @@ impl KeyStore {
     }
 
     /// Saves HTTP credentials (read-modify-write).
-    /// Fails if credentials are empty (use clear_* to remove).
+    /// An empty token leaves the stored token unchanged (use `clear_*` to remove).
     pub fn update_http_credentials(&self, creds: &HttpCredentials) -> Result<(), KeyStoreError> {
         if let Some(token) = &creds.token
             && !token.is_empty()
         {
-            self.put_key(KEY_HTTP_TOKEN, token)?;
+            let mut stored = self.load_credentials()?;
+            stored.http_token = Some(token.clone());
+            let saved = self.save_credentials(&stored);
+            stored.zeroize();
+            saved?;
         }
         Ok(())
     }
 
     /// Saves gRPC credentials (read-modify-write).
-    /// Fails if credentials are empty (use clear_* to remove).
+    /// Fields that are `None` leave the stored value unchanged (use `clear_*` to remove).
     pub fn update_grpc_credentials(&self, creds: &GrpcCredentials) -> Result<(), KeyStoreError> {
+        let mut stored = self.load_credentials()?;
         if let Some(account_id) = &creds.account_id {
-            self.put_key(KEY_ACCOUNT_ID, account_id)?;
+            stored.account_id = Some(account_id.clone());
         }
         if let Some(account_key) = &creds.account_key {
-            self.put_key(KEY_ACCOUNT_KEY, account_key)?;
+            stored.account_key = Some(account_key.clone());
         }
         if let Some(session_token) = &creds.session_token {
-            self.put_key(KEY_SESSION_TOKEN, session_token)?;
+            stored.session_token = Some(session_token.clone());
         }
-        Ok(())
+        let saved = self.save_credentials(&stored);
+        stored.zeroize();
+        saved
     }
 
     /// Clear HTTP credentials.
     pub fn clear_http_credentials(&self) -> Result<(), KeyStoreError> {
-        self.remove_key(KEY_HTTP_TOKEN)?;
-        Ok(())
+        let mut stored = self.load_credentials()?;
+        stored.http_token = None;
+        let saved = self.save_credentials(&stored);
+        stored.zeroize();
+        saved
     }
 
     /// Clear gRPC credentials.
     pub fn clear_grpc_credentials(&self) -> Result<(), KeyStoreError> {
-        self.remove_key(KEY_ACCOUNT_ID)?;
-        self.remove_key(KEY_ACCOUNT_KEY)?;
-        self.remove_key(KEY_SESSION_TOKEN)?;
-        Ok(())
+        let mut stored = self.load_credentials()?;
+        stored.account_id = None;
+        stored.account_key = None;
+        stored.session_token = None;
+        let saved = self.save_credentials(&stored);
+        stored.zeroize();
+        saved
     }
 
     /// Clear all credentials (for the service associated with this `KeyStore`).
     pub fn clear_all_credentials(&self) -> Result<(), KeyStoreError> {
-        self.clear_http_credentials()?;
-        self.clear_grpc_credentials()?;
+        self.remove_key(KEY_CREDENTIALS)?;
+        for name in LEGACY_KEYS {
+            self.remove_key(name)?;
+        }
         Ok(())
     }
 
@@ -732,6 +913,113 @@ mod tests {
         assert!(!store.configured_credentials_absent_from(b"prefix grpc-secret suffix")?);
         store.clear_all_credentials()?;
         let _ = fs::remove_dir_all(temp_dir);
+        Ok(())
+    }
+
+    fn temp_file_store(name: &str) -> (KeyStore, std::path::PathBuf) {
+        let temp_dir = std::env::temp_dir().join(format!("anytype_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        let path = temp_dir.join("keys.db");
+        let store =
+            KeyStore::new(name, &format!("file:path={}", path.display())).expect("file keystore");
+        (store, temp_dir)
+    }
+
+    #[test]
+    fn credentials_are_stored_in_a_single_entry() -> Result<(), KeyStoreError> {
+        let (store, temp_dir) = temp_file_store("single_entry");
+
+        store.update_http_credentials(&HttpCredentials::new("http-token"))?;
+        store.update_grpc_credentials(
+            &GrpcCredentials::from_account_key("account-key").with_account_id("account-id"),
+        )?;
+
+        // exactly one entry, holding every credential
+        let mut json = store.get_key(KEY_CREDENTIALS)?.expect("combined entry");
+        let document: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(document["v"], CREDENTIALS_FORMAT_VERSION);
+        assert_eq!(document["http_token"], "http-token");
+        assert_eq!(document["account_id"], "account-id");
+        assert_eq!(document["account_key"], "account-key");
+        assert!(document.get("session_token").is_none());
+        json.zeroize();
+        for name in LEGACY_KEYS {
+            assert!(
+                store.get_key(name)?.is_none(),
+                "legacy entry {name} written"
+            );
+        }
+
+        // partial updates merge; None leaves fields alone
+        store.update_grpc_credentials(&GrpcCredentials::from_token("session"))?;
+        let grpc = store.get_grpc_credentials()?;
+        assert_eq!(grpc.account_key(), Some("account-key"));
+        assert_eq!(grpc.session_token(), Some("session"));
+        assert!(store.get_http_credentials()?.has_creds());
+
+        // clearing one family keeps the other
+        store.clear_grpc_credentials()?;
+        assert!(!store.get_grpc_credentials()?.has_creds());
+        assert!(store.get_http_credentials()?.has_creds());
+
+        // clearing everything removes the entry
+        store.clear_http_credentials()?;
+        assert!(store.get_key(KEY_CREDENTIALS)?.is_none());
+
+        let _ = fs::remove_dir_all(temp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_per_credential_entries_are_read_and_migrated() -> Result<(), KeyStoreError> {
+        let (store, temp_dir) = temp_file_store("legacy_migration");
+        store.put_key(KEY_HTTP_TOKEN, "legacy-http")?;
+        store.put_key(KEY_ACCOUNT_KEY, "legacy-account-key")?;
+        store.put_key(KEY_SESSION_TOKEN, "legacy-session")?;
+
+        let http = store.get_http_credentials()?;
+        assert_eq!(http.token(), Some("legacy-http"));
+        let grpc = store.get_grpc_credentials()?;
+        assert_eq!(grpc.account_key(), Some("legacy-account-key"));
+        assert_eq!(grpc.session_token(), Some("legacy-session"));
+        assert_eq!(grpc.account_id(), None);
+
+        // the first read migrated the store
+        assert!(store.get_key(KEY_CREDENTIALS)?.is_some());
+        for name in LEGACY_KEYS {
+            assert!(
+                store.get_key(name)?.is_none(),
+                "legacy entry {name} remains"
+            );
+        }
+
+        // and reads still agree afterwards
+        assert_eq!(store.get_http_credentials()?.token(), Some("legacy-http"));
+
+        store.clear_all_credentials()?;
+        assert!(store.get_key(KEY_CREDENTIALS)?.is_none());
+        let _ = fs::remove_dir_all(temp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn env_store_populates_the_single_entry() -> Result<(), KeyStoreError> {
+        // SAFETY: test process; the variables are namespaced and this test owns them.
+        unsafe {
+            std::env::set_var("ANYTYPE_KEY_HTTP_TOKEN", "env-http");
+            std::env::set_var("ANYTYPE_KEY_ACCOUNT_KEY", "env-account-key");
+        }
+        let store = KeyStore::new("env_single_entry", "env")?;
+        assert_eq!(store.get_http_credentials()?.token(), Some("env-http"));
+        assert_eq!(
+            store.get_grpc_credentials()?.account_key(),
+            Some("env-account-key")
+        );
+        assert!(store.get_key(KEY_HTTP_TOKEN)?.is_none());
+        unsafe {
+            std::env::remove_var("ANYTYPE_KEY_HTTP_TOKEN");
+            std::env::remove_var("ANYTYPE_KEY_ACCOUNT_KEY");
+        }
         Ok(())
     }
 

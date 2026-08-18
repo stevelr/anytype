@@ -8,6 +8,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- `KeyStore` now keeps every credential for a service (HTTP token, gRPC
+  account id, account key, session token) in a single keystore entry
+  (`user = "credentials"`, a JSON document) instead of one entry per
+  credential, so OS keyrings prompt once per application rather than up to
+  four times. Legacy per-credential entries are read transparently and
+  migrated to the single entry on first access; `clear_all_credentials`
+  removes both layouts. The public `KeyStore` API is unchanged.
+
 - Add `scope_grpc_deadline` so a caller-owned absolute workflow deadline caps
   all nested generated gRPC calls, readiness waits, and propagated
   `grpc-timeout` remainders without exposing `anytype-rpc` as a direct

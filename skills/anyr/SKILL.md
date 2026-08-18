@@ -27,7 +27,7 @@ and full README: `~/project/anytype/anyr/`.
 
 | Env var                 | Default                  | Notes                                                                                                              |
 | ----------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `ANYTYPE_URL`           | `http://127.0.0.1:31009` | desktop app. Headless cli server: `31012`                                                                          |
+| `ANYTYPE_URL`           | `31012` or `31009`       | `http://127.0.0.1:31012` (headless cli) if gRPC creds are in the keystore, else `http://127.0.0.1:31009` (desktop) |
 | `ANYTYPE_GRPC_ENDPOINT` | `http://127.0.0.1:31010` | only for gRPC-only ops: advanced file upload / preload, history-rich or multi-chat `chat listen`, cross-space chat |
 
 **Tokens are endpoint-specific**: a token minted for the desktop URL does not
