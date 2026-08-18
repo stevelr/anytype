@@ -26,8 +26,10 @@ use std::{
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header, request::Parts};
-use http_body_util::{BodyExt, Full, LengthLimitError, Limited, combinators::BoxBody};
-use tokio::sync::Semaphore;
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use rmcp::model::CallToolRequestParams;
+use serde::Deserialize;
+use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::http::{
@@ -35,13 +37,22 @@ use crate::http::{
     auth::{AuthRejection, Authenticator, AuthorizedPrincipal},
     config::{AllowedOrigin, HostAuthority, HttpConfig, find_allowed_origin},
 };
+#[cfg(test)]
+use crate::runtime::LONG_ARTIFACT_TOOLS;
+use crate::runtime::{InvocationAnchor, RuntimeContext, long_artifact_tool};
 
 /// Fixed request body ceiling shared with the stdio protocol frame bound.
 pub(crate) const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// Fixed ceiling on concurrently admitted HTTP requests.
 pub(crate) const MAX_CONCURRENT_REQUESTS: usize = 64;
+/// Fixed ceiling on accepted HTTP connections, including slow headers.
+pub(crate) const MAX_CONCURRENT_CONNECTIONS: usize = 128;
 /// Fixed wait deadline for the admitted-request semaphore.
 const ADMISSION_WAIT: Duration = Duration::from_secs(10);
+/// Fixed interval in which an admitted request body must make DATA progress.
+const BODY_PROGRESS_WAIT: Duration = Duration::from_secs(30);
+/// Fixed HTTP/1 request-header deadline.
+const HEADER_READ_WAIT: Duration = Duration::from_secs(5);
 /// Fixed CORS preflight cache lifetime.
 const PREFLIGHT_MAX_AGE: &str = "600";
 const MCP_PATH: &str = "/mcp";
@@ -69,6 +80,8 @@ pub(crate) struct AdmittedRequest {
     pub body: Bytes,
     /// The authenticated principal for this request.
     pub principal: AuthorizedPrincipal,
+    /// Absolute profile candidates captured after authentication.
+    pub invocation: InvocationAnchor,
 }
 
 type ServiceFuture = Pin<Box<dyn Future<Output = Response<HttpBody>> + Send>>;
@@ -86,17 +99,56 @@ pub(crate) struct ListenerState {
     authenticator: Authenticator,
     rate: RateLimiter,
     permits: Arc<Semaphore>,
+    connection_permits: Arc<Semaphore>,
     admission_wait: Duration,
     correlation: AtomicU64,
     service: McpService,
+    ordinary_timeout: Duration,
+    artifact_timeout: Duration,
 }
 
 impl ListenerState {
+    #[cfg(test)]
     pub(crate) fn new(
         config: &HttpConfig,
         authenticator: Authenticator,
         metadata: Option<Arc<str>>,
         service: McpService,
+    ) -> Self {
+        Self::build(
+            config,
+            authenticator,
+            metadata,
+            service,
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        )
+    }
+
+    pub(crate) fn new_with_runtime(
+        config: &HttpConfig,
+        authenticator: Authenticator,
+        metadata: Option<Arc<str>>,
+        service: McpService,
+        runtime: &RuntimeContext,
+    ) -> Self {
+        Self::build(
+            config,
+            authenticator,
+            metadata,
+            service,
+            runtime.request_timeout(),
+            runtime.artifact_config().limits.operation_timeout,
+        )
+    }
+
+    fn build(
+        config: &HttpConfig,
+        authenticator: Authenticator,
+        metadata: Option<Arc<str>>,
+        service: McpService,
+        ordinary_timeout: Duration,
+        artifact_timeout: Duration,
     ) -> Self {
         Self {
             allowed_hosts: config.allowed_hosts.clone(),
@@ -105,9 +157,12 @@ impl ListenerState {
             authenticator,
             rate: RateLimiter::new(config.requests_per_minute),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            connection_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
             admission_wait: ADMISSION_WAIT,
             correlation: AtomicU64::new(0),
             service,
+            ordinary_timeout,
+            artifact_timeout,
         }
     }
 
@@ -119,6 +174,12 @@ impl ListenerState {
     ) -> Self {
         self.permits = Arc::new(Semaphore::new(permits));
         self.admission_wait = admission_wait;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_connection_bound(mut self, permits: usize) -> Self {
+        self.connection_permits = Arc::new(Semaphore::new(permits));
         self
     }
 }
@@ -277,11 +338,24 @@ where
             );
         }
     };
+    let invocation =
+        InvocationAnchor::capture_durations(state.ordinary_timeout, state.artifact_timeout);
+    let ordinary_deadline = invocation.ordinary_deadline();
 
     // Gate 5: bounded request concurrency before body collection.
-    let Ok(Ok(permit)) =
-        tokio::time::timeout(state.admission_wait, state.permits.clone().acquire_owned()).await
-    else {
+    let admission_deadline = ordinary_deadline.min(
+        tokio::time::Instant::now()
+            .checked_add(state.admission_wait)
+            .unwrap_or_else(tokio::time::Instant::now),
+    );
+    let acquire = state.permits.clone().acquire_owned();
+    tokio::pin!(acquire);
+    let permit = tokio::select! {
+        biased;
+        () = tokio::time::sleep_until(admission_deadline) => None,
+        permit = &mut acquire => permit.ok(),
+    };
+    let Some(permit) = permit else {
         tracing::info!(target: "any_mcp::http", "http_capacity_rejected");
         return with_cors(
             fixed_response(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable"),
@@ -291,30 +365,138 @@ where
 
     // Gate 6: bounded body collection before any JSON decoding.
     let (parts, body) = request.into_parts();
-    let collected = match Limited::new(body, MAX_BODY_BYTES).collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(error) => {
-            let response = if error.downcast_ref::<LengthLimitError>().is_some() {
-                fixed_response(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large")
-            } else {
-                fixed_response(StatusCode::BAD_REQUEST, "Bad Request")
-            };
-            return with_cors(response, origin);
+    let collected = match collect_body(body, ordinary_deadline).await {
+        Ok(collected) => collected,
+        Err(BodyCollectError::TooLarge) => {
+            return with_cors(
+                fixed_response(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large"),
+                origin,
+            );
+        }
+        Err(BodyCollectError::TimedOut) => {
+            return with_cors(
+                fixed_response(StatusCode::REQUEST_TIMEOUT, "Request Timeout"),
+                origin,
+            );
+        }
+        Err(BodyCollectError::Invalid) => {
+            return with_cors(
+                fixed_response(StatusCode::BAD_REQUEST, "Bad Request"),
+                origin,
+            );
         }
     };
-    let parts = sanitize_parts(parts);
+    let invocation = invocation.select_tool(if classify_long_artifact_call(&collected) {
+        "file_import"
+    } else {
+        ""
+    });
+    if tokio::time::Instant::now() >= invocation.deadline() {
+        return with_cors(
+            fixed_response(StatusCode::REQUEST_TIMEOUT, "Request Timeout"),
+            origin,
+        );
+    }
+    let mut parts = sanitize_parts(parts);
+    parts.extensions.insert(invocation.clone());
 
     // Dispatch to the selected MCP service. The admission permit covers the
     // service call; streaming response bodies are bounded separately by
     // session, queue, deadline, and shutdown limits.
-    let response = (state.service)(AdmittedRequest {
+    let service = (state.service)(AdmittedRequest {
         parts,
         body: collected,
         principal,
-    })
-    .await;
+        invocation: invocation.clone(),
+    });
+    tokio::pin!(service);
+    let response = tokio::select! {
+        biased;
+        response = &mut service => response,
+        () = tokio::time::sleep_until(invocation.deadline()) => {
+            if invocation.terminal_observes_dispatch() {
+                service.await
+            } else {
+                fixed_response(StatusCode::REQUEST_TIMEOUT, "Request Timeout")
+            }
+        }
+    };
     drop(permit);
     with_cors(response, origin)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyCollectError {
+    Invalid,
+    TimedOut,
+    TooLarge,
+}
+
+async fn collect_body<B>(
+    body: B,
+    invocation_deadline: tokio::time::Instant,
+) -> Result<Bytes, BodyCollectError>
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    let mut body = std::pin::pin!(body);
+    let mut collected = Vec::new();
+    let mut progress_deadline = tokio::time::Instant::now()
+        .checked_add(BODY_PROGRESS_WAIT)
+        .unwrap_or_else(tokio::time::Instant::now);
+    loop {
+        let deadline = invocation_deadline.min(progress_deadline);
+        let mut pinned_body = body.as_mut();
+        let next_frame = pinned_body.frame();
+        tokio::pin!(next_frame);
+        let frame = tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(deadline) => return Err(BodyCollectError::TimedOut),
+            frame = &mut next_frame => frame,
+        };
+        let Some(frame) = frame else {
+            return Ok(Bytes::from(collected));
+        };
+        let frame = frame.map_err(|_| BodyCollectError::Invalid)?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        let next_len = collected
+            .len()
+            .checked_add(data.len())
+            .ok_or(BodyCollectError::TooLarge)?;
+        if next_len > MAX_BODY_BYTES {
+            return Err(BodyCollectError::TooLarge);
+        }
+        if !data.is_empty() {
+            collected.extend_from_slice(&data);
+            progress_deadline = tokio::time::Instant::now()
+                .checked_add(BODY_PROGRESS_WAIT)
+                .unwrap_or_else(tokio::time::Instant::now);
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct JsonRpcToolCall {
+    jsonrpc: String,
+    id: serde_json::Value,
+    method: String,
+    params: CallToolRequestParams,
+}
+
+fn classify_long_artifact_call(body: &[u8]) -> bool {
+    let Ok(request) = serde_json::from_slice::<JsonRpcToolCall>(body) else {
+        return false;
+    };
+    let valid_id =
+        request.id.is_string() || request.id.as_i64().is_some() || request.id.as_u64().is_some();
+    request.jsonrpc == "2.0"
+        && request.method == "tools/call"
+        && valid_id
+        && request.params.task.is_none()
+        && long_artifact_tool(request.params.name.as_ref())
 }
 
 /// Removes credential and forwarded-identity headers from the admitted
@@ -534,18 +716,6 @@ impl fmt::Display for HttpServeError {
 
 impl std::error::Error for HttpServeError {}
 
-/// Builds the fixed single-fallback router over the admission pipeline.
-fn router(state: Arc<ListenerState>) -> axum::Router {
-    axum::Router::new().fallback(move |request: axum::extract::Request| {
-        let state = state.clone();
-        async move {
-            handle_request(state.as_ref(), request)
-                .await
-                .map(axum::body::Body::new)
-        }
-    })
-}
-
 /// Serves the bound loopback listener until shutdown.
 ///
 /// Cancelling `shutdown` stops accepting connections, drains in-flight work
@@ -563,24 +733,98 @@ pub(crate) async fn run_listener(
     shutdown: CancellationToken,
     drain: Duration,
 ) -> Result<(), HttpServeError> {
-    use std::future::IntoFuture;
+    use hyper_util::rt::{TokioIo, TokioTimer};
 
-    let app = router(state);
-    let signal = shutdown.clone();
-    let serve = axum::serve(listener, app)
-        .with_graceful_shutdown(async move { signal.cancelled().await })
-        .into_future();
-    let mut serve = std::pin::pin!(serve);
-    tokio::select! {
-        result = &mut serve => result.map_err(|_| HttpServeError::Listener),
-        () = shutdown.cancelled() => {
-            match tokio::time::timeout(drain, &mut serve).await {
-                Ok(result) => result.map_err(|_| HttpServeError::Listener),
-                // The drain deadline cancels remaining connections by drop.
-                Err(_) => Ok(()),
+    let mut connections = JoinSet::new();
+    let connection_drain = CancellationToken::new();
+    let connection_cancel = CancellationToken::new();
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            completed = connections.join_next(), if !connections.is_empty() => {
+                if let Some(completed) = completed {
+                    handle_connection_completion(completed)?;
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.map_err(|_| HttpServeError::Listener)?;
+                let permit = match Arc::clone(&state.connection_permits).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::info!(target: "any_mcp::http", "http_connection_capacity_rejected");
+                        drop(stream);
+                        continue;
+                    }
+                };
+                let connection_state = Arc::clone(&state);
+                let connection_drain = connection_drain.clone();
+                let connection_shutdown = connection_cancel.clone();
+                connections.spawn(async move {
+                    let _permit = permit;
+                    let service = hyper::service::service_fn(move |request| {
+                        let request_state = Arc::clone(&connection_state);
+                        async move {
+                            Ok::<_, Infallible>(handle_request(request_state.as_ref(), request).await)
+                        }
+                    });
+                    let mut builder = hyper::server::conn::http1::Builder::new();
+                    builder
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(HEADER_READ_WAIT)
+                        .half_close(true)
+                        .max_headers(64)
+                        .max_buf_size(64 * 1024);
+                    let connection = builder.serve_connection(TokioIo::new(stream), service);
+                    tokio::pin!(connection);
+                    tokio::select! {
+                        biased;
+                        () = connection_shutdown.cancelled() => {}
+                        () = connection_drain.cancelled() => {
+                            connection.as_mut().graceful_shutdown();
+                            tokio::select! {
+                                biased;
+                                () = connection_shutdown.cancelled() => {}
+                                _ = &mut connection => {}
+                            }
+                        }
+                        _ = &mut connection => {}
+                    }
+                });
             }
         }
     }
+
+    connection_drain.cancel();
+    let started = tokio::time::Instant::now();
+    let deadline = started.checked_add(drain).unwrap_or(started);
+    while !connections.is_empty() {
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(deadline) => {
+                connection_cancel.cancel();
+                connections.abort_all();
+                while connections.join_next().await.is_some() {}
+                return Ok(());
+            }
+            completed = connections.join_next() => {
+                if completed.is_some_and(|result| result.is_err()) {
+                    return Err(HttpServeError::Listener);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_connection_completion(
+    completed: Result<(), tokio::task::JoinError>,
+) -> Result<(), HttpServeError> {
+    if completed.is_err() {
+        tracing::error!(target: "any_mcp::http", "http_connection_task_failed");
+        return Err(HttpServeError::Listener);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1037,6 +1281,185 @@ pub(crate) mod tests {
         assert_eq!(recorded.calls.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn only_complete_single_long_artifact_calls_select_the_long_profile() {
+        for name in LONG_ARTIFACT_TOOLS {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": {}},
+            });
+            assert!(
+                classify_long_artifact_call(body.to_string().as_bytes()),
+                "{name}"
+            );
+        }
+        for body in [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "artifact_status", "arguments": {}},
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {"name": "file_import", "arguments": {}},
+            }),
+            serde_json::json!([{
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "file_import", "arguments": {}},
+            }]),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "file_import", "arguments": {}, "task": {}},
+            }),
+        ] {
+            assert!(!classify_long_artifact_call(body.to_string().as_bytes()));
+        }
+        assert!(!classify_long_artifact_call(b"{malformed"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn body_progress_requires_nonempty_data_and_exact_expiry_wins() {
+        use http_body::Frame;
+
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let stream = futures::stream::unfold(receiver, |mut receiver| async move {
+            receiver.recv().await.map(|frame| (frame, receiver))
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        let collected = tokio::spawn(collect_body(
+            http_body_util::StreamBody::new(stream),
+            deadline,
+        ));
+        tokio::time::advance(Duration::from_secs(29)).await;
+        sender
+            .send(Ok::<_, std::io::Error>(Frame::data(Bytes::new())))
+            .await
+            .expect("send empty frame");
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            collected.await.expect("collector join"),
+            Err(BodyCollectError::TimedOut)
+        );
+
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let stream = futures::stream::unfold(receiver, |mut receiver| async move {
+            receiver.recv().await.map(|frame| (frame, receiver))
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        let collected = tokio::spawn(collect_body(
+            http_body_util::StreamBody::new(stream),
+            deadline,
+        ));
+        tokio::time::advance(Duration::from_secs(29)).await;
+        sender
+            .send(Ok::<_, std::io::Error>(Frame::data(Bytes::from_static(
+                b"x",
+            ))))
+            .await
+            .expect("send progress frame");
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert!(!collected.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            collected.await.expect("collector join"),
+            Err(BodyCollectError::TimedOut)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn decoded_profile_keeps_the_authenticated_ingress_anchor() {
+        let service: McpService = Arc::new(|_admitted| {
+            Box::pin(async {
+                std::future::pending::<()>().await;
+                fixed_response(StatusCode::OK, "unreachable")
+            })
+        });
+        let state = Arc::new(ListenerState::new(
+            &test_config(&[]),
+            Authenticator::SyntheticAllow,
+            None,
+            service,
+        ));
+        let ordinary_body = Bytes::from_static(
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"artifact_status","arguments":{}}}"#,
+        );
+        let ordinary_state = Arc::clone(&state);
+        let ordinary = tokio::spawn(async move {
+            handle_request(
+                ordinary_state.as_ref(),
+                request_with_body(Method::POST, "/mcp", &[AUTH], ordinary_body),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(
+            ordinary.await.expect("ordinary join").status(),
+            StatusCode::REQUEST_TIMEOUT
+        );
+
+        let long_body = Bytes::from_static(
+            br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"file_import","arguments":{}}}"#,
+        );
+        let long_state = Arc::clone(&state);
+        let long = tokio::spawn(async move {
+            handle_request(
+                long_state.as_ref(),
+                request_with_body(Method::POST, "/mcp", &[AUTH], long_body),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(!long.is_finished());
+        tokio::time::advance(Duration::from_secs(270)).await;
+        assert_eq!(
+            long.await.expect("long join").status(),
+            StatusCode::REQUEST_TIMEOUT
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_service_response_wins_at_exact_deadline() {
+        let service: McpService = Arc::new(|admitted| {
+            Box::pin(async move {
+                tokio::time::sleep_until(admitted.invocation.deadline()).await;
+                fixed_response(StatusCode::OK, "ready")
+            })
+        });
+        let mut state = ListenerState::new(
+            &test_config(&[]),
+            Authenticator::SyntheticAllow,
+            None,
+            service,
+        );
+        state.ordinary_timeout = Duration::from_secs(1);
+        let state = Arc::new(state);
+        let running = tokio::spawn(async move {
+            handle_request(
+                state.as_ref(),
+                request_with_body(Method::POST, "/mcp", &[AUTH], Bytes::from_static(b"{}")),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            running.await.expect("request join").status(),
+            StatusCode::OK
+        );
+    }
+
     #[tokio::test]
     async fn admitted_requests_are_sanitized_and_carry_the_principal() {
         let (state, recorded) = test_state(&[]);
@@ -1149,5 +1572,118 @@ pub(crate) mod tests {
             .expect("shutdown deadline")
             .expect("server join");
         assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_headers_close_at_the_fixed_header_deadline() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (state, _recorded) = test_state(&[]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let shutdown = CancellationToken::new();
+        let server = tokio::spawn(run_listener(
+            listener,
+            state,
+            shutdown.clone(),
+            Duration::from_secs(1),
+        ));
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost")
+            .await
+            .expect("write partial header");
+        tokio::task::yield_now().await;
+        tokio::time::advance(HEADER_READ_WAIT).await;
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+            .await
+            .expect("peer close deadline")
+            .expect("socket read");
+        assert_eq!(read, 0);
+        shutdown.cancel();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(server.await.expect("server join"), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn slow_header_connection_ceiling_sheds_and_reaps_churn() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (service, _recorded) = recording_service();
+        let state = Arc::new(
+            ListenerState::new(
+                &test_config(&[]),
+                Authenticator::SyntheticAllow,
+                None,
+                service,
+            )
+            .with_connection_bound(1),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let shutdown = CancellationToken::new();
+        let server = tokio::spawn(run_listener(
+            listener,
+            state,
+            shutdown.clone(),
+            Duration::from_secs(1),
+        ));
+
+        let mut slow = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect slow header");
+        slow.write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost")
+            .await
+            .expect("write slow header");
+        tokio::task::yield_now().await;
+
+        let mut excess = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect excess");
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(1), excess.read(&mut byte))
+            .await
+            .expect("excess close deadline")
+            .expect("read excess close");
+        assert_eq!(read, 0);
+
+        drop(slow);
+        tokio::task::yield_now().await;
+        let mut replacement = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect replacement");
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nhost: 127.0.0.1:{}\r\nauthorization: Bearer synthetic-token\r\ncontent-length: 2\r\n\r\n{{}}",
+            address.port()
+        );
+        replacement
+            .write_all(request.as_bytes())
+            .await
+            .expect("write replacement");
+        let _read = tokio::time::timeout(Duration::from_secs(1), replacement.read(&mut byte))
+            .await
+            .expect("replacement response deadline")
+            .expect("read replacement response");
+        assert_eq!(byte[0], b'H');
+        shutdown.cancel();
+        assert_eq!(server.await.expect("server join"), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn connection_task_failure_is_fatal_and_fixed() {
+        let failed = tokio::spawn(async { panic!("synthetic connection failure") })
+            .await
+            .expect_err("task must fail");
+        assert_eq!(
+            handle_connection_completion(Err(failed)),
+            Err(HttpServeError::Listener)
+        );
     }
 }

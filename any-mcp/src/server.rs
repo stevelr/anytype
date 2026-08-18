@@ -45,7 +45,7 @@ use crate::{
     protocol::WorkflowTool,
     resources::AnytypeResources,
     result::tool_error,
-    runtime::RuntimeContext,
+    runtime::{InvocationFailure, RuntimeContext},
     schema::SchemaContractError,
     view_handlers::{ViewListInput, ViewObjectListInput, ViewReadHandlers},
 };
@@ -105,6 +105,31 @@ const ALL_TOOL_NAMES: [&str; 14] = [
 const COMPACT_TOOL_NAMES: [&str; 4] = [OBJECT_EDIT, OBJECT_GET, OBJECT_SEARCH, SERVER_STATUS];
 const COMPACT_READ_TOOL_NAMES: [&str; 3] = [OBJECT_GET, OBJECT_SEARCH, SERVER_STATUS];
 
+fn invocation_failure_result(failure: InvocationFailure) -> CallToolResult {
+    let _controlled_kind = failure.kind;
+    if failure.dispatched {
+        tool_error(&ToolError::mutation_indeterminate())
+    } else {
+        tool_error(&ToolError::upstream())
+    }
+}
+
+struct DispatchAbortGuard(Option<tokio::task::AbortHandle>);
+
+impl DispatchAbortGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DispatchAbortGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 struct ServerState {
     tools: Vec<Tool>,
     access: MutationAccess,
@@ -161,6 +186,10 @@ impl AnyMcpServer {
     /// or if a typed schema, cursor store, or exact static inventory cannot be
     /// constructed safely.
     pub fn new(runtime: RuntimeContext) -> Result<Self, ServerBuildError> {
+        #[cfg(test)]
+        if runtime.catalog_failure_forced() {
+            return Err(ServerBuildError);
+        }
         Self::build_with_optional_registries(runtime, production_optional_registries(), true)
     }
 
@@ -371,7 +400,76 @@ impl AnyMcpServer {
         protocol_version: &'a ProtocolVersion,
         cancellation: &'a tokio_util::sync::CancellationToken,
     ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
+        let tool_name = request.name.to_string();
+        let server = self.clone();
+        let protocol_version = protocol_version.clone();
+        let cancellation = cancellation.clone();
+        let ingress = self.runtime.ingress_anchor(&tool_name);
+        Box::pin(async move {
+            let runtime = server.runtime.clone();
+            let task = tokio::spawn(async move {
+                runtime
+                    .scope_ingress(ingress, async move {
+                        let capability = match server
+                            .runtime
+                            .admit_invocation(&tool_name, &cancellation)
+                            .await
+                        {
+                            Ok(capability) => capability,
+                            Err(failure) => {
+                                return Ok(invocation_failure_result(failure));
+                            }
+                        };
+                        let operation = server.dispatch_tool_for_protocol_inner(
+                            request,
+                            &protocol_version,
+                            &cancellation,
+                        );
+                        match server
+                            .runtime
+                            .run_invocation(capability, &cancellation, operation)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(failure) => Ok(invocation_failure_result(failure)),
+                        }
+                    })
+                    .await
+            });
+            let mut guard = DispatchAbortGuard(Some(task.abort_handle()));
+            let result = task.await;
+            guard.disarm();
+            match result {
+                Ok(result) => result,
+                Err(_) => Err(ErrorData::internal_error("Tool execution failed.", None)),
+            }
+        })
+    }
+
+    fn dispatch_tool_for_protocol_inner<'a>(
+        &'a self,
+        request: CallToolRequestParams,
+        protocol_version: &'a ProtocolVersion,
+        cancellation: &'a tokio_util::sync::CancellationToken,
+    ) -> OptionalRegistryFuture<'a, Result<CallToolResult, ErrorData>> {
         let name = request.name.as_ref();
+        #[cfg(test)]
+        if name == "__test_deadline_mutation" {
+            return Box::pin(async move {
+                if crate::runtime::mark_invocation_dispatched(&self.runtime).is_err() {
+                    return Ok(tool_error(&ToolError::upstream()));
+                }
+                std::future::pending::<()>().await;
+                Ok(tool_error(&ToolError::upstream()))
+            });
+        }
+        #[cfg(test)]
+        if name == "__test_deadline_predispatch" {
+            return Box::pin(async move {
+                std::future::pending::<()>().await;
+                Ok(tool_error(&ToolError::upstream()))
+            });
+        }
         let selected_by_profile = match self.runtime.profile() {
             ApplicationProfile::Compact => COMPACT_TOOL_NAMES.contains(&name),
             ApplicationProfile::Standard => ALL_TOOL_NAMES.contains(&name),
@@ -685,6 +783,26 @@ impl ServerHandler for AnyMcpServer {
         // future is constructed, so this erased await contains only the
         // chosen route's state.
         let protocol_version = context.protocol_version().unwrap_or(PROTOCOL_VERSION);
+        if let Some(parts) = context.extensions.get::<http::request::Parts>() {
+            let Some(anchor) = parts
+                .extensions
+                .get::<crate::runtime::InvocationAnchor>()
+                .cloned()
+            else {
+                return Ok(tool_error(&ToolError::upstream()));
+            };
+            return self
+                .runtime
+                .scope_ingress(anchor, async {
+                    Box::pin(self.dispatch_tool_for_protocol(
+                        request,
+                        &protocol_version,
+                        &context.ct,
+                    ))
+                    .await
+                })
+                .await;
+        }
         Box::pin(self.dispatch_tool_for_protocol(request, &protocol_version, &context.ct)).await
     }
 

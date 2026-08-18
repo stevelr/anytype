@@ -297,16 +297,28 @@ impl ObjectCreateHandlers {
         };
         let Some(key) = normalized.idempotency_key.clone() else {
             let progress = MutationProgress::new();
-            return execute_create(
-                &self.runtime,
-                &self.contract,
-                normalized,
-                cancellation,
-                &progress,
-                &self.verify_config,
-            )
-            .await
-            .result;
+            let execution = self
+                .runtime
+                .run_routed_invocation(
+                    "object_create",
+                    cancellation,
+                    Box::pin(execute_create(
+                        &self.runtime,
+                        &self.contract,
+                        normalized,
+                        cancellation,
+                        &progress,
+                        &self.verify_config,
+                    )),
+                )
+                .await;
+            return match execution {
+                Ok(execution) => execution.result,
+                Err(failure) if failure.dispatched => {
+                    tool_error(&ToolError::mutation_indeterminate())
+                }
+                Err(_) => tool_error(&ToolError::upstream()),
+            };
         };
 
         let fingerprint = normalized.fingerprint();
@@ -323,18 +335,19 @@ impl ObjectCreateHandlers {
                 let store = self.idempotency.clone();
                 let task_attempt = attempt.clone();
                 let verify_config = self.verify_config.clone();
-                tokio::spawn(async move {
-                    supervise_create(
-                        runtime,
-                        contract,
-                        store,
-                        key,
-                        task_attempt,
-                        normalized,
-                        verify_config,
-                    )
-                    .await;
-                });
+                self.runtime
+                    .spawn_invocation_controller("object_create", move || async move {
+                        supervise_create(
+                            runtime,
+                            contract,
+                            store,
+                            key,
+                            task_attempt,
+                            normalized,
+                            verify_config,
+                        )
+                        .await;
+                    });
                 wait_for_attempt(attempt, cancellation).await
             }
         }
@@ -353,15 +366,16 @@ async fn supervise_create(
     let progress = attempt.progress();
     let supervisor_cancellation = CancellationToken::new();
     let execution_progress = progress.clone();
-    let execution_task = tokio::spawn(async move {
-        execute_create(
-            &runtime,
+    let execution_runtime = runtime.clone();
+    let execution_task = runtime.spawn_invocation_supervisor(async move {
+        Box::pin(execute_create(
+            &execution_runtime,
             &contract,
             input,
             &supervisor_cancellation,
             &execution_progress,
             &verify_config,
-        )
+        ))
         .await
     });
     let execution = finish_supervised_execution(execution_task, &progress).await;
@@ -534,7 +548,7 @@ async fn execute_create(
 
             // This is immediately before the first poll of the one and only
             // non-idempotent POST future.
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             let created = match request.create().await {
                 Ok(created) => created,
                 Err(error) => {
@@ -2195,7 +2209,7 @@ mod tests {
         let waiter = tokio::spawn(async move {
             wait_for_attempt(waiter_attempt, &CancellationToken::new()).await
         });
-        attempt.progress().mark_dispatched();
+        attempt.progress().mark_dispatched_for_test();
         let panic_task: tokio::task::JoinHandle<CreateExecution> =
             tokio::spawn(async { panic!("injected create panic") });
         let execution = finish_supervised_execution(panic_task, &attempt.progress()).await;

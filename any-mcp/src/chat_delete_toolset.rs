@@ -277,7 +277,7 @@ impl ChatMessageDeleteHandlers {
             OperationContext::new(CHAT_MESSAGE_DELETE),
             cancellation,
             &progress,
-            execute_delete(client, input, progress.clone(), deadline),
+            execute_delete(runtime.clone(), client, input, progress.clone(), deadline),
             |output| async move { Ok(output) },
         )
         .await
@@ -288,6 +288,7 @@ type DeleteFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AnytypeError>> + 
 type ReadFuture<'a> = Pin<Box<dyn Future<Output = Result<ChatMessage, AnytypeError>> + Send + 'a>>;
 
 async fn execute_delete(
+    runtime: RuntimeContext,
     client: PolicyClient,
     input: ChatMessageDeleteInput,
     progress: MutationProgress,
@@ -342,6 +343,7 @@ async fn execute_delete(
         })
     };
     execute_delete_operation(
+        &runtime,
         preflight,
         delete,
         read,
@@ -358,6 +360,7 @@ async fn execute_delete(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_delete_operation<D, R>(
+    runtime: &RuntimeContext,
     preflight: ReadFuture<'static>,
     delete: D,
     read: R,
@@ -375,7 +378,7 @@ where
 {
     let preflight = preflight.await?;
     validate_preflight(&preflight, &message_id, &expected)?;
-    run_delete_flow(delete, read, progress, deadline, verify).await?;
+    run_delete_flow(runtime, delete, read, progress, deadline, verify).await?;
     Ok(ChatMessageDeleteOutput {
         space_id,
         chat_id,
@@ -402,8 +405,9 @@ fn validate_preflight(
 }
 
 async fn run_delete_flow<D, R>(
+    runtime: &RuntimeContext,
     delete: D,
-    mut read: R,
+    read: R,
     progress: &MutationProgress,
     deadline: Instant,
     verify: VerifyConfig,
@@ -412,7 +416,20 @@ where
     D: FnOnce() -> DeleteFuture<'static>,
     R: FnMut() -> ReadFuture<'static>,
 {
-    progress.mark_dispatched();
+    progress.mark_dispatched(runtime)?;
+    run_delete_flow_dispatched(delete, read, deadline, verify).await
+}
+
+async fn run_delete_flow_dispatched<D, R>(
+    delete: D,
+    mut read: R,
+    deadline: Instant,
+    verify: VerifyConfig,
+) -> Result<(), HandlerOperationError>
+where
+    D: FnOnce() -> DeleteFuture<'static>,
+    R: FnMut() -> ReadFuture<'static>,
+{
     let accepted = match delete().await {
         Ok(()) => true,
         Err(error) if mutation_rejection_is_definitive(&error) => return Err(error.into()),
@@ -753,33 +770,51 @@ mod tests {
         verify: VerifyConfig,
     ) -> CallToolResult
     where
-        D: FnOnce() -> DeleteFuture<'static>,
-        R: FnMut() -> ReadFuture<'static>,
+        D: FnOnce() -> DeleteFuture<'static> + Send,
+        R: FnMut() -> ReadFuture<'static> + Send,
     {
         let runtime = runtime(no_io_client(), false);
         let contract = chat_message_delete_tool().unwrap();
-        execute_mutation_handler_until(
-            &runtime,
-            deadline,
-            &contract,
-            OperationContext::new(CHAT_MESSAGE_DELETE),
-            cancellation,
-            progress,
-            execute_delete_operation(
-                Box::pin(async move { preflight }),
-                delete,
-                read,
-                EntityId::new(SPACE_ID).unwrap(),
-                EntityId::new(CHAT_ID).unwrap(),
-                EntityId::new(MESSAGE_ID).unwrap(),
-                ExpectedModifiedAt::new(MODIFIED).unwrap(),
-                progress,
+        let capability = match runtime
+            .admit_invocation(CHAT_MESSAGE_DELETE, cancellation)
+            .await
+        {
+            Ok(capability) => capability,
+            Err(_) => return tool_error(&ToolError::upstream()),
+        };
+        let operation_runtime = runtime.clone();
+        let operation = Box::pin(async move {
+            execute_mutation_handler_until(
+                &operation_runtime,
                 deadline,
-                verify,
-            ),
-            |output| async move { Ok(output) },
-        )
-        .await
+                &contract,
+                OperationContext::new(CHAT_MESSAGE_DELETE),
+                cancellation,
+                progress,
+                execute_delete_operation(
+                    &operation_runtime,
+                    Box::pin(async move { preflight }),
+                    delete,
+                    read,
+                    EntityId::new(SPACE_ID).unwrap(),
+                    EntityId::new(CHAT_ID).unwrap(),
+                    EntityId::new(MESSAGE_ID).unwrap(),
+                    ExpectedModifiedAt::new(MODIFIED).unwrap(),
+                    progress,
+                    deadline,
+                    verify,
+                ),
+                |output| async move { Ok(output) },
+            )
+            .await
+        });
+        match runtime
+            .run_invocation(capability, cancellation, operation)
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => tool_error(&ToolError::upstream()),
+        }
     }
 
     fn assert_indeterminate(result: &CallToolResult) {
@@ -865,7 +900,8 @@ mod tests {
         ])));
         let read_results = reads.clone();
         let progress = MutationProgress::new();
-        let result = run_delete_flow(
+        progress.mark_dispatched_for_test();
+        let result = run_delete_flow_dispatched(
             move || {
                 delete_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Box::pin(async { Ok(()) })
@@ -874,7 +910,6 @@ mod tests {
                 let next = read_results.lock().unwrap().pop_front().unwrap();
                 Box::pin(async move { next })
             },
-            &progress,
             Instant::now() + std::time::Duration::from_secs(1),
             immediate_verify(),
         )
@@ -887,7 +922,8 @@ mod tests {
     #[tokio::test]
     async fn uncertain_delete_is_indeterminate_even_when_absence_is_observed() {
         let progress = MutationProgress::new();
-        let result = run_delete_flow(
+        progress.mark_dispatched_for_test();
+        let result = run_delete_flow_dispatched(
             || {
                 Box::pin(async {
                     Err(AnytypeError::Other {
@@ -896,7 +932,6 @@ mod tests {
                 })
             },
             || Box::pin(async { Err(absent()) }),
-            &progress,
             Instant::now() + std::time::Duration::from_secs(1),
             immediate_verify(),
         )
@@ -909,13 +944,13 @@ mod tests {
         let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let read_count = reads.clone();
         let progress = MutationProgress::new();
-        let result = run_delete_flow(
+        progress.mark_dispatched_for_test();
+        let result = run_delete_flow_dispatched(
             || Box::pin(async { Err(AnytypeError::Forbidden) }),
             move || {
                 read_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Box::pin(async { Err(absent()) })
             },
-            &progress,
             Instant::now() + std::time::Duration::from_secs(1),
             immediate_verify(),
         )
@@ -933,7 +968,8 @@ mod tests {
         let progress = MutationProgress::new();
         let mut verify = immediate_verify();
         verify.max_attempts = 3;
-        let result = run_delete_flow(
+        progress.mark_dispatched_for_test();
+        let result = run_delete_flow_dispatched(
             move || {
                 delete_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Box::pin(async { Ok(()) })
@@ -942,7 +978,6 @@ mod tests {
                 read_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Box::pin(async { Ok(message(MESSAGE_ID, MODIFIED)) })
             },
-            &progress,
             Instant::now() + std::time::Duration::from_secs(1),
             verify,
         )
@@ -1120,7 +1155,8 @@ mod tests {
         let progress = MutationProgress::new();
         let mut verify = immediate_verify();
         verify.timeout = Duration::from_millis(50);
-        let result = run_delete_flow(
+        progress.mark_dispatched_for_test();
+        let result = run_delete_flow_dispatched(
             || Box::pin(async { Ok(()) }),
             move || {
                 let read_entered = read_entered.clone();
@@ -1129,7 +1165,6 @@ mod tests {
                     std::future::pending().await
                 })
             },
-            &progress,
             Instant::now() + Duration::from_secs(1),
             verify,
         )

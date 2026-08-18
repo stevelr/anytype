@@ -28,10 +28,9 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
-    time::Duration,
 };
 
 #[allow(deprecated)]
@@ -43,6 +42,7 @@ use url::Url;
 use crate::{
     artifact_config::AbsoluteNativePath,
     artifact_roots::{EffectiveRootRegistry, RootAccessError, RootRegistry},
+    runtime::{InvocationCapability, RuntimeContext},
 };
 
 /// Maximum client roots accepted in one snapshot.
@@ -131,6 +131,8 @@ pub(crate) struct ClientRootsGate {
     source: OnceLock<Arc<dyn ClientRootsSource>>,
     decision: OnceLock<Arc<DecisionSlot>>,
     intersection: Arc<dyn ClientRootsIntersection>,
+    #[cfg(test)]
+    slot_install_barrier: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
 }
 
 impl Default for ClientRootsGate {
@@ -140,6 +142,8 @@ impl Default for ClientRootsGate {
             source: OnceLock::new(),
             decision: OnceLock::new(),
             intersection: Arc::new(TokioClientRootsIntersection),
+            #[cfg(test)]
+            slot_install_barrier: Mutex::new(None),
         }
     }
 }
@@ -228,6 +232,7 @@ struct DecisionSlot {
     supervisor_started: AtomicBool,
     publication: AtomicU8,
     decision: OnceLock<RootAuthorityDecision>,
+    invocation: Mutex<Option<InvocationCapability>>,
     notify: Notify,
 }
 
@@ -241,6 +246,7 @@ impl DecisionSlot {
         registry: RootRegistry,
         deadline: tokio::time::Instant,
         intersection: Arc<dyn ClientRootsIntersection>,
+        invocation: Option<InvocationCapability>,
     ) -> Self {
         Self {
             source,
@@ -250,6 +256,7 @@ impl DecisionSlot {
             supervisor_started: AtomicBool::new(false),
             publication: AtomicU8::new(Self::PENDING),
             decision: OnceLock::new(),
+            invocation: Mutex::new(invocation),
             notify: Notify::new(),
         }
     }
@@ -275,6 +282,12 @@ impl DecisionSlot {
         }
         let _ = self.decision.set(decision);
         self.publication.store(Self::PUBLISHED, Ordering::Release);
+        drop(
+            self.invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
         self.notify.notify_waiters();
     }
 
@@ -383,19 +396,86 @@ impl ClientRootsGate {
     ///
     /// Returns the fixed client-root failure when the snapshot could not be
     /// securely frozen. The caller must not fall back to static policy.
+    #[cfg(test)]
     pub(crate) async fn effective(
         &self,
         registry: &RootRegistry,
-        timeout: Duration,
+        timeout: std::time::Duration,
     ) -> Result<EffectiveRootRegistry, RootAccessError> {
-        self.authority(registry, timeout).await.effective()
+        self.authority_at(
+            registry,
+            tokio::time::Instant::now()
+                .checked_add(timeout)
+                .unwrap_or_else(tokio::time::Instant::now),
+            None,
+        )
+        .await
+        .effective()
+    }
+
+    pub(crate) async fn effective_scoped(
+        &self,
+        runtime: &RuntimeContext,
+        registry: &RootRegistry,
+        control_deadline: tokio::time::Instant,
+    ) -> Result<EffectiveRootRegistry, RootAccessError> {
+        self.authority_scoped(runtime, registry, control_deadline)
+            .await
+            .effective()
     }
 
     /// Resolves the shared path-free status and operation authority decision.
+    #[cfg(test)]
     pub(crate) async fn authority(
         &self,
         registry: &RootRegistry,
-        timeout: Duration,
+        timeout: std::time::Duration,
+    ) -> RootAuthorityDecision {
+        self.authority_at(
+            registry,
+            tokio::time::Instant::now()
+                .checked_add(timeout)
+                .unwrap_or_else(tokio::time::Instant::now),
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn authority_scoped(
+        &self,
+        runtime: &RuntimeContext,
+        registry: &RootRegistry,
+        control_deadline: tokio::time::Instant,
+    ) -> RootAuthorityDecision {
+        if !std::ptr::eq(self, runtime.client_roots()) {
+            return RootAuthorityDecision::disabled();
+        }
+        let Some(invocation) = runtime.active_invocation_capability() else {
+            return RootAuthorityDecision::disabled();
+        };
+        let deadline = invocation.deadline().min(control_deadline);
+        #[cfg(test)]
+        #[cfg(test)]
+        let barrier = {
+            self.slot_install_barrier
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        #[cfg(test)]
+        if let Some((entered, release)) = barrier {
+            entered.notify_one();
+            release.notified().await;
+        }
+        self.authority_at(registry, deadline, Some(invocation))
+            .await
+    }
+
+    async fn authority_at(
+        &self,
+        registry: &RootRegistry,
+        deadline: tokio::time::Instant,
+        invocation: Option<InvocationCapability>,
     ) -> RootAuthorityDecision {
         if registry.import_root_count() == 0 && registry.export_root_count() == 0 {
             return RootAuthorityDecision::unavailable(registry);
@@ -404,10 +484,7 @@ impl ClientRootsGate {
             return RootAuthorityDecision::configured(registry);
         }
 
-        let deadline = tokio::time::Instant::now()
-            .checked_add(timeout)
-            .unwrap_or_else(tokio::time::Instant::now);
-        let slot = self.decision_slot(registry, deadline);
+        let slot = self.decision_slot(registry, deadline, invocation);
         if slot.start_supervisor() {
             let supervisor_slot = Arc::clone(&slot);
             match tokio::runtime::Handle::try_current() {
@@ -442,6 +519,7 @@ impl ClientRootsGate {
         &self,
         registry: &RootRegistry,
         deadline: tokio::time::Instant,
+        invocation: Option<InvocationCapability>,
     ) -> Arc<DecisionSlot> {
         Arc::clone(self.decision.get_or_init(|| {
             // The set-once initializer is the linearization point for source
@@ -452,6 +530,7 @@ impl ClientRootsGate {
                 registry.clone(),
                 deadline,
                 Arc::clone(&self.intersection),
+                invocation,
             ))
         }))
     }
@@ -621,13 +700,38 @@ mod tests {
         fs,
         path::Path,
         sync::{Condvar, Mutex, atomic::AtomicUsize},
+        time::Duration,
     };
+
+    use anytype::prelude::{AnytypeClient, ClientConfig};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::{
         artifact_config::{ArtifactConfig, RelativeNativePath},
         artifact_roots::RootAccessErrorKind,
+        runtime::StartupStatus,
     };
+
+    fn invocation_runtime(max_concurrency: usize, timeout: Duration) -> RuntimeContext {
+        let client = AnytypeClient::with_config(ClientConfig {
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            keystore: Some("env".to_owned()),
+            keystore_service: Some("any-mcp-client-roots-test".to_owned()),
+            app_name: "any-mcp-client-roots-test".to_owned(),
+            ..ClientConfig::default()
+        })
+        .expect("test client");
+        RuntimeContext::from_parts(
+            client,
+            max_concurrency,
+            timeout,
+            StartupStatus {
+                http_available: true,
+                grpc_available: true,
+            },
+        )
+    }
 
     struct ScriptedRoots {
         advertises: bool,
@@ -948,7 +1052,7 @@ mod tests {
         // This models the initializer being preempted before it can claim the
         // supervisor. The later caller may claim start but must consume the
         // missing source frozen by this first initialization.
-        let initialized = gate.decision_slot(&registry, frozen_deadline);
+        let initialized = gate.decision_slot(&registry, frozen_deadline, None);
         let late = Arc::new(ScriptedRoots::advertised(vec![Root::new(directory_uri(
             &import,
         ))]));
@@ -1007,6 +1111,297 @@ mod tests {
         assert_eq!(source.calls.load(Ordering::Acquire), 1);
 
         drop(gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_first_status_cannot_reset_or_extend_the_ingress_deadline() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let gate = ClientRootsGate::default();
+        gate.enable();
+        let source = Arc::new(ScriptedRoots::advertised(vec![Root::new(directory_uri(
+            &import,
+        ))]));
+        gate.install_source(source.clone());
+        let ingress_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let first_status = gate.authority_at(&registry, ingress_deadline, None).await;
+        let later_status = gate.authority(&registry, Duration::from_secs(60)).await;
+
+        assert_eq!(first_status.authority(), LocalRootAuthority::Disabled);
+        assert_eq!(later_status.authority(), LocalRootAuthority::Disabled);
+        assert_eq!(source.calls(), 0);
+        assert!(gate.decision.get().is_some_and(|slot| {
+            slot.deadline == ingress_deadline
+                && slot.publication.load(Ordering::Acquire) == DecisionSlot::PUBLISHED
+        }));
+
+        drop(later_status);
+        drop(first_status);
+        drop(gate);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn decision_slot_retains_capacity_after_all_waiters_cancel() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let runtime = invocation_runtime(1, Duration::from_secs(5));
+        runtime.client_roots().enable();
+        let source = Arc::new(DeferredRoots::new(vec![Root::new(directory_uri(&import))]));
+        runtime.client_roots().install_source(source.clone());
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("artifact_status", &cancellation)
+            .await
+            .expect("first admission");
+        let operation_runtime = runtime.clone();
+        let first_registry = registry.clone();
+        let second_registry = registry.clone();
+        let operation_cancellation = cancellation.clone();
+        let running_runtime = runtime.clone();
+        let running = tokio::spawn(async move {
+            running_runtime
+                .run_invocation(
+                    capability,
+                    &operation_cancellation,
+                    Box::pin(async move {
+                        tokio::join!(
+                            operation_runtime.client_roots().authority_scoped(
+                                &operation_runtime,
+                                &first_registry,
+                                tokio::time::Instant::now() + Duration::from_secs(5),
+                            ),
+                            operation_runtime.client_roots().authority_scoped(
+                                &operation_runtime,
+                                &second_registry,
+                                tokio::time::Instant::now() + Duration::from_secs(5),
+                            ),
+                        )
+                    }),
+                )
+                .await
+        });
+        source.wait_until_called().await;
+        cancellation.cancel();
+        let failure = running
+            .await
+            .expect("first invocation join")
+            .expect_err("all authority waiters cancel");
+        assert_eq!(
+            failure.kind,
+            crate::runtime::ControlledFailureKind::Cancelled
+        );
+
+        let waiter_runtime = runtime.clone();
+        let second = tokio::spawn(async move {
+            waiter_runtime
+                .admit_invocation("artifact_status", &CancellationToken::new())
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !second.is_finished(),
+            "decision slot must retain the permit"
+        );
+
+        source.release.notify_one();
+        let second_capability = tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("capacity release deadline")
+            .expect("second admission join")
+            .expect("second admission");
+        drop(second_capability);
+        assert_eq!(source.calls.load(Ordering::Acquire), 1);
+        let slot = runtime
+            .client_roots()
+            .decision
+            .get()
+            .expect("frozen decision slot");
+        assert_eq!(
+            slot.publication.load(Ordering::Acquire),
+            DecisionSlot::PUBLISHED
+        );
+        assert!(
+            slot.invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        );
+
+        drop(runtime);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn preemption_before_slot_install_keeps_the_original_ingress_deadline() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let runtime = invocation_runtime(1, Duration::from_secs(5));
+        runtime.client_roots().enable();
+        let source = Arc::new(ScriptedRoots::advertised(vec![Root::new(directory_uri(
+            &import,
+        ))]));
+        runtime.client_roots().install_source(source.clone());
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        *runtime
+            .client_roots()
+            .slot_install_barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((Arc::clone(&entered), Arc::clone(&release)));
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("artifact_status", &cancellation)
+            .await
+            .expect("first admission");
+        let ingress_deadline = capability.deadline();
+        let control_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let supervisor_runtime = runtime.clone();
+        let operation_registry = registry.clone();
+        let operation_cancellation = cancellation.clone();
+        let running_runtime = runtime.clone();
+        let (supervisor_sender, supervisor_receiver) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(async move {
+            running_runtime
+                .run_invocation(
+                    capability,
+                    &operation_cancellation,
+                    Box::pin(async move {
+                        let authority_runtime = supervisor_runtime.clone();
+                        let supervisor =
+                            supervisor_runtime.spawn_invocation_supervisor(async move {
+                                authority_runtime
+                                    .client_roots()
+                                    .authority_scoped(
+                                        &authority_runtime,
+                                        &operation_registry,
+                                        control_deadline,
+                                    )
+                                    .await
+                            });
+                        let _ = supervisor_sender.send(supervisor);
+                        std::future::pending::<()>().await;
+                    }),
+                )
+                .await
+        });
+        let supervisor = supervisor_receiver.await.expect("supervisor handle");
+        entered.notified().await;
+        assert!(runtime.client_roots().decision.get().is_none());
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let failure = running
+            .await
+            .expect("first invocation join")
+            .expect_err("ingress deadline");
+        assert_eq!(
+            failure.kind,
+            crate::runtime::ControlledFailureKind::TimedOut
+        );
+        let waiter_runtime = runtime.clone();
+        let second = tokio::spawn(async move {
+            waiter_runtime
+                .admit_invocation("artifact_status", &CancellationToken::new())
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !second.is_finished(),
+            "supervisor retains the invocation lease"
+        );
+
+        release.notify_one();
+        let decision = supervisor.await.expect("supervisor join");
+        assert_eq!(decision.authority(), LocalRootAuthority::Disabled);
+        assert_eq!(source.calls(), 0, "expired slot must not start source work");
+        let slot = runtime
+            .client_roots()
+            .decision
+            .get()
+            .expect("terminal decision slot");
+        assert_eq!(slot.deadline, ingress_deadline);
+        assert_eq!(
+            slot.publication.load(Ordering::Acquire),
+            DecisionSlot::PUBLISHED
+        );
+        assert!(
+            slot.invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        );
+        let second_capability = second
+            .await
+            .expect("second admission join")
+            .expect("capacity releases after publication");
+        drop(second_capability);
+
+        drop(runtime);
+        drop(registry);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn scoped_authority_rejects_absent_and_foreign_capabilities() {
+        let (base, import, export) = temporary_tree();
+        let registry = RootRegistry::activate(&config(&import, &export)).expect("activate");
+        let primary = invocation_runtime(1, Duration::from_secs(1));
+        primary.client_roots().enable();
+        let source = Arc::new(ScriptedRoots::advertised(vec![Root::new(directory_uri(
+            &import,
+        ))]));
+        primary.client_roots().install_source(source.clone());
+
+        let absent = primary
+            .client_roots()
+            .authority_scoped(
+                &primary,
+                &registry,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await;
+        assert_eq!(absent.authority(), LocalRootAuthority::Disabled);
+        assert!(primary.client_roots().decision.get().is_none());
+
+        let foreign = invocation_runtime(1, Duration::from_secs(1));
+        let cancellation = CancellationToken::new();
+        let capability = primary
+            .admit_invocation("artifact_status", &cancellation)
+            .await
+            .expect("primary capability");
+        let foreign_runtime = foreign.clone();
+        let primary_runtime = primary.clone();
+        let foreign_registry = registry.clone();
+        let decision = primary
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async move {
+                    primary_runtime
+                        .client_roots()
+                        .authority_scoped(
+                            &foreign_runtime,
+                            &foreign_registry,
+                            tokio::time::Instant::now() + Duration::from_secs(1),
+                        )
+                        .await
+                }),
+            )
+            .await
+            .expect("foreign probe result");
+        assert_eq!(decision.authority(), LocalRootAuthority::Disabled);
+        assert!(primary.client_roots().decision.get().is_none());
+        assert_eq!(source.calls(), 0);
+
+        drop(primary);
+        drop(foreign);
         drop(registry);
         fs::remove_dir_all(base).expect("cleanup");
     }

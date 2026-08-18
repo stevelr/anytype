@@ -33,6 +33,12 @@ pub struct StaticToken {
 }
 
 impl StaticToken {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::from_file_bytes(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .expect("static test token")
+    }
+
     /// Loads and validates the token file at the configured absolute path.
     ///
     /// The path must name a regular non-symlink file containing exactly one

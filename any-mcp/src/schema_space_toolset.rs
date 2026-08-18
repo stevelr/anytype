@@ -428,24 +428,28 @@ impl SchemaSpaceHandlers {
                 BeginAttempt::Wait(attempt) => wait_for_attempt(attempt, cancellation).await,
                 BeginAttempt::Lead(attempt) => {
                     let runtime = runtime.clone();
+                    let supervisor_runtime = runtime.clone();
                     let contract = self.create_contract.clone();
                     let store = self.idempotency.clone();
                     let task_attempt = attempt.clone();
                     let verify_config = self.verify_config.clone();
                     let observer = self.create_observer.clone();
-                    tokio::spawn(async move {
-                        supervise_space_create(SpaceCreateSupervision {
-                            runtime,
-                            contract,
-                            store,
-                            key,
-                            attempt: task_attempt,
-                            normalized,
-                            verify_config,
-                            observer,
-                        })
-                        .await;
-                    });
+                    runtime.spawn_invocation_controller(
+                        "schema_space_create",
+                        move || async move {
+                            supervise_space_create(SpaceCreateSupervision {
+                                runtime: supervisor_runtime,
+                                contract,
+                                store,
+                                key,
+                                attempt: task_attempt,
+                                normalized,
+                                verify_config,
+                                observer,
+                            })
+                            .await;
+                        },
+                    );
                     wait_for_attempt(attempt, cancellation).await
                 }
             }
@@ -491,7 +495,7 @@ impl SchemaSpaceHandlers {
                         request = request.description(description.as_str());
                     }
 
-                    operation_progress.mark_dispatched();
+                    operation_progress.mark_dispatched(runtime)?;
                     let response_anomaly = match request.update().await {
                         Ok(returned) => {
                             !space_matches_update(&returned, &space_id, &input).unwrap_or(false)
@@ -587,9 +591,10 @@ async fn supervise_space_create(supervision: SpaceCreateSupervision) {
     } = supervision;
     let progress = attempt.progress();
     let task_progress = progress.clone();
-    let task = tokio::spawn(async move {
+    let task_runtime = runtime.clone();
+    let task = runtime.spawn_invocation_supervisor(async move {
         Box::pin(execute_space_create(
-            &runtime,
+            &task_runtime,
             &contract,
             normalized,
             &CancellationToken::new(),
@@ -628,7 +633,7 @@ async fn execute_space_create(
             if let Some(description) = input.description.as_ref() {
                 request = request.description(description.as_str());
             }
-            operation_progress.mark_dispatched();
+            operation_progress.mark_dispatched(runtime)?;
             let created = match request.create().await {
                 Ok(created) => created,
                 Err(error) => {

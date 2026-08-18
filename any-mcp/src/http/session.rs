@@ -360,10 +360,12 @@ impl StableBackend {
     /// Handles one admitted stable-mode request.
     pub(crate) async fn call(self: Arc<Self>, admitted: AdmittedRequest) -> Response<HttpBody> {
         let AdmittedRequest {
-            parts,
+            mut parts,
             body,
             principal,
+            invocation,
         } = admitted;
+        parts.extensions.insert(invocation);
 
         // Gate: the negotiated-version header must be a tested
         // Streamable-HTTP-capable revision. The header postdates 2024-11-05,
@@ -478,9 +480,20 @@ mod tests {
     use http_body_util::BodyExt;
 
     use super::*;
-    use crate::{config::ApplicationProfile, runtime::StartupStatus};
+    use crate::{
+        config::ApplicationProfile,
+        http::{
+            auth::Authenticator,
+            listener::{ListenerState, McpService, handle_request},
+        },
+        runtime::StartupStatus,
+    };
 
     fn test_runtime() -> RuntimeContext {
+        test_runtime_with_timeout(Duration::from_secs(5))
+    }
+
+    fn test_runtime_with_timeout(timeout: Duration) -> RuntimeContext {
         let config = ClientConfig {
             base_url: Some("http://127.0.0.1:1".to_string()),
             keystore: Some("env".to_string()),
@@ -492,7 +505,7 @@ mod tests {
         RuntimeContext::from_parts_with_profile(
             client,
             4,
-            Duration::from_secs(5),
+            timeout,
             StartupStatus {
                 http_available: true,
                 grpc_available: false,
@@ -537,6 +550,10 @@ mod tests {
             parts,
             body: Bytes::copy_from_slice(body.as_bytes()),
             principal: principal.clone(),
+            invocation: crate::runtime::InvocationAnchor::capture_durations(
+                Duration::from_secs(5),
+                Duration::from_secs(300),
+            ),
         }
     }
 
@@ -609,6 +626,212 @@ mod tests {
         session
     }
 
+    fn listener_request(body: String, session: Option<&str>) -> Request<Full<Bytes>> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header("host", "localhost:8000")
+            .header("authorization", "Bearer synthetic-token")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json");
+        if let Some(session) = session {
+            builder = builder
+                .header("mcp-session-id", session)
+                .header("mcp-protocol-version", "2025-11-25");
+        }
+        builder
+            .body(Full::new(Bytes::from(body)))
+            .expect("listener request")
+    }
+
+    async fn initialize_listener_session(state: &Arc<ListenerState>) -> String {
+        let initialized =
+            handle_request(state, listener_request(initialize_body("2025-11-25"), None)).await;
+        assert_eq!(initialized.status(), StatusCode::OK);
+        let session = initialized
+            .headers()
+            .get(SESSION_ID_HEADER)
+            .expect("session id")
+            .to_str()
+            .expect("ascii session id")
+            .to_owned();
+        let notified = handle_request(
+            state,
+            listener_request(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                })
+                .to_string(),
+                Some(&session),
+            ),
+        )
+        .await;
+        assert_eq!(notified.status(), StatusCode::ACCEPTED);
+        session
+    }
+
+    fn stable_listener(
+        timeout: Duration,
+    ) -> (
+        Arc<ListenerState>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::runtime::InvocationAnchor>,
+    ) {
+        stable_listener_with_claim_barrier(timeout, None, false)
+    }
+
+    fn stable_listener_with_claim_barrier(
+        timeout: Duration,
+        claim_barrier: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+        listener_claim_fixture: bool,
+    ) -> (
+        Arc<ListenerState>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::runtime::InvocationAnchor>,
+    ) {
+        let runtime = test_runtime_with_timeout(timeout);
+        let config = crate::http::listener::tests::test_config(&[]);
+        let backend = Arc::new(StableBackend::new(
+            runtime.clone(),
+            &config,
+            CancellationToken::new(),
+        ));
+        let (anchor_tx, anchor_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ingress_runtime = runtime.clone();
+        let service: McpService = Arc::new(move |admitted| {
+            let backend = Arc::clone(&backend);
+            let runtime = ingress_runtime.clone();
+            let deadline_fixture = admitted
+                .body
+                .windows(b"__test_deadline".len())
+                .any(|window| window == b"__test_deadline");
+            if deadline_fixture {
+                if let Some((claimed, release)) = claim_barrier.as_ref() {
+                    admitted
+                        .invocation
+                        .arm_dispatch_claim_barrier(Arc::clone(claimed), Arc::clone(release));
+                }
+                let _ = anchor_tx.send(admitted.invocation.clone());
+            }
+            if listener_claim_fixture && deadline_fixture {
+                let invocation = admitted.invocation.clone();
+                return Box::pin(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        invocation.complete_armed_dispatch_claim()
+                    })
+                    .await;
+                    std::future::pending::<Response<HttpBody>>().await
+                });
+            }
+            Box::pin(async move {
+                let invocation = admitted.invocation.clone();
+                runtime
+                    .scope_ingress(invocation, backend.call(admitted))
+                    .await
+            })
+        });
+        let state = ListenerState::new_with_runtime(
+            &config,
+            Authenticator::SyntheticAllow,
+            None,
+            service,
+            &runtime,
+        );
+        (Arc::new(state), anchor_rx)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stable_http_terminal_wins_a_claiming_deadline_without_dispatch() {
+        let claimed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let (state, mut anchors) = stable_listener_with_claim_barrier(
+            Duration::from_millis(250),
+            Some((Arc::clone(&claimed), Arc::clone(&release))),
+            true,
+        );
+        let session = initialize_listener_session(&state).await;
+        let running = tokio::spawn(async move {
+            handle_request(
+                &state,
+                listener_request(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 42,
+                        "method": "tools/call",
+                        "params": {"name": "__test_deadline_mutation", "arguments": {}},
+                    })
+                    .to_string(),
+                    Some(&session),
+                ),
+            )
+            .await
+        });
+        let anchor = anchors.recv().await.expect("claiming anchor");
+        tokio::task::spawn_blocking(move || claimed.wait())
+            .await
+            .expect("claim barrier");
+        tokio::time::sleep_until(anchor.deadline()).await;
+        let response = tokio::time::timeout(Duration::from_secs(1), running).await;
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release barrier");
+        let response = response
+            .expect("listener terminal response")
+            .expect("request join");
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(!anchor.dispatched());
+        tokio::task::yield_now().await;
+        assert!(!anchor.dispatched());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stable_http_dispatch_wins_before_deadline_and_returns_structured_outcome() {
+        let claimed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let (state, mut anchors) = stable_listener_with_claim_barrier(
+            Duration::from_millis(250),
+            Some((Arc::clone(&claimed), Arc::clone(&release))),
+            false,
+        );
+        let session = initialize_listener_session(&state).await;
+        let running = tokio::spawn(async move {
+            handle_request(
+                &state,
+                listener_request(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 43,
+                        "method": "tools/call",
+                        "params": {"name": "__test_deadline_mutation", "arguments": {}},
+                    })
+                    .to_string(),
+                    Some(&session),
+                ),
+            )
+            .await
+        });
+        let anchor = anchors.recv().await.expect("claiming anchor");
+        tokio::task::spawn_blocking(move || claimed.wait())
+            .await
+            .expect("claim barrier");
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release barrier");
+        tokio::time::timeout_at(anchor.deadline(), async {
+            while !anchor.dispatched() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatch claim commits before deadline");
+        let response = tokio::time::timeout(Duration::from_secs(1), running)
+            .await
+            .expect("structured terminal response")
+            .expect("request join");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_body(response).await;
+        assert!(body.contains("mutation may have applied"), "{body}");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn initialize_creates_a_principal_bound_session_serving_tools() {
         let backend = backend(4);
@@ -665,6 +888,106 @@ mod tests {
             ))
             .await;
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stable_session_worker_preserves_expired_authenticated_anchor() {
+        let backend = backend(4);
+        let alice = principal("anchor-alice");
+        let session = initialize_session(&backend, &alice).await;
+        let mut request = admitted(
+            Method::POST,
+            &[
+                ("mcp-session-id", &session),
+                ("mcp-protocol-version", "2025-11-25"),
+            ],
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {"name": "server_status", "arguments": {}},
+            })
+            .to_string(),
+            &alice,
+        );
+        request.invocation = crate::runtime::InvocationAnchor::capture_durations(
+            Duration::from_secs(1),
+            Duration::from_secs(300),
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let response = backend.clone().call(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_body(response).await;
+        assert!(body.contains("\"id\":9"), "{body}");
+        assert!(body.contains("\"isError\":true"), "{body}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stable_http_preserves_pre_and_post_dispatch_deadline_classification() {
+        let (state, mut anchors) = stable_listener(Duration::from_secs(1));
+        let session = initialize_listener_session(&state).await;
+
+        let pre_state = Arc::clone(&state);
+        let pre_session = session.clone();
+        let pre = tokio::spawn(async move {
+            handle_request(
+                &pre_state,
+                listener_request(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 40,
+                        "method": "tools/call",
+                        "params": {"name": "__test_deadline_predispatch", "arguments": {}},
+                    })
+                    .to_string(),
+                    Some(&pre_session),
+                ),
+            )
+            .await
+        });
+        let pre_anchor = anchors.recv().await.expect("pre-dispatch anchor");
+        assert!(!pre_anchor.dispatched());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let pre_response = pre.await.expect("pre-dispatch response");
+        assert_eq!(pre_response.status(), StatusCode::OK);
+        let pre_body = read_body(pre_response).await;
+        assert!(pre_body.contains("\"id\":40"), "{pre_body}");
+        assert!(pre_body.contains("upstream"), "{pre_body}");
+        assert!(!pre_body.contains("mutation_indeterminate"), "{pre_body}");
+        assert!(!pre_anchor.dispatched());
+
+        let post_state = Arc::clone(&state);
+        let post = tokio::spawn(async move {
+            handle_request(
+                &post_state,
+                listener_request(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 41,
+                        "method": "tools/call",
+                        "params": {"name": "__test_deadline_mutation", "arguments": {}},
+                    })
+                    .to_string(),
+                    Some(&session),
+                ),
+            )
+            .await
+        });
+        let post_anchor = anchors.recv().await.expect("post-dispatch anchor");
+        for _ in 0..32 {
+            if post_anchor.dispatched() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(post_anchor.dispatched());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let post_response = post.await.expect("post-dispatch response");
+        assert_eq!(post_response.status(), StatusCode::OK);
+        let body = read_body(post_response).await;
+        assert!(body.contains("\"id\":41"), "{body}");
+        assert!(body.contains("\"code\":\"conflict\""), "{body}");
+        assert!(body.contains("mutation may have applied"), "{body}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

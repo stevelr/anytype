@@ -28,7 +28,7 @@ use crate::{
         classify_preview_frame, dispatch_modern, internal_error, invalid_request, parse_error,
         valid_id,
     },
-    runtime::{ServeError, serve_transport},
+    runtime::ServeError,
     server::AnyMcpServer,
 };
 
@@ -56,8 +56,8 @@ pub(crate) async fn serve_stdio(
 
 pub(crate) async fn serve_stable<R, W>(
     server: AnyMcpServer,
-    mut reader: R,
-    mut writer: W,
+    reader: R,
+    writer: W,
 ) -> Result<(), ServeError>
 where
     R: AsyncBufRead + Unpin + Send + 'static,
@@ -67,30 +67,38 @@ where
     // so MCP client roots may narrow the static local artifact root policy for
     // this session. Preview stdio and multi-session transports do not.
     server.runtime().client_roots().enable();
+    let runtime = server.runtime().clone();
+    let result = serve_stable_inner(server, reader, writer).await;
+    shutdown_runtime(&runtime).await;
+    result
+}
+
+async fn serve_stable_inner<R, W>(
+    server: AnyMcpServer,
+    mut reader: R,
+    mut writer: W,
+) -> Result<(), ServeError>
+where
+    R: AsyncBufRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     loop {
         let runtime_shutdown = server.runtime().shutdown_token();
         let frame = match tokio::select! {
             biased;
             () = runtime_shutdown.cancelled() => {
-                shutdown_runtime(server.runtime()).await;
                 return Ok(());
             }
             frame = read_frame(&mut reader) => frame,
         } {
             Ok(Some(frame)) if frame.iter().all(u8::is_ascii_whitespace) => continue,
             Ok(Some(frame)) => frame,
-            Ok(None) => {
-                shutdown_runtime(server.runtime()).await;
-                return Ok(());
-            }
+            Ok(None) => return Ok(()),
             Err(FrameReadError::TooLarge) => {
                 write_gate_response(&mut writer, &invalid_request(Value::Null)).await?;
                 continue;
             }
-            Err(FrameReadError::Io) => {
-                shutdown_runtime(server.runtime()).await;
-                return Err(ServeError::StdioTransport);
-            }
+            Err(FrameReadError::Io) => return Err(ServeError::StdioTransport),
         };
 
         let frame_without_bom = frame.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&frame);
@@ -102,7 +110,11 @@ where
             }
         };
         if is_stable_initialize(&value) {
-            return serve_transport(server, LegacyStdioTransport::new(frame, reader, writer)).await;
+            return crate::runtime::serve_transport_inner(
+                server,
+                LegacyStdioTransport::new(frame, reader, writer),
+            )
+            .await;
         }
         if !is_jsonrpc_notification(&value) {
             write_gate_response(&mut writer, &invalid_request(Value::Null)).await?;
@@ -466,9 +478,6 @@ where
                 drop(responses);
                 let _ = writer_task.await;
                 drain_artifact_settlements(&runtime).await;
-                runtime
-                    .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
-                    .await;
                 // Staging durability uncertainty is the only internal source
                 // that cancels this runtime token. EOF and process signals are
                 // ordinary transport shutdowns.
@@ -556,18 +565,13 @@ async fn abort_requests(requests: &mut JoinSet<()>) {
 
 /// Waits for shutdown-owned artifact settlement after preview request work has stopped.
 async fn drain_artifact_settlements(runtime: &crate::RuntimeContext) {
-    runtime
-        .drain_artifact_settlements(runtime.artifact_config().limits.operation_timeout)
-        .await;
+    runtime.drain_artifact_cleanup().await;
 }
 
 /// Stops runtime admission and waits for owned artifact settlement.
 async fn shutdown_runtime(runtime: &crate::RuntimeContext) {
     runtime.begin_shutdown();
     drain_artifact_settlements(runtime).await;
-    runtime
-        .drain_artifact_staging(runtime.artifact_config().limits.operation_timeout)
-        .await;
 }
 
 async fn handle_frame(
@@ -768,10 +772,27 @@ mod tests {
             .expect("settlement permit");
         let dropped = Arc::new(AtomicBool::new(false));
         let marker = Arc::clone(&dropped);
-        let _receiver = runtime.supervise_import_settlement(key, permit, async move {
-            let _marker = DropMarker(marker);
-            std::future::pending().await
-        });
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("file_import", &cancellation)
+            .await
+            .expect("invocation admission");
+        let _receiver = runtime
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async {
+                    Some(
+                        runtime.supervise_import_settlement(key, permit, async move {
+                            let _marker = DropMarker(marker);
+                            std::future::pending().await
+                        }),
+                    )
+                }),
+            )
+            .await
+            .expect("start settlement")
+            .expect("settlement receiver");
         tokio::task::yield_now().await;
         dropped
     }
@@ -894,6 +915,41 @@ mod tests {
         .await
         .expect("clean preview shutdown");
 
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn stable_preinitialize_write_failure_runs_shared_cleanup() {
+        let runtime = test_runtime();
+        let dropped = pending_settlement(&runtime).await;
+        let (mut client, server_side) = duplex(256);
+        client
+            .write_all(b"{malformed\n")
+            .await
+            .expect("write malformed frame");
+        drop(client);
+        let (reader, writer) = tokio::io::split(server_side);
+
+        let result = serve_stable(
+            AnyMcpServer::new(runtime).expect("static catalog"),
+            BufReader::new(reader),
+            writer,
+        )
+        .await;
+
+        assert!(matches!(result, Err(ServeError::StdioTransport)));
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn catalog_failure_runs_shared_cleanup() {
+        let runtime = test_runtime();
+        let dropped = pending_settlement(&runtime).await;
+        runtime.force_catalog_failure();
+
+        let result = crate::runtime::serve_stdio(runtime, ProtocolMode::Stable).await;
+
+        assert!(matches!(result, Err(ServeError::Catalog)));
         assert!(dropped.load(Ordering::Acquire));
     }
 

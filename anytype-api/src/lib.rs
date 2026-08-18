@@ -185,13 +185,25 @@ pub use anytype_rpc::deadline::{
     GrpcTimeoutOutcome, GrpcTimeoutPolicy, GrpcTimeoutSource, GrpcTransportProgress,
 };
 
+/// Runs all nested gRPC calls under one absolute caller-owned deadline.
+pub async fn scope_grpc_deadline<F, T>(deadline: tokio::time::Instant, operation: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    anytype_rpc::deadline::scope_grpc_enclosing_deadline(
+        GrpcEnclosingDeadline::from_instant(deadline),
+        operation,
+    )
+    .await
+}
+
 /// Prelude module - import (nearly) all the things with `use anytype::prelude::*;`
 pub mod prelude {
     pub use super::{
         ANYTYPE_API_VERSION, ANYTYPE_DESKTOP_URL, ANYTYPE_GRPC_TIMEOUT_SECS, ANYTYPE_HEADLESS_URL,
         GrpcCallOptions, GrpcDeadlineError, GrpcEnclosingDeadline, GrpcStreamDeadline,
         GrpcStreamError, GrpcTimeoutClass, GrpcTimeoutConfigError, GrpcTimeoutOutcome,
-        GrpcTimeoutPolicy, GrpcTimeoutSource, GrpcTransportProgress,
+        GrpcTimeoutPolicy, GrpcTimeoutSource, GrpcTransportProgress, scope_grpc_deadline,
     };
     // Error types
     pub use crate::error::*;
