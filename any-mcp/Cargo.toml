@@ -46,16 +46,27 @@ name = "any-mcp-discussions-acceptance"
 path = "src/bin/discussions_acceptance.rs"
 required-features = ["acceptance-harness"]
 
+[[bin]]
+# Private, operator-driven comparison harness. Release measurements require a
+# protected Linux supervisor and are not part of ordinary builds.
+name = "any-mcp-benchmark"
+path = "src/bin/benchmark/main.rs"
+required-features = ["benchmark-harness"]
+
 [features]
 default = []
 # Builds a test-only stdio child with deterministic acceptance seams around the
 # same collection-membership handlers used by the linked views-write registry.
 acceptance-harness = []
+# Builds the private benchmark runner and its portable fake-child tests.
+benchmark-harness = ["dep:benchmark-flate2"]
 
 [dependencies]
 anytype.workspace = true
 axum.workspace = true
 base64.workspace = true
+# The private benchmark's npm provenance decoder is feature scoped.
+benchmark-flate2 = { package = "flate2", version = "1.1.2", optional = true }
 bytes.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true

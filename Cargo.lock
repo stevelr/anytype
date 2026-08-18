@@ -225,6 +225,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "chrono",
+ "flate2",
  "fs2",
  "futures",
  "futures-util",
