@@ -1725,7 +1725,10 @@ mod tests {
             (0, 0)
         );
 
+        // Decisions and the gates' cached terminal decisions both own registry
+        // handles; release them before removing the tree.
         drop((direct, narrowed, empty, disabled));
+        drop((narrowed_gate, empty_gate, disabled_gate));
         drop(registry);
         remove_temporary_tree(base);
     }
@@ -1906,6 +1909,7 @@ mod tests {
         assert_eq!(status_source.calls(), 1);
         assert_eq!(operation_source.calls(), 1);
 
+        drop((operation_decision, status_decision));
         drop(operation_effective);
         drop(status_effective);
         drop(operation_first);
