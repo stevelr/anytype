@@ -44,12 +44,12 @@ http-body-util = "0.1.5"
 httpdate = "1.0.3"
 hyper = { version = "1.11.0", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
-icu_properties = "2.2.0"
+icu_properties = "2.3.0"
 # for jsonwebtoken 11.0, use aws_lc_rs backend instead of rust_crypto
 # rust-crypto uses rsa 0.9.10 which has security advisory (as of 2026-08-19)
 jsonwebtoken = { version = "11.0.0", default-features = false, features = ["aws_lc_rs"] }
 keyring-core = { version = "1.0.0", features = ["sample"] }
-libc = "0.2.183"
+libc = "0.2.189"
 mime = "0.3.17"
 parking_lot = "0.12.5"
 prost = "0.14.4"
@@ -71,7 +71,7 @@ subtle = "2.6.1"
 test-log = { version = "0.2.21", features = ["log", "trace"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
-toml = "0.9.12"
+toml = "1.1.4+spec-1.1.0"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tracing = "0.1.44"

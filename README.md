@@ -3,18 +3,13 @@
 Automate your Anytype workspace from the terminal, scripts, an external editor,
 or an AI client.
 
-Anytype Toolbox is a community project built around one command: `anyr`. It can
-manage spaces and objects, work with files and chats, edit documents as
-Markdown, export and restore spaces, and run a workflow-oriented MCP server.
-Rust applications can use the supported API surface through the workspace's
-client libraries.
+The unified binary `anyr` can manage spaces and objects, work with files and chats,
+edit documents in Markdown, export and restore spaces, and run a workflow-oriented MCP server.
 
-[![release](https://img.shields.io/github/v/tag/stevelr/anytype?sort=semver&filter=anyr-v*&label=release)](https://github.com/stevelr/anytype/releases?q=anyr-v&expanded=true)
-[![crates.io](https://img.shields.io/crates/v/anyr.svg)](https://crates.io/crates/anyr)
+The rust client library [`anytype`](https://crates.io/crates/anytype) provides an ergonomic Rust
+interface for Anytype's HTTP/REST API and (optionally) the gRPC API for additional capabilities.
 
-**[Documentation](https://docs.anytype-toolbox.org) ·
-[Releases](https://github.com/stevelr/anytype/releases) ·
-[Rust API](https://docs.rs/anytype)**
+**[Installation](https://github.com/stevelr/anytype/releases)** | **[Documentation](https://docs.anytype-toolbox.org)** | **[Source](https://github.com/stevelr/anytype)**
 
 ## Start with `anyr`
 

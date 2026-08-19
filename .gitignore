@@ -12,6 +12,7 @@ CLAUDE.md
 graphify-out
 tmp/
 
+.github/scripts/__pycache__
 .agent-notes
 .orchestrator-notes
 .wrangler/
