@@ -387,8 +387,9 @@ fn unhex<const N: usize>(v: &str) -> Result<[u8; N], ValidationError> {
         return Err(error(ValidationCode::MalformedCursor));
     }
     let mut out = [0; N];
-    for (target, pair) in out.iter_mut().zip(v.as_bytes().chunks_exact(2)) {
-        *target = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    for (target, pair) in out.iter_mut().zip(v.as_bytes().as_chunks::<2>().0) {
+        let [high, low] = *pair;
+        *target = (hex_nibble(high)? << 4) | hex_nibble(low)?;
     }
     Ok(out)
 }

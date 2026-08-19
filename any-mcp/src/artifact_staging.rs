@@ -742,10 +742,11 @@ fn decode_hex_array<const N: usize>(value: &str) -> Option<[u8; N]> {
         return None;
     }
     let mut decoded = [0_u8; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let high = hex_nibble(*pair.first()?)?;
-        let low = hex_nibble(*pair.get(1)?)?;
-        *decoded.get_mut(index)? = high.checked_mul(16)?.checked_add(low)?;
+    for (target, pair) in decoded.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
+        let [high, low] = *pair;
+        *target = hex_nibble(high)?
+            .checked_mul(16)?
+            .checked_add(hex_nibble(low)?)?;
     }
     Some(decoded)
 }
@@ -1315,7 +1316,7 @@ impl ArtifactStaging {
             .saturating_sub(records.len());
         (
             available_bytes,
-            u32::try_from(available_entries).map_or(u32::MAX, |value| value),
+            u32::try_from(available_entries).unwrap_or(u32::MAX),
         )
     }
 

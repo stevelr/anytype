@@ -201,10 +201,8 @@ impl BodyRpcConfig {
         let now = Instant::now();
         let fallback = now
             .checked_add(DEFAULT_BODY_OPERATION_TIMEOUT)
-            .map_or(now, std::convert::identity);
-        let deadline = now
-            .checked_add(timeout)
-            .map_or(fallback, std::convert::identity);
+            .unwrap_or(now);
+        let deadline = now.checked_add(timeout).unwrap_or(fallback);
         Self::new(deadline)
     }
 

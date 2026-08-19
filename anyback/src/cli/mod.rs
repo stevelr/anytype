@@ -2019,16 +2019,14 @@ fn pb_import_paths(archive_path: &Path) -> Result<Vec<String>> {
         return Ok(vec![archive_path.to_string_lossy().to_string()]);
     }
     if std::env::var("ANYBACK_PB_IMPORT_ROOT_ONLY")
-        .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
     {
         return Ok(vec![archive_path.to_string_lossy().to_string()]);
     }
 
     let mut paths = Vec::new();
     let include_files_dir = std::env::var("ANYBACK_PB_IMPORT_INCLUDE_FILES_DIR")
-        .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     for entry in fs::read_dir(archive_path).with_context(|| {
         format!(
             "failed to read archive directory {}",

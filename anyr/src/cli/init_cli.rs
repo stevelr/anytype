@@ -763,16 +763,28 @@ struct OwnedChild {
 }
 
 impl OwnedChild {
-    #[cfg_attr(not(windows), allow(clippy::unused_async))]
+    #[cfg(not(windows))]
+    fn new(
+        child: tokio::process::Child,
+        _cleanup_timeout: Duration,
+    ) -> std::future::Ready<Result<Self>> {
+        let owned = (|| {
+            #[cfg(unix)]
+            let process_group = child
+                .id()
+                .and_then(|id| libc::pid_t::try_from(id).ok())
+                .context("spawned Anytype CLI process has no valid process-group id")?;
+            Ok(Self {
+                child,
+                #[cfg(unix)]
+                process_group,
+            })
+        })();
+        std::future::ready(owned)
+    }
+
+    #[cfg(windows)]
     async fn new(child: tokio::process::Child, cleanup_timeout: Duration) -> Result<Self> {
-        #[cfg(not(windows))]
-        let _ = cleanup_timeout;
-        #[cfg(unix)]
-        let process_group = child
-            .id()
-            .and_then(|id| libc::pid_t::try_from(id).ok())
-            .context("spawned Anytype CLI process has no valid process-group id")?;
-        #[cfg(windows)]
         let job = match OwnedJob::assign(&child) {
             Ok(job) => job,
             Err(error) => {
@@ -787,7 +799,6 @@ impl OwnedChild {
                 };
             }
         };
-        #[cfg(windows)]
         if let Err(error) = OwnedJob::resume(&child) {
             let owned = Self { child, job };
             let cleanup = stop_child(owned, cleanup_timeout).await;
@@ -799,13 +810,7 @@ impl OwnedChild {
                 )),
             };
         }
-        Ok(Self {
-            child,
-            #[cfg(unix)]
-            process_group,
-            #[cfg(windows)]
-            job,
-        })
+        Ok(Self { child, job })
     }
 
     #[cfg(unix)]
