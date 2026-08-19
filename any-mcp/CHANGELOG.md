@@ -8,6 +8,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Verify OAuth resource-server JWTs through `jsonwebtoken`'s `aws-lc-rs`
+  backend instead of `rust_crypto`, and without the optional PEM feature.
+  This drops the `rsa` crate (RUSTSEC-2023-0071, Marvin timing side channel,
+  no fixed 0.9 release) and 26 other pure-Rust crypto crates from the
+  dependency tree; `aws-lc-rs` was already present through `rustls`. Accepted
+  algorithms (`RS256`/`ES256`/`EdDSA`) and JWKS handling are unchanged.
 - Upgrade `rmcp` to 3.1.3 while retaining the stable `2025-11-25` protocol
   revision and the existing stdio and Streamable HTTP transport contracts.
   Legacy responses omit the 2026 result discriminator, unsupported MRTR

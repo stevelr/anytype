@@ -45,7 +45,7 @@ httpdate = "1.0.3"
 hyper = { version = "1.11.0", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 icu_properties = "2.2.0"
-jsonwebtoken = { version = "11.0.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+jsonwebtoken = { version = "11.0.0", default-features = false, features = ["aws_lc_rs"] }
 keyring-core = { version = "1.0.0", features = ["sample"] }
 libc = "0.2.183"
 mime = "0.3.17"

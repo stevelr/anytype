@@ -410,9 +410,21 @@ mod tests {
     use super::*;
 
     /// Throwaway Ed25519 keypair generated for these tests only.
-    const TEST_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICDNEqdf60txt+W2scD1zdF0MS78TiSJcOPUyIm0MaZe\n-----END PRIVATE KEY-----\n";
+    /// PKCS#8 DER (base64) of the Ed25519 test signing key; DER keeps the
+    /// test independent of jsonwebtoken's optional PEM feature.
+    const TEST_PRIVATE_PKCS8_B64: &str =
+        "MC4CAQAwBQYDK2VwBCIEICDNEqdf60txt+W2scD1zdF0MS78TiSJcOPUyIm0MaZe";
     const TEST_PUBLIC_X: &str = "j5aYWRSjdjA44EExQYpcNoz9nK2_BqGHY9vIfyQ9uXE";
     const TEST_KID: &str = "test-key";
+
+    fn test_encoding_key() -> EncodingKey {
+        use base64::Engine as _;
+
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(TEST_PRIVATE_PKCS8_B64)
+            .expect("test key DER");
+        EncodingKey::from_ed_der(&der)
+    }
 
     fn test_config() -> OAuthResourceConfig {
         OAuthResourceConfig {
@@ -464,12 +476,7 @@ mod tests {
     fn mint(claims: &serde_json::Value, kid: Option<&str>) -> String {
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = kid.map(str::to_owned);
-        encode(
-            &header,
-            claims,
-            &EncodingKey::from_ed_pem(TEST_PRIVATE_PEM.as_bytes()).expect("test key"),
-        )
-        .expect("mint token")
+        encode(&header, claims, &test_encoding_key()).expect("mint token")
     }
 
     #[test]
@@ -579,12 +586,7 @@ mod tests {
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(TEST_KID.to_owned());
         header.jku = Some("https://evil.test/jwks.json".to_owned());
-        let token = encode(
-            &header,
-            &claims(),
-            &EncodingKey::from_ed_pem(TEST_PRIVATE_PEM.as_bytes()).expect("test key"),
-        )
-        .expect("mint token");
+        let token = encode(&header, &claims(), &test_encoding_key()).expect("mint token");
         assert_eq!(
             verify(token.as_bytes(), &keys, &config).unwrap_err(),
             VerifyRejection::Invalid
