@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "any-edit"
-version = "0.5.0-pre.6"
+version = "0.5.0-pre.7"
 dependencies = [
  "anyhow",
  "anytype",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "any-mcp"
-version = "0.5.0-pre.6"
+version = "0.5.0-pre.7"
 dependencies = [
  "anytype",
  "axum",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "anyback"
-version = "0.5.0-pre.6"
+version = "0.5.0-pre.7"
 dependencies = [
  "anyhow",
  "anytype",
@@ -303,7 +303,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "anyr"
-version = "0.5.0-pre.6"
+version = "0.5.0-pre.7"
 dependencies = [
  "any-edit",
  "any-mcp",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "anytype"
-version = "0.5.0-pre.6"
+version = "0.5.0-pre.7"
 dependencies = [
  "anyhow",
  "anytype-rpc",
@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "anytype-rpc"
-version = "0.5.0-pre.6"
+version = "0.5.0-pre.7"
 dependencies = [
  "chrono",
  "clap",
