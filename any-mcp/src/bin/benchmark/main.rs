@@ -1591,7 +1591,9 @@ fn self_test_host_namespace(executable: &str) -> Result<(), String> {
         secrets,
         &[],
         &domain,
-        std::time::Duration::from_secs(3),
+        // The fixture re-execs this debug binary as sudo, setpriv, bootstrap,
+        // and child in turn; a cold, loaded CI runner needs a generous bound.
+        std::time::Duration::from_secs(15),
         std::time::Duration::from_millis(500),
         std::time::Duration::from_secs(2),
     )?

@@ -50,7 +50,16 @@ chmod 0755 "$stage_dir/anyr"
 rm -f "$archive_path" "$checksum_path" "$manifest_path" "$manifest_tmp"
 tar -cJf "$archive_path" -C "$dist_dir" "$archive_root"
 
-archive_hash=$(shasum -a 256 "$archive_path" | awk '{print $1}')
+# coreutils on Linux, Perl shasum on macOS; both print "<hex>  <file>".
+sha256_of() {
+  if command -v sha256sum > /dev/null 2>&1; then
+    sha256sum "$1"
+  else
+    shasum -a 256 "$1"
+  fi
+}
+
+archive_hash=$(sha256_of "$archive_path" | awk '{print $1}')
 printf '%s *%s\n\n' "$archive_hash" "$archive_name" > "$checksum_path"
 
 dist_args=(
@@ -82,5 +91,5 @@ tar -xJf "$archive_path" -C "$extract_dir"
 cmp "$binary" "$extract_dir/$archive_root/anyr"
 
 printf 'Nix binary SHA-256: '
-shasum -a 256 "$binary"
+sha256_of "$binary"
 

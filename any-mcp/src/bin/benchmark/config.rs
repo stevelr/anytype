@@ -748,6 +748,7 @@ mod tests {
         Ok(config)
     }
 
+    #[cfg(unix)]
     #[test]
     fn separates_production_and_controlled_spec_modes() {
         parse(fixture("production-verified-official")).expect("valid production fixture");

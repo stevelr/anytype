@@ -2213,6 +2213,25 @@ esac
         );
     }
 
+    /// Whether the process is a zombie awaiting its (foreign) parent's reap.
+    ///
+    /// An orphaned descendant is reparented to init; a non-reaping init (a
+    /// container without an init process) leaves it a zombie indefinitely even
+    /// though it is terminated, so the test treats that state as reaped.
+    #[cfg(target_os = "linux")]
+    fn is_zombie(pid: libc::pid_t) -> bool {
+        fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(") ")
+                .and_then(|(_, rest)| rest.split_ascii_whitespace().next())
+                == Some("Z")
+        })
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn is_zombie(_pid: libc::pid_t) -> bool {
+        false
+    }
+
     #[cfg(unix)]
     fn assert_process_reaped_eventually(pid_file: &Path) {
         let pid = fs::read_to_string(pid_file)
@@ -2222,6 +2241,9 @@ esac
         for _ in 0..50 {
             let result = unsafe { libc::kill(pid, 0) };
             if result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return;
+            }
+            if is_zombie(pid) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));

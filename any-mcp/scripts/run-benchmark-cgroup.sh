@@ -74,6 +74,24 @@ unit_requested=false
 unit_owned=false
 runner_pid=
 
+# A process group still "exists" for kill -0 while any member is a zombie,
+# and an orphaned descendant stays a zombie under a non-reaping init (for
+# example a container without an init process). Zombies hold no descriptors
+# and cannot run, so only runnable members count as live.
+group_has_live_member() {
+  group_pid=$1
+  for stat_file in /proc/[0-9]*/stat; do
+    read -r stat_line < "$stat_file" 2>/dev/null || continue
+    # "pid (comm) state ppid pgrp ..."; comm may contain spaces or ')'.
+    stat_line=${stat_line##*) }
+    read -r member_state _ member_pgrp _ <<<"$stat_line"
+    if [[ $member_pgrp == "$group_pid" && $member_state != Z ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Reap only after procfs proves the child is gone or a zombie, so wait cannot
 # extend signal cleanup past the bounded poll.
 bounded_reap() {
@@ -102,7 +120,7 @@ stop_runner_tree() {
   kill -TERM -- "-$runner_pid" 2>/dev/null || true
   term_deadline=$((SECONDS + 1))
   while (( SECONDS < term_deadline && SECONDS < stop_deadline )); do
-    if ! kill -0 -- "-$runner_pid" 2>/dev/null; then
+    if ! kill -0 -- "-$runner_pid" 2>/dev/null || ! group_has_live_member "$runner_pid"; then
       break
     fi
     sleep 0.05
@@ -113,7 +131,7 @@ stop_runner_tree() {
   if ! bounded_reap "$runner_pid" "$stop_deadline"; then
     return 1
   fi
-  while kill -0 -- "-$runner_pid" 2>/dev/null; do
+  while kill -0 -- "-$runner_pid" 2>/dev/null && group_has_live_member "$runner_pid"; do
     if (( SECONDS >= stop_deadline )); then
       return 1
     fi

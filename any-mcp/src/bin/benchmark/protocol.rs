@@ -1210,6 +1210,47 @@ fn kill_process_group(process_group: i32) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether any member of the process group is still runnable.
+///
+/// A killed descendant that was reparented to a non-reaping init (a
+/// container without an init process) stays a zombie: it holds no
+/// descriptors and cannot run, but `kill(-pgid, 0)` keeps succeeding. Linux
+/// procfs distinguishes that state; elsewhere signal zero is authoritative.
+#[cfg(target_os = "linux")]
+fn process_group_has_live_member(process_group: i32) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // `pid (comm) state ppid pgrp ...`; comm may contain spaces.
+        let Some(rest) = stat.rsplit_once(") ").map(|(_, rest)| rest) else {
+            continue;
+        };
+        let mut fields = rest.split_ascii_whitespace();
+        let state = fields.next();
+        let pgrp = fields.nth(1).and_then(|value| value.parse::<i32>().ok());
+        if pgrp == Some(process_group) && state != Some("Z") {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_group_has_live_member(_process_group: i32) -> bool {
+    true
+}
+
 #[cfg(unix)]
 fn require_process_group_empty(process_group: i32, deadline: Instant) -> Result<(), String> {
     loop {
@@ -1217,6 +1258,9 @@ fn require_process_group_empty(process_group: i32, deadline: Instant) -> Result<
         // members and does not change process state.
         let result = unsafe { libc::kill(-process_group, 0) };
         if result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
+        if !process_group_has_live_member(process_group) {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -1306,7 +1350,8 @@ fn cgroup_members() -> Result<BTreeSet<u32>, String> {
     Err("live benchmarks require the protected Linux supervisor".to_owned())
 }
 
-#[cfg(test)]
+// Both tests exercise the Unix supervisor launch topology.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::config::{Credential, ServerArtifact};

@@ -518,9 +518,10 @@ exit 0
         .trim()
         .parse::<i32>()
         .expect("numeric descendant pid");
-    // SAFETY: signal zero only tests the fixture PID recorded by the owned
-    // never-registering process group.
-    assert_ne!(unsafe { libc::kill(descendant, 0) }, 0);
+    assert!(
+        descendant_is_terminated(descendant),
+        "never-registering descendant outlived the launcher"
+    );
 
     for name in [
         "active",
@@ -548,8 +549,10 @@ exit 0
         .trim()
         .parse::<i32>()
         .expect("numeric uncertain-state descendant pid");
-    // SAFETY: signal zero only tests the owned fixture PID after teardown.
-    assert_ne!(unsafe { libc::kill(uncertain_descendant, 0) }, 0);
+    assert!(
+        descendant_is_terminated(uncertain_descendant),
+        "uncertain-state descendant outlived the launcher"
+    );
     assert_eq!(
         namespace_delete_count(&state.join("ip-calls")),
         uncertain_deletes_before,
@@ -627,6 +630,22 @@ fn write_checked_forwarder(path: &std::path::Path, name: &str) {
         "#!/bin/sh\nif [ -e /proc/$$/fd/9 ]; then : > \"$BENCH_FAKE_STATE/leaked-fd\"; exit 97; fi\nprintf '%s\\n' '{name}' >> \"$BENCH_FAKE_STATE/helpers\"\nexec '{target}' \"$@\"\n"
     );
     write_executable(path, &contents);
+}
+
+/// Whether the fixture descendant is gone or, under a non-reaping init (a
+/// container without an init process), left as a zombie that cannot run.
+#[cfg(target_os = "linux")]
+fn descendant_is_terminated(pid: i32) -> bool {
+    // SAFETY: signal zero only tests the fixture PID recorded by the owned
+    // never-registering process group.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return true;
+    }
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(") ")
+            .and_then(|(_, rest)| rest.split_ascii_whitespace().next())
+            == Some("Z")
+    })
 }
 
 #[cfg(target_os = "linux")]

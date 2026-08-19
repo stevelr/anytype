@@ -62,7 +62,11 @@ anyr-x86_64-unknown-linux-gnu/README.md
 anyr-x86_64-unknown-linux-gnu/anyr
 EOF
 
-  expected_hash=$(shasum -a 256 "$archive" | awk '{print $1}')
+  if command -v sha256sum > /dev/null 2>&1; then
+    expected_hash=$(sha256sum "$archive" | awk '{print $1}')
+  else
+    expected_hash=$(shasum -a 256 "$archive" | awk '{print $1}')
+  fi
   test "$(awk 'NR == 1 { print $1 }' "$checksum")" = "$expected_hash"
   test "$(jq -r '.artifacts["anyr-x86_64-unknown-linux-gnu.tar.xz"].checksums.sha256' dist-manifest.json)" = "$expected_hash"
 
