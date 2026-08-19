@@ -79,6 +79,14 @@ jobs:
             printf 'release tag %s does not point to a commit reachable from main\n' "$RELEASE_TAG" >&2
             exit 1
           fi
+      # A tag publishes only from a commit on which every verification
+      # workflow (smoke, CI, any-mcp, anytype-api live, anyr-anyback-live)
+      # has already succeeded; push the tag after those main runs are green
+      # or after release-qual.yml reports the commit eligible.
+      - name: Require green verification workflows on the tagged commit
+        if: github.event_name == 'push'
+        shell: bash
+        run: python3 .github/scripts/release_eligibility.py --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA"
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Verify pinned CI prerequisites

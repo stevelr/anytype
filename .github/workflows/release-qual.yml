@@ -1,0 +1,96 @@
+# Release qualification: one manual run that proves a candidate commit is
+# releasable. Stage 1 dispatches the five verification workflows on the
+# candidate branch with their full platform and live tiers and waits for all of
+# them; stage 2 runs only after stage 1 is green and dispatches the artifact
+# build plus the cargo-dist plan/build (no publication, no GitHub Release).
+# The final job evaluates the commit's check runs with the same rule that
+# release.yml enforces on a pushed tag, so a green run here means the
+# maintainer can sign the release commit and push a signed tag.
+name: release qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch holding the release candidate
+        required: true
+        default: main
+        type: string
+      anytype_api_tier:
+        description: anytype-api live tiers to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - required
+          - all
+      any_mcp_tier:
+        description: any-mcp tiers to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - live
+          - all
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: release-qual-${{ inputs.source_ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: "stage 1: test everything"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_ref }}
+      - name: Dispatch smoke, CI, any-mcp, anytype-api live, and anyr-anyback-live and wait
+        run: |
+          python3 .github/scripts/release_qual.py \
+            --repo "$GITHUB_REPOSITORY" --ref "${{ inputs.source_ref }}" --stage test \
+            --any-mcp-tier "${{ inputs.any_mcp_tier }}" \
+            --anytype-api-tier "${{ inputs.anytype_api_tier }}"
+
+  build:
+    name: "stage 2: build everything"
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_ref }}
+      - name: Dispatch the artifact build and cargo-dist plan/build and wait
+        run: |
+          python3 .github/scripts/release_qual.py \
+            --repo "$GITHUB_REPOSITORY" --ref "${{ inputs.source_ref }}" --stage build
+
+  eligibility:
+    name: release eligibility verdict
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_ref }}
+      - name: Evaluate the candidate commit's check runs
+        run: |
+          sha="$(git rev-parse HEAD)"
+          python3 .github/scripts/release_eligibility.py --repo "$GITHUB_REPOSITORY" --sha "$sha"
+          printf '\nCandidate %s qualified. Sign the release commit and push a signed tag to publish.\n' "$sha"
