@@ -322,6 +322,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Stop rejecting every document import under a `text/markdown` or `*/*`
+  `file-mime` validator. `document_import_create` and `document_import_update`
+  now declare `text/markdown` or `text/plain` from `source_format` for validator
+  scope and record the sniffed essence without comparing it, since the bytes
+  already passed the strict document text checks; `file_import` keeps the exact
+  declared/detected comparison.
+
 - Reconcile full stable-session admission against rmcp and reclaim only
   bindings conclusively reported absent. Live sessions and failed probes retain
   their slots, so capacity remains fail-closed without evicting active clients.

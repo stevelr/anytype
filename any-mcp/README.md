@@ -527,6 +527,16 @@ variable, or command template. Validator execution is available on Linux today;
 macOS and Windows retain the validated configuration and report the validator
 unavailable, so a required validator blocks matching operations there.
 
+A validator's `mime` scope is matched against the essence each operation
+declares: `file_import` uses the caller-declared media type (only `*/*`
+validators run when none is declared), while `document_import_create` and
+`document_import_update` declare `text/markdown` for `source_format =
+"markdown"` and `text/plain` for `"plain_text"`. For file imports a `file-mime`
+detection that differs from the declared essence is a rejection. Document
+imports have already passed the strict UTF-8 text checks and a MIME sniffer
+reports Markdown as `text/plain`, so their detected essence is recorded in the
+receipt without being compared against the declared one.
+
 ### Token-free artifact workflows
 
 Select `ANY_MCP_TOOLSETS=artifacts` to move file and document payloads without

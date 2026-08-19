@@ -45,6 +45,46 @@ pub(crate) struct ValidatorFinding {
     pub(crate) detected_media_type: Option<String>,
 }
 
+/// How one artifact's declared MIME essence governs validator scope and the
+/// declared/detected comparison of a `file-mime` finding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MediaExpectation<'a> {
+    /// No declared essence: only `*/*` validators run and every successful
+    /// detection is accepted.
+    Undeclared,
+    /// Caller-declared essence of an opaque file: validators scoped to it run,
+    /// and a different detected essence is a rejection.
+    Exact(&'a str),
+    /// Server-verified UTF-8 document text dispatched as this essence:
+    /// validators scoped to it run and the detected essence is recorded but
+    /// never compared, because a MIME sniffer cannot distinguish Markdown from
+    /// other text and the bytes have already passed the strict text checks.
+    Text(&'a str),
+}
+
+impl<'a> MediaExpectation<'a> {
+    /// Builds the file expectation for an optional caller-declared essence.
+    pub(crate) fn file(declared: Option<&'a str>) -> Self {
+        declared.map_or(Self::Undeclared, Self::Exact)
+    }
+
+    /// Declared essence used for validator MIME-scope admission.
+    fn declared(self) -> Option<&'a str> {
+        match self {
+            Self::Undeclared => None,
+            Self::Exact(declared) | Self::Text(declared) => Some(declared),
+        }
+    }
+
+    /// Whether a successful detection contradicts the declared essence.
+    fn rejects(self, detected: &str) -> bool {
+        match self {
+            Self::Exact(declared) => declared != detected,
+            Self::Undeclared | Self::Text(_) => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ValidatorStatus {
@@ -126,12 +166,12 @@ impl ValidatorRunner {
         &self,
         source: &File,
         size: u64,
-        declared_media_type: Option<&str>,
+        expectation: MediaExpectation<'_>,
     ) -> Result<Vec<ValidatorFinding>, ArtifactToolError> {
         let mut admitted_bytes = 0_u64;
         let mut findings = Vec::with_capacity(self.validators.len());
         for validator in self.validators.iter() {
-            if !mime_scope_matches(&validator.config.mime, declared_media_type) {
+            if !mime_scope_matches(&validator.config.mime, expectation.declared()) {
                 continue;
             }
             if !validator.available {
@@ -169,7 +209,7 @@ impl ValidatorRunner {
             drop(permit);
             match result {
                 Ok(media_type) => {
-                    if declared_media_type.is_some_and(|declared| declared != media_type) {
+                    if expectation.rejects(&media_type) {
                         if validator.config.required {
                             return Err(ArtifactToolError::Validation);
                         }
@@ -693,6 +733,29 @@ mod tests {
     }
 
     #[test]
+    fn media_expectation_scopes_by_declared_essence_and_compares_only_files() {
+        assert_eq!(MediaExpectation::file(None), MediaExpectation::Undeclared);
+        assert_eq!(
+            MediaExpectation::file(Some("image/png")),
+            MediaExpectation::Exact("image/png")
+        );
+        assert_eq!(MediaExpectation::Undeclared.declared(), None);
+        assert_eq!(
+            MediaExpectation::Exact("image/png").declared(),
+            Some("image/png")
+        );
+        assert_eq!(
+            MediaExpectation::Text("text/markdown").declared(),
+            Some("text/markdown")
+        );
+        assert!(!MediaExpectation::Undeclared.rejects("application/x-executable"));
+        assert!(MediaExpectation::Exact("image/png").rejects("text/plain"));
+        assert!(!MediaExpectation::Exact("image/png").rejects("image/png"));
+        assert!(!MediaExpectation::Text("text/markdown").rejects("text/plain"));
+        assert!(!MediaExpectation::Text("text/plain").rejects("application/json"));
+    }
+
+    #[test]
     fn file_mime_parser_is_bounded_and_strict() {
         assert_eq!(
             parse_file_mime(b"image/png\n".to_vec()).expect("MIME"),
@@ -829,7 +892,7 @@ mod tests {
         std::fs::write(&source_path, b"hello").expect("write source");
         let source = File::open(source_path).expect("open source");
         let findings = runner
-            .validate(&source, 5, Some("text/plain"))
+            .validate(&source, 5, MediaExpectation::Exact("text/plain"))
             .await
             .expect("optional validator failure is bounded");
         assert_eq!(findings.len(), 1);
@@ -863,7 +926,7 @@ mod tests {
         std::fs::write(&source_path, b"hello\n").expect("write source");
         let source = File::open(&source_path).expect("open source");
         let findings = runner
-            .validate(&source, 6, None)
+            .validate(&source, 6, MediaExpectation::Undeclared)
             .await
             .expect("run required validator");
         assert_eq!(findings.len(), 1);
@@ -872,6 +935,65 @@ mod tests {
             findings[0].detected_media_type.as_deref(),
             Some("text/plain")
         );
+        std::fs::remove_file(source_path).expect("remove source");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn required_markdown_scoped_file_driver_accepts_document_text() {
+        let executable = find_fixture_executable("file").expect("native file executable");
+        let mut pinned = File::open(&executable).expect("open file executable");
+        let sha256 = hash_reader(&mut pinned, EXECUTABLE_BYTES).expect("hash file executable");
+        let path = executable.to_string_lossy().replace('\\', "\\\\");
+        let config = ArtifactConfig::from_toml(&format!(
+            "schema_version = 1\n[spaces]\nread_only = false\n\
+             [[validators]]\nid = \"mime\"\ndriver = \"file-mime\"\n\
+             path = \"{path}\"\nsha256 = \"{sha256}\"\nrequired = true\n\
+             mime = [\"text/markdown\"]\ntimeout_secs = 5\nmemory_bytes = 268435456\n\
+             input_bytes = 1024\nstdout_bytes = 1024\nstderr_bytes = 1024\n\
+             fields = 1\nfield_bytes = 256\nplatform = \"linux-retained-fd-v1\"\n"
+        ))
+        .expect("validator config");
+        let runner = ValidatorRunner::activate(config.validators(), &config.limits)
+            .await
+            .expect("activate file executable");
+        let suffix = getrandom::u64().expect("random suffix");
+        let source_path =
+            std::env::temp_dir().join(format!("any-mcp-validator-markdown-{suffix:016x}"));
+        let body = b"# Title\n\nA short Markdown document.\n";
+        std::fs::write(&source_path, body).expect("write source");
+        let source = File::open(&source_path).expect("open source");
+        let size = body.len() as u64;
+
+        // A sniffer reports Markdown bytes as text/plain; a document import
+        // declares text/markdown for scope only and is not rejected for it.
+        let findings = runner
+            .validate(&source, size, MediaExpectation::Text("text/markdown"))
+            .await
+            .expect("required validator accepts verified document text");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].status, ValidatorStatus::Accepted);
+        assert_eq!(
+            findings[0].detected_media_type.as_deref(),
+            Some("text/plain")
+        );
+
+        // The same bytes declared as an exact file essence still mismatch.
+        assert_eq!(
+            runner
+                .validate(&source, size, MediaExpectation::Exact("text/markdown"))
+                .await
+                .expect_err("required exact mismatch is a validation failure"),
+            ArtifactToolError::Validation
+        );
+
+        // Scope still follows the declared essence: plain-text documents do
+        // not admit a validator scoped to text/markdown.
+        let findings = runner
+            .validate(&source, size, MediaExpectation::Text("text/plain"))
+            .await
+            .expect("out-of-scope validator is skipped");
+        assert!(findings.is_empty());
         std::fs::remove_file(source_path).expect("remove source");
     }
 

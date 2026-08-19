@@ -47,7 +47,7 @@ use crate::{
         ArtifactStaging, RetainedStageImport, STAGING_REQUIRED_GUIDANCE, StageAllocation,
         StageDirection, StageSource, StageWriteLease, StagingError,
     },
-    artifact_validators::ValidatorFinding,
+    artifact_validators::{MediaExpectation, ValidatorFinding},
     domain::{EntityId, SpaceId},
     error::{ToolError, mutation_rejection_is_definitive},
     mutation_value::{MutationProperties, MutationProperty, normalized_properties},
@@ -371,6 +371,18 @@ enum DocumentSourceFormat {
     Markdown,
     /// Escape the artifact as literal plain text before dispatch.
     PlainText,
+}
+
+impl DocumentSourceFormat {
+    /// Validator expectation for a source that already passed the strict
+    /// document text checks: scoped by its declared essence, never rejected
+    /// for a differing sniffed essence.
+    fn media_expectation(self) -> MediaExpectation<'static> {
+        match self {
+            Self::Markdown => MediaExpectation::Text("text/markdown"),
+            Self::PlainText => MediaExpectation::Text("text/plain"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -1601,14 +1613,14 @@ impl PreparedImport {
 async fn run_configured_validators(
     runtime: &RuntimeContext,
     source: &PreparedImport,
-    media_type: Option<&str>,
+    expectation: MediaExpectation<'_>,
 ) -> Result<Vec<ValidatorFinding>, ArtifactToolError> {
     let Some(validators) = runtime.artifact_validators() else {
         return Ok(Vec::new());
     };
     let reader = source.try_clone_reader()?;
     validators
-        .validate(&reader, source.length(), media_type)
+        .validate(&reader, source.length(), expectation)
         .await
 }
 
@@ -1888,7 +1900,12 @@ async fn file_import(
     let validator_findings = if matches!(source, PreparedImport::StagedReplay(_)) {
         Vec::new()
     } else {
-        run_configured_validators(runtime, &source, declared_media_type.as_deref()).await?
+        run_configured_validators(
+            runtime,
+            &source,
+            MediaExpectation::file(declared_media_type.as_deref()),
+        )
+        .await?
     };
     let key = idempotency_key(b"import", &input.idempotency_key);
     let fingerprint = import_fingerprint(
@@ -3209,8 +3226,12 @@ async fn document_import_create(
     }
     let mut source =
         prepare_document(runtime, input.source, input.source_format, &space_id).await?;
-    let validator_findings =
-        run_configured_validators(runtime, &source.source, Some("text/markdown")).await?;
+    let validator_findings = run_configured_validators(
+        runtime,
+        &source.source,
+        input.source_format.media_expectation(),
+    )
+    .await?;
     let key = idempotency_key(b"document-create", &input.idempotency_key);
     let acceptance_key = idempotency_key(b"document", &input.idempotency_key);
     let encoded_properties =
@@ -3425,8 +3446,12 @@ async fn document_import_update(
     }
     let mut source =
         prepare_document(runtime, input.source, input.source_format, &space_id).await?;
-    let validator_findings =
-        run_configured_validators(runtime, &source.source, Some("text/markdown")).await?;
+    let validator_findings = run_configured_validators(
+        runtime,
+        &source.source,
+        input.source_format.media_expectation(),
+    )
+    .await?;
     let key = idempotency_key(b"document-update", &input.idempotency_key);
     let acceptance_key = idempotency_key(b"document", &input.idempotency_key);
     let fingerprint = document_mutation_fingerprint(
