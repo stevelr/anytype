@@ -45,6 +45,8 @@ httpdate = "1.0.3"
 hyper = { version = "1.11.0", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 icu_properties = "2.2.0"
+# for jsonwebtoken 11.0, use aws_lc_rs backend instead of rust_crypto
+# rust-crypto uses rsa 0.9.10 which has security advisory (as of 2026-08-19)
 jsonwebtoken = { version = "11.0.0", default-features = false, features = ["aws_lc_rs"] }
 keyring-core = { version = "1.0.0", features = ["sample"] }
 libc = "0.2.183"
