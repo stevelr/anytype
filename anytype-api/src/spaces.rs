@@ -132,7 +132,15 @@ pub struct Space {
     /// Data model type (Space or Chat)
     pub object: SpaceModel,
 
-    /// Optional description of the space
+    /// Description of the space.
+    ///
+    /// Current servers (anytype-cli v0.3.6, API 2025-11-08) always return this
+    /// field as a string: a space that has no description — whether it never
+    /// had one or was cleared with
+    /// [`UpdateSpaceRequest::clear_description`] — reports `Some("")`, never
+    /// `null` or an absent key. `None` can only arise from a server that omits
+    /// the field; treat `None` and `Some("")` identically, or use
+    /// [`Space::description_text`].
     pub description: Option<String>,
 
     /// Space icon (emoji, file, or colored icon)
@@ -145,6 +153,20 @@ pub struct Space {
     /// Network ID of the space
     /// Example: `N83gJpVd9MuNRZAuJLZ7LiMntTThhPc6DtzWWVjb1M3PouVU`
     pub network_id: Option<String>,
+}
+
+impl Space {
+    /// Returns the description when the space has one.
+    ///
+    /// Normalizes the two wire representations of "no description" — an empty
+    /// string (what current servers return for never-set and cleared
+    /// descriptions alike) and an omitted field — to `None`.
+    #[must_use]
+    pub fn description_text(&self) -> Option<&str> {
+        self.description
+            .as_deref()
+            .filter(|description| !description.is_empty())
+    }
 }
 
 /// The kind of invitation generated for a space.
@@ -566,13 +588,31 @@ impl UpdateSpaceRequest {
         self
     }
 
-    /// Updates the space description.
+    /// Replaces the space description.
+    ///
+    /// Omitting this call leaves the current description untouched. An empty
+    /// string clears the description exactly like
+    /// [`clear_description`](Self::clear_description); prefer that method to
+    /// make the intent explicit.
     ///
     /// # Arguments
     /// * `description` - New description text for the space
     #[must_use]
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Clears the space description.
+    ///
+    /// The request carries `"description": ""`, the only wire form that clears
+    /// on current servers (a JSON `null` is silently ignored upstream, so it is
+    /// never sent). The response and later reads report the cleared
+    /// description as `Some("")` — identical to a space that never had one.
+    /// This counts as an updated field for [`update`](Self::update).
+    #[must_use]
+    pub fn clear_description(mut self) -> Self {
+        self.description = Some(String::new());
         self
     }
 
@@ -598,15 +638,10 @@ impl UpdateSpaceRequest {
         self
     }
 
-    /// Applies the update to the space.
-    ///
-    /// # Returns
-    /// The updated space.
-    ///
-    /// # Errors
-    /// - [`AnytypeError::Validation`] if called without setting any fields
-    /// - [`AnytypeError::NotFound`] if the space doesn't exist
-    pub async fn update(self) -> Result<Space> {
+    /// Validates the builder and produces the wire body: fields that were not
+    /// set are omitted (no change), while a cleared description is sent as an
+    /// empty string.
+    fn request_body(&self) -> Result<UpdateSpaceRequestBody> {
         // Check that at least one field is being updated
         ensure!(
             self.name.is_some() || self.description.is_some(),
@@ -616,11 +651,22 @@ impl UpdateSpaceRequest {
                         .to_string(),
             }
         );
+        Ok(UpdateSpaceRequestBody {
+            name: self.name.clone(),
+            description: self.description.clone(),
+        })
+    }
 
-        let request_body = UpdateSpaceRequestBody {
-            name: self.name,
-            description: self.description,
-        };
+    /// Applies the update to the space.
+    ///
+    /// # Returns
+    /// The updated space.
+    ///
+    /// # Errors
+    /// - [`AnytypeError::Validation`] if called without setting any fields
+    /// - [`AnytypeError::NotFound`] if the space doesn't exist
+    pub async fn update(self) -> Result<Space> {
+        let request_body = self.request_body()?;
 
         let response: SpaceResponse = self
             .client
@@ -2321,6 +2367,76 @@ mod tests {
             serde_json::to_string(&description_only).unwrap(),
             r#"{"description":"Updated"}"#
         );
+    }
+
+    fn offline_client() -> crate::client::AnytypeClient {
+        let mut config =
+            crate::client::ClientConfig::default().app_name("space-description-clearing");
+        config.base_url = Some("http://127.0.0.1:1".to_owned());
+        config.keystore = Some("env".to_owned());
+        crate::client::AnytypeClient::with_config(config).expect("offline client")
+    }
+
+    #[test]
+    fn update_space_omission_replacement_and_clearing_produce_distinct_bodies() {
+        let client = offline_client();
+
+        let omitted = client.update_space("space").name("Renamed");
+        assert_eq!(
+            serde_json::to_string(&omitted.request_body().unwrap()).unwrap(),
+            r#"{"name":"Renamed"}"#
+        );
+
+        let replaced = client.update_space("space").description("Updated");
+        assert_eq!(
+            serde_json::to_string(&replaced.request_body().unwrap()).unwrap(),
+            r#"{"description":"Updated"}"#
+        );
+
+        let cleared = client.update_space("space").clear_description();
+        assert_eq!(
+            serde_json::to_string(&cleared.request_body().unwrap()).unwrap(),
+            r#"{"description":""}"#
+        );
+
+        // An explicit empty string is the same wire form as clearing.
+        let empty = client.update_space("space").description("");
+        assert_eq!(
+            serde_json::to_string(&empty.request_body().unwrap()).unwrap(),
+            r#"{"description":""}"#
+        );
+
+        let cleared_and_renamed = client
+            .update_space("space")
+            .name("Renamed")
+            .clear_description();
+        assert_eq!(
+            serde_json::to_string(&cleared_and_renamed.request_body().unwrap()).unwrap(),
+            r#"{"name":"Renamed","description":""}"#
+        );
+
+        assert!(matches!(
+            client.update_space("space").request_body(),
+            Err(AnytypeError::Validation { .. })
+        ));
+    }
+
+    #[test]
+    fn space_description_text_normalizes_empty_and_absent() {
+        let mut space = Space {
+            id: "space".to_string(),
+            name: "Space".to_string(),
+            object: SpaceModel::Space,
+            description: Some(String::new()),
+            icon: None,
+            gateway_url: None,
+            network_id: None,
+        };
+        assert_eq!(space.description_text(), None);
+        space.description = None;
+        assert_eq!(space.description_text(), None);
+        space.description = Some("About this space".to_string());
+        assert_eq!(space.description_text(), Some("About this space"));
     }
 
     #[test]

@@ -282,7 +282,7 @@ fn source_ignore_attribute_inventory(path: &PathBuf) -> (usize, usize) {
 fn manifest_is_a_complete_partition_of_ignored_tests() {
     let manifest = manifest();
     assert_eq!(manifest.version, 1, "unexpected manifest version");
-    assert_eq!(manifest.required.len(), 21, "required inventory changed");
+    assert_eq!(manifest.required.len(), 22, "required inventory changed");
     assert_eq!(
         manifest.account_global.len(),
         1,
@@ -358,7 +358,7 @@ fn manifest_is_a_complete_partition_of_ignored_tests() {
     let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     assert_eq!(
         source_ignore_attribute_inventory(&source_root),
-        (27, 0),
+        (28, 0),
         "source ignore-attribute inventory drifted"
     );
 }

@@ -823,6 +823,19 @@ tag reads after the write and instead invalidates that space's property cache;
 use `property(...).get_direct()` and an explicitly limited `tags(...).limit(n)`
 page for bounded semantic readback.
 
+## Space Description Updates
+
+`client.update_space(id)` keeps three operations distinct. Not calling
+`description(..)` omits the field and leaves the description untouched;
+`description("text")` replaces it; `clear_description()` sends
+`"description": ""`, the only wire form that clears on current servers (a JSON
+`null` is silently ignored upstream and is never sent). Servers always return
+`description` as a string: a cleared description and a never-set one both read
+back as `Some("")`, so callers should treat `None` and `Some("")` identically
+or use `Space::description_text()`, which maps both to `None`. The live test
+`test_space_description` keeps this normalization verified against a real
+server (anytype-cli v0.3.6, API 2025-11-08).
+
 ## Type Property Classification (REST + gRPC)
 
 `Type.properties` is the REST server's flattened visible list: featured

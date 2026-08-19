@@ -33,6 +33,11 @@ test = "representative_kanban_fixture_is_verified_and_cleanup_owned"
 serial_group = "disposable_anytype_api"
 
 [[required]]
+target = "test_space_description"
+test = "space_description_omission_replacement_and_clearing_are_distinct"
+serial_group = "disposable_anytype_api"
+
+[[required]]
 target = "test_chat_discovery"
 test = "test_chat_discovery_requests"
 serial_group = "disposable_anytype_api"

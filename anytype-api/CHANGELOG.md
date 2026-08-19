@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- `UpdateSpaceRequest::clear_description()` clears a space description with the
+  verified `"description": ""` wire form, keeping omission (no change),
+  replacement, and clearing distinct. `Space::description_text()` normalizes
+  the server's `""`-for-no-description representation to `None`. Builder and
+  body serialization are unit-tested and a disposable live test proves all
+  three behaviors against a real server.
+
 ### Fixed
 
 - `ProcessWatcher::correlate_generation` accepts a dispatch response that omits
