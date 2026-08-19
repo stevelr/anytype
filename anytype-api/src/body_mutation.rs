@@ -448,7 +448,8 @@ pub struct BodyEditor<'a> {
 }
 
 impl BodySnapshot {
-    /// Starts a verified mutation session bound to this snapshot's object and space.
+    /// Starts a verified gRPC mutation session bound to this snapshot's object
+    /// and space.
     #[must_use]
     pub fn edit<'a>(&'a self, client: &'a AnytypeClient) -> BodyEditor<'a> {
         BodyEditor {
@@ -495,7 +496,8 @@ impl BodyEditor<'_> {
         self
     }
 
-    /// Creates one block and proves its identity, content, and exact position.
+    /// Creates one block through gRPC and proves its identity, content, and
+    /// position.
     pub async fn create(
         &self,
         block: NewBlock,
@@ -506,23 +508,25 @@ impl BodyEditor<'_> {
             .await
     }
 
-    /// Appends one block to the body root and proves its final state.
+    /// Appends one block through gRPC and proves its final state.
     pub async fn append(&self, block: NewBlock) -> Result<BlockMutation> {
         self.create(block, &self.snapshot.root_id, InsertPosition::LastChild)
             .await
     }
 
-    /// Applies one exact update and proves the fresh rich state.
+    /// Applies one exact gRPC update and proves the fresh rich state.
     pub async fn update(&self, id: &BlockId, change: BlockChange) -> Result<BlockMutation> {
         self.update_from(self.snapshot, id, change).await
     }
 
-    /// Deletes one block and proves it is absent from a fresh snapshot.
+    /// Deletes one block through gRPC and proves it is absent from a fresh
+    /// snapshot.
     pub async fn delete(&self, id: &BlockId) -> Result<BlockMutation> {
         self.delete_from(self.snapshot, id).await
     }
 
-    /// Moves one block and proves its exact fresh parent/sibling relation.
+    /// Moves one block through gRPC and proves its fresh parent and sibling
+    /// relation.
     pub async fn move_block(
         &self,
         id: &BlockId,
@@ -532,7 +536,7 @@ impl BodyEditor<'_> {
         self.move_from(self.snapshot, id, target, position).await
     }
 
-    /// Executes at most [`MAX_BODY_BLOCKS`] operations sequentially.
+    /// Executes at most [`MAX_BODY_BLOCKS`] gRPC operations sequentially.
     ///
     /// This is not a transaction. It stops on the first failure and preserves
     /// a verified receipt for every completed prefix operation.

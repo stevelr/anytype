@@ -603,6 +603,7 @@ impl AnytypeClient {
     /// missing index row from manufacturing absence. Every app-global Heart
     /// subscription has a unique client-owned ID, a finite deadline, and
     /// cancellation-resilient bounded cleanup.
+    /// This operation requires a gRPC backend after its REST identity checks.
     ///
     /// # Errors
     ///
@@ -661,6 +662,7 @@ impl AnytypeClient {
     /// with one cache-independent REST read, then uses one finite Heart
     /// subscription with a client-owned identifier and bounded cleanup. Pages
     /// contain only validated IDs in Heart's canonical collection order.
+    /// This operation requires a gRPC backend after its REST identity check.
     ///
     /// `limit` must be in `1..=61`. Pass `None` for the first page. A returned
     /// continuation may be supplied unchanged for the next page; it causes one

@@ -647,7 +647,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// List all chat objects (all spaces).
+    /// Builds a cross-space chat listing through the gRPC backend.
     #[must_use]
     pub fn list_chats(&self) -> ChatListRequest<'a> {
         ChatListRequest {
@@ -668,7 +668,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Search chat objects across all spaces.
+    /// Builds a rich cross-space chat-object search through the gRPC backend.
     #[must_use]
     pub fn search_chats(&self) -> ChatSearchRequest<'a> {
         ChatSearchRequest {
@@ -680,7 +680,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Search chat objects within a space.
+    /// Builds a space-scoped rich chat-object search through the gRPC backend.
     pub fn search_chats_in(&self, space_id: impl Into<String>) -> ChatSearchRequest<'a> {
         ChatSearchRequest {
             client: self.client,
@@ -691,7 +691,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Get a chat object by id.
+    /// Builds a rich chat-object lookup through the gRPC backend.
     pub fn get_chat(
         &self,
         space_id: impl Into<String>,
@@ -704,7 +704,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Resolve a chat id by its name (title).
+    /// Builds a rich chat-name resolution through the gRPC backend.
     pub fn resolve_chat_by_name(
         &self,
         space_id: impl Into<String>,
@@ -717,7 +717,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Get the default space chat object, given space id or name
+    /// Builds default space-chat discovery through the gRPC backend.
     pub fn space_chat(&self, space_id_or_name: impl Into<String>) -> ChatSpaceRequest<'a> {
         ChatSpaceRequest {
             client: self.client,
@@ -725,7 +725,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Send a plain text message.
+    /// Builds a direct gRPC text-message send.
     pub fn send_text(
         &self,
         chat_object_id: impl Into<String>,
@@ -742,7 +742,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Edit a message with plain text content.
+    /// Builds a direct gRPC text-message edit.
     pub fn edit_text(
         &self,
         chat_object_id: impl Into<String>,
@@ -759,7 +759,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Toggle a reaction on a message.
+    /// Builds a direct gRPC reaction toggle.
     pub fn toggle_reaction(
         &self,
         chat_object_id: impl Into<String>,
@@ -774,7 +774,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Mark every chat known to the current Heart session as read.
+    /// Marks every chat known to the current Heart session as read through gRPC.
     ///
     /// Heart's `ChatReadAll` request carries no scope. This operation marks
     /// message, mention, and reaction state read across the account's complete
@@ -803,7 +803,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Add a message to a chat.
+    /// Adds a message to a chat through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -833,7 +833,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Edit a message in a chat.
+    /// Edits a message in a chat through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -866,7 +866,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Delete a message in a chat.
+    /// Deletes a message in a chat through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -891,7 +891,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// List messages in a chat.
+    /// Lists full-fidelity messages in a chat through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -920,7 +920,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Get messages by id.
+    /// Gets full-fidelity messages by ID through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -946,7 +946,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Mark messages as read.
+    /// Marks messages as read through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -972,7 +972,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Mark messages as unread.
+    /// Marks messages as unread through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -2321,6 +2321,7 @@ impl ChatListRequest<'_> {
         self
     }
 
+    /// Lists through REST when space-scoped and through gRPC when cross-space.
     pub async fn list(self) -> Result<ChatListResult> {
         if let Some(space_id) = self.space_id {
             let result = SpaceChatsClient {
@@ -2367,6 +2368,7 @@ impl ChatSearchRequest<'_> {
         self
     }
 
+    /// Searches rich chat objects through the gRPC backend.
     pub async fn search(self) -> Result<ChatListResult> {
         chat_search(
             self.client,
@@ -2387,6 +2389,7 @@ pub struct ChatGetRequest<'a> {
 }
 
 impl ChatGetRequest<'_> {
+    /// Gets a rich chat object through the gRPC backend.
     pub async fn get(self) -> Result<Object> {
         let result = chat_search(
             self.client,
@@ -2415,6 +2418,7 @@ pub struct ChatResolveRequest<'a> {
 }
 
 impl ChatResolveRequest<'_> {
+    /// Resolves a chat name through the gRPC backend.
     pub async fn resolve(self) -> Result<String> {
         let result = chat_search(
             self.client,
@@ -2443,6 +2447,7 @@ pub struct ChatSpaceRequest<'a> {
 }
 
 impl ChatSpaceRequest<'_> {
+    /// Discovers the default space chat through the gRPC backend.
     pub async fn get(self) -> Result<Object> {
         let space_id = if looks_like_object_id(&self.space_id_or_name) {
             self.space_id_or_name
@@ -2521,6 +2526,7 @@ impl ChatSendTextRequest<'_> {
         self
     }
 
+    /// Sends the message through the gRPC backend.
     pub async fn send(self) -> Result<String> {
         validate_chat_reference("chat object id", &self.chat_object_id)?;
         validate_chat_text(&self.text, self.client.get_config().limits.markdown_max_len)?;
@@ -2563,6 +2569,7 @@ impl ChatEditTextRequest<'_> {
         self
     }
 
+    /// Sends the edit through the gRPC backend.
     pub async fn send(self) -> Result<()> {
         ChatEditMessageRequest {
             client: self.client,
@@ -2589,6 +2596,7 @@ pub struct ChatToggleReactionRequest<'a> {
 }
 
 impl ChatToggleReactionRequest<'_> {
+    /// Toggles the reaction through the gRPC backend.
     pub async fn send(self) -> Result<bool> {
         validate_chat_reference("chat object id", &self.chat_object_id)?;
         validate_chat_reference("chat message id", &self.message_id)?;
@@ -2618,7 +2626,7 @@ pub struct ChatReadAllRequest<'a> {
 }
 
 impl ChatReadAllRequest<'_> {
-    /// Mark message, mention, and reaction state read across the account.
+    /// Marks message, mention, and reaction state read across the account through gRPC.
     pub async fn mark_read(self) -> Result<()> {
         if let Some(space_id) = self.legacy_space_id {
             validate_chat_reference("space id", &space_id)?;
@@ -2754,7 +2762,7 @@ impl ChatAddMessageRequest<'_> {
         self
     }
 
-    /// Send the message and return the new message id.
+    /// Sends the message through gRPC and returns the new message ID.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -2865,7 +2873,7 @@ impl ChatEditMessageRequest<'_> {
         self
     }
 
-    /// Send the edit request.
+    /// Sends the edit request through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -2935,7 +2943,7 @@ pub struct ChatDeleteMessageRequest<'a> {
 }
 
 impl ChatDeleteMessageRequest<'_> {
-    /// Delete the message.
+    /// Deletes the message through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -3080,7 +3088,7 @@ impl ChatListMessagesRequest<'_> {
         self
     }
 
-    /// Execute the list request and return a page wrapper.
+    /// Executes the gRPC list request and returns a page wrapper.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -3139,7 +3147,7 @@ pub struct ChatGetMessagesRequest<'a> {
 }
 
 impl ChatGetMessagesRequest<'_> {
-    /// Fetch messages by id.
+    /// Fetches full-fidelity messages by ID through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -3273,7 +3281,7 @@ impl ChatReadMessagesRequest<'_> {
         self
     }
 
-    /// Execute the mark-read request.
+    /// Executes the mark-read request through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -3358,7 +3366,7 @@ impl ChatUnreadMessagesRequest<'_> {
         self
     }
 
-    /// Execute the mark-unread request.
+    /// Executes the mark-unread request through the gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;

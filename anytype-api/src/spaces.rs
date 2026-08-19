@@ -889,7 +889,7 @@ impl<'a> ListArchivedRequest<'a> {
         self
     }
 
-    /// Executes the archived-list request.
+    /// Executes the archived-list request through the gRPC backend.
     pub async fn list(self) -> Result<PagedResult<Object>> {
         self.limits.validate_id(&self.space_id, "space_id")?;
         validate_archived_page_input(self.limit, self.offset)?;
@@ -1082,7 +1082,7 @@ impl BackupSpaceRequest<'_> {
         self
     }
 
-    /// Executes the backup.
+    /// Executes the backup through the gRPC backend.
     ///
     /// # Returns
     /// The backup result including the output path and number of exported objects.
@@ -1335,7 +1335,7 @@ impl AnytypeClient {
         Ok(())
     }
 
-    /// Lists active member and guest invitations for a space.
+    /// Lists active member and guest invitations through the gRPC backend.
     ///
     /// A space with no active invitation, or a regular space without a guest
     /// invitation, returns an empty entry for that invitation kind rather than
@@ -1410,7 +1410,7 @@ impl AnytypeClient {
         Ok(invites)
     }
 
-    /// Generates a new member or guest invitation for a space.
+    /// Generates a new member or guest invitation through the gRPC backend.
     ///
     /// # Errors
     ///
@@ -1461,7 +1461,7 @@ impl AnytypeClient {
         })
     }
 
-    /// Revokes the active invitation for a space.
+    /// Revokes the active invitation through the gRPC backend.
     ///
     /// # Errors
     ///
@@ -1493,7 +1493,7 @@ impl AnytypeClient {
         Ok(())
     }
 
-    /// Enables sharing for a space.
+    /// Enables sharing for a space through the gRPC backend.
     ///
     /// A newly REST-created space can briefly be absent from Heart's sharing
     /// service. This method retries only that definitive `NO_SUCH_SPACE`
@@ -1506,7 +1506,7 @@ impl AnytypeClient {
         self.set_space_sharing(space_id.as_ref(), true).await
     }
 
-    /// Disables sharing for a space.
+    /// Disables sharing for a space through the gRPC backend.
     ///
     /// # Errors
     ///
@@ -1586,12 +1586,12 @@ impl AnytypeClient {
         ListSpacesRequest::new(self.client.clone(), self.cache.clone())
     }
 
-    /// Creates a request builder for listing archived objects in a space.
+    /// Creates a gRPC-backed request builder for listing archived objects.
     pub fn list_archived(&self, space_id: impl Into<String>) -> ListArchivedRequest<'_> {
         ListArchivedRequest::new(self, self.config.limits.clone(), space_id)
     }
 
-    /// Counts archived objects in a space.
+    /// Counts archived objects through the gRPC backend.
     pub async fn count_archived(&self, space_id: impl AsRef<str>) -> Result<u64> {
         let space_id = space_id.as_ref();
         let mut offset = 0_u32;
@@ -1615,7 +1615,7 @@ impl AnytypeClient {
         Ok(count)
     }
 
-    /// Counts archived objects in a space within an explicit page budget.
+    /// Counts archived objects through gRPC within an explicit page budget.
     ///
     /// Each page requests at most 500 rows. `max_pages` must be nonzero. The
     /// method uses at most `2 * max_pages` gRPC requests because each page can
@@ -1651,7 +1651,7 @@ impl AnytypeClient {
         }
     }
 
-    /// Permanently deletes archived objects by object id in batches of 200.
+    /// Permanently deletes archived objects through gRPC in batches of 200.
     pub async fn delete_archived(
         &self,
         space_id: impl AsRef<str>,
@@ -1689,7 +1689,7 @@ impl AnytypeClient {
         Ok(total_deleted)
     }
 
-    /// Deletes all archived objects in a space.
+    /// Deletes all archived objects in a space through the gRPC backend.
     ///
     /// Fetches up to 500 archived object IDs per round and deletes them in
     /// sub-batches of 200 via [`Self::delete_archived`].

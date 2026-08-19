@@ -182,6 +182,7 @@ impl AnytypeClient {
 }
 
 impl<'a> FilesClient<'a> {
+    /// Builds a rich file listing. Executing it requires a gRPC backend.
     pub fn list(&self, space_id: impl Into<String>) -> FileListRequest<'a> {
         FileListRequest {
             client: self.client,
@@ -192,6 +193,7 @@ impl<'a> FilesClient<'a> {
         }
     }
 
+    /// Builds a rich file search. Executing it requires a gRPC backend.
     pub fn search(&self, space_id: impl Into<String>) -> FileSearchRequest<'a> {
         FileSearchRequest {
             client: self.client,
@@ -204,6 +206,7 @@ impl<'a> FilesClient<'a> {
         }
     }
 
+    /// Builds a rich file-object lookup. Executing it requires a gRPC backend.
     pub fn get(
         &self,
         space_id: impl Into<String>,
@@ -220,7 +223,8 @@ impl<'a> FilesClient<'a> {
     ///
     /// New code should prefer [`download_bytes`](Self::download_bytes), which
     /// uses the REST file endpoint. This method remains available for callers
-    /// that rely on the server writing directly to a destination path.
+    /// that rely on the server writing directly to a destination path. It
+    /// requires a gRPC backend.
     pub fn download(&self, object_id: impl Into<String>) -> FileDownloadRequest<'a> {
         FileDownloadRequest {
             client: self.client,
@@ -229,6 +233,8 @@ impl<'a> FilesClient<'a> {
         }
     }
 
+    /// Builds an upload that selects REST or gRPC from its source and options.
+    /// URL sources and rich options require a gRPC backend.
     pub fn upload(&self, space_id: impl Into<String>) -> FileUploadRequest<'a> {
         FileUploadRequest {
             client: self.client,
@@ -247,6 +253,7 @@ impl<'a> FilesClient<'a> {
         }
     }
 
+    /// Builds a preload request. Executing it requires a gRPC backend.
     pub fn preload(&self, space_id: impl Into<String>) -> FilePreloadRequest<'a> {
         FilePreloadRequest {
             client: self.client,
@@ -258,6 +265,7 @@ impl<'a> FilesClient<'a> {
         }
     }
 
+    /// Builds a preload-discard request. Executing it requires a gRPC backend.
     pub fn discard_preload(
         &self,
         space_id: impl Into<String>,
@@ -1256,6 +1264,7 @@ impl FileListRequest<'_> {
         self
     }
 
+    /// Lists rich file objects through the gRPC backend.
     pub async fn list(self) -> Result<PagedResult<FileObject>> {
         search_files(
             self.client,
@@ -1410,6 +1419,7 @@ impl FileSearchRequest<'_> {
         self
     }
 
+    /// Searches rich file objects through the gRPC backend.
     pub async fn search(self) -> Result<PagedResult<FileObject>> {
         search_files(
             self.client,
@@ -1431,6 +1441,7 @@ pub struct FileGetRequest<'a> {
 }
 
 impl FileGetRequest<'_> {
+    /// Gets rich file metadata through the gRPC backend.
     pub async fn get(self) -> Result<FileObject> {
         let grpc = self.client.grpc_client().await?;
         let mut commands = grpc.client_commands();
@@ -1505,7 +1516,7 @@ impl FileDownloadRequest<'_> {
         self
     }
 
-    /// Download the file. Returns the path to the file
+    /// Downloads the file through gRPC and returns the server-written path.
     pub async fn download(self) -> Result<PathBuf> {
         debug!("enter download execute");
         let (request_path, target_file) = match self.destination {
@@ -1636,6 +1647,7 @@ impl FileUploadRequest<'_> {
         self
     }
 
+    /// Selects a remote URL source and therefore the gRPC backend.
     #[must_use]
     pub fn from_url(mut self, url: impl Into<String>) -> Self {
         self.source = Some(FileSource::Url(url.into()));
@@ -1696,30 +1708,35 @@ impl FileUploadRequest<'_> {
         self
     }
 
+    /// Sets a file type and therefore selects the gRPC backend.
     #[must_use]
     pub fn file_type(mut self, file_type: FileType) -> Self {
         self.file_type = Some(file_type);
         self
     }
 
+    /// Sets a placement style and therefore selects the gRPC backend.
     #[must_use]
     pub fn style(mut self, style: FileStyle) -> Self {
         self.style = Some(style);
         self
     }
 
+    /// Sets rich details and therefore selects the gRPC backend.
     #[must_use]
     pub fn details(mut self, details: serde_json::Value) -> Self {
         self.details = Some(details);
         self
     }
 
+    /// Sets the containing object and therefore selects the gRPC backend.
     #[must_use]
     pub fn created_in_context(mut self, object_id: impl Into<String>) -> Self {
         self.created_in_context = Some(object_id.into());
         self
     }
 
+    /// Sets the containing block and therefore selects the gRPC backend.
     #[must_use]
     pub fn created_in_context_ref(mut self, block_id: impl Into<String>) -> Self {
         self.created_in_context_ref = Some(block_id.into());
@@ -1727,7 +1744,8 @@ impl FileUploadRequest<'_> {
     }
 
     /// Upload the file through the least-capable backend that preserves every
-    /// requested option, returning a normalized [`FileObject`].
+    /// requested option, returning a normalized [`FileObject`]. URL sources
+    /// and rich options require a gRPC backend.
     pub async fn upload(self) -> Result<FileObject> {
         if self.uses_rest() {
             let source = match self.source {
@@ -1832,6 +1850,7 @@ impl FilePreloadRequest<'_> {
         self
     }
 
+    /// Preloads the file through the gRPC backend.
     pub async fn preload(self) -> Result<String> {
         let result = upload_file(
             self.client,
@@ -1857,6 +1876,7 @@ pub struct FileDiscardPreloadRequest<'a> {
 }
 
 impl FileDiscardPreloadRequest<'_> {
+    /// Discards the preload through the gRPC backend.
     pub async fn discard(self) -> Result<()> {
         let grpc = self.client.grpc_client().await?;
         let mut commands = grpc.client_commands();

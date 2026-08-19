@@ -273,6 +273,7 @@ impl AttachedDiscussionRequest {
     /// with a fresh, bounded `ObjectClose`. An attached result is returned only
     /// after the derived discussion's space, smart-block type, layout, and
     /// unique key have all been verified.
+    /// The operation requires both REST and gRPC backends.
     ///
     /// # Errors
     ///
@@ -295,6 +296,7 @@ impl AttachedDiscussionRequest {
     }
 
     /// Returns the existing attached discussion or creates and verifies it once.
+    /// The operation requires both REST and gRPC backends.
     ///
     /// The operation is idempotent by construction: it reads before writing and
     /// never dispatches `ObjectAddDiscussion` when a relation already exists.
@@ -366,7 +368,7 @@ impl AttachedDiscussionRequest {
 }
 
 impl AnytypeClient {
-    /// Scopes typed attached-discussion operations to one exact parent object.
+    /// Scopes a REST and gRPC attached-discussion workflow to one parent object.
     ///
     /// Attached discussions are not ordinary space chats. Use this builder to
     /// discover or ensure the derived discussion belonging to `parent_id`.

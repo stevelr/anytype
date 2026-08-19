@@ -75,7 +75,9 @@ pub struct ChatStreamBuilder {
 }
 
 impl AnytypeClient {
-    /// Create a chat stream builder for gRPC chat events.
+    /// Creates a chat stream builder for gRPC chat events.
+    ///
+    /// Starting the worker requires a gRPC backend.
     ///
     /// ```rust,no_run
     /// use anytype::prelude::*;
@@ -147,7 +149,7 @@ impl ChatStreamBuilder {
         self
     }
 
-    /// Build and start the chat stream worker.
+    /// Builds and starts the gRPC chat stream worker.
     #[must_use]
     pub fn build(self) -> ChatStreamHandle {
         let (event_tx, event_rx) = mpsc::channel(self.buffer);

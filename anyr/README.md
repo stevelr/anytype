@@ -50,7 +50,7 @@ anyr space delete "Old Work" --archive ./old-work.zip --confirm
 
 # Count or delete archived objects in a space
 anyr space count-archived "Work"
-anyr space delete-archived "Work" [ --confirm ]
+anyr space delete-archived "Work" --confirm
 
 # List Pages in space "Work"
 anyr object list "Work" --type page -t
@@ -67,8 +67,8 @@ anyr file upload "Personal" -f ./path/to/file.png
 anyr chat create "Work" "Ops"
 # Get chat messages from a chat in a space (gRPC credentials required)
 anyr chat messages list "Work" "Ops" -t
-# Post message
-anyr chat messages send "Work" "Ops" --text "hello world?"
+# Post a message over REST by using the exact chat ID
+anyr chat messages send "Work" <CHAT_ID> --text "hello world?"
 
 # Discover or attach the discussion derived from an exact page or note
 anyr object discussion get "Work" OBJECT_ID
@@ -274,7 +274,7 @@ anyr type list "Personal" -t
 
 ```sh
 # search space "Work" for tasks containing the text "customer"
-anyr search --space "Work" --type Task --text customer -t
+anyr search --space "Work" --type task --text customer -t
 ```
 
 **Archived object cleanup**
@@ -288,15 +288,15 @@ anyr space delete-archived "$space" --confirm
 **List tasks in space**
 
 ```sh
-space="Work" # specify space using name or id
-for task in `anyr search --type Task --space $space --json | jq -r '.items[] | .id`; do
-  data=$(anyr object get $space $task --json)
+space="Work" # specify a space by name or ID
+for task in $(anyr search --type task --space "$space" --all | jq -r '.[].id'); do
+  data=$(anyr object get "$space" "$task")
   status=$(jq -r '.properties[] | select (.key=="status") .select.name' <<< "$data")
   name=$(jq -r '.name' <<< "$data")
   # get created_date as YYYY-MM-DD
   created_date=$(jq -r '.properties[] | select (.key=="created_date") .date' <<< "$data" | sed 's/T.*$//')
   # generate formatted table with date, status, and name
-  printf "%10s %-12s %s" $created_date $status $name
+  printf '%10s %-12s %s\n' "$created_date" "$status" "$name"
 done
 ```
 
@@ -304,7 +304,7 @@ done
 
 ```sh
 # list images in space Personal, larger than 1MB with a name containing "report"
-anyr file list "Personal" --type image --size-gte 1048576 --name-contains report -t
+anyr file list "Personal" --file-type image --size-gte 1048576 --name-contains report -t
 
 # list pdf or docx files in space Personal
 anyr file list "Personal" --ext-in pdf,docx -t
@@ -376,12 +376,12 @@ documented, but the server sends no `ETag` or `Last-Modified`, so
 
 ```sh
 # list queries in space. "$space" can be id ("bafy...") or name ("Projects")
-anyr search --type set --space $space -t
+anyr search --type set --space "$space" -t
 # list collections in the space
-anyr search --type collection --space $space -t
+anyr search --type collection --space "$space" -t
 # from above, get id of query or collection of interest, then
 # list items in query or collection, in view "All"
-anyr view objects --view All $space $query_or_collection_id -t
+anyr view objects --view All "$space" "$query_or_collection_id" -t
 ```
 
 **Get objects from a collection list or grid view**
@@ -473,6 +473,9 @@ injected into the JSON payload. Because REST replies intentionally contain fewer
 fields (no `ChatState` or structured blocks), pick `--transport grpc` when a
 script needs the full reply shape.
 
+A chat name still needs gRPC name resolution. Pass an exact chat ID when a
+REST-backed command must remain HTTP-only.
+
 **Chat listing, creation, and messages**
 
 - `anyr chat list --space SPACE [--filter FILTER]...` applies property filters to
@@ -546,7 +549,7 @@ on `PATH`.
 **Cargo**
 
 ```sh
-cargo install -p anyr
+cargo install anyr
 ```
 
 ### Shell completions
@@ -580,7 +583,7 @@ Requirements:
 - libgit2 in your library path.
 
 ```sh
-cargo install -p anyr
+cargo install --path anyr
 ```
 
 **Nix**
@@ -604,7 +607,7 @@ Configuration can be set with command-line parameters or environment variables.
 
 ```sh
 # use headless server and custom key path
-anyr --url "http://127.0.0.1:31012" --keystore "file:path=$HOME/.config/anytype/apikeys.db" ARGS ...`
+anyr --url "http://127.0.0.1:31012" --keystore "file:path=$HOME/.config/anytype/apikeys.db" ARGS ...
 
 # custom endpoint url and key path in environment
 export ANYTYPE_URL=http://127.0.0.1:31012
@@ -673,8 +676,8 @@ anyr ARGS ...
   decimal seconds from 1 through 600. This deadline cannot be disabled.
 
 The global `--keystore` and `--keystore-service` options (or their environment
-variables) select where `init-cli` stores credentials. See
-[anytype README.md](../anytype-api/README.md#keystore) for more information.
+variables) select where `init-cli` stores credentials. See the
+[keystore reference](https://docs.anytype-toolbox.org/reference/keystores/).
 Because the keystore API cannot atomically replace both credential families,
 `init-cli` snapshots both prior credential objects, replaces gRPC first, then
 writes HTTP. If either write fails, it makes independent best-effort attempts

@@ -1369,7 +1369,7 @@ impl AnytypeClient {
 }
 
 impl<'a> BlocksClient<'a> {
-    /// Builds a bounded body read for one object.
+    /// Builds a bounded gRPC body read for one object.
     pub fn body(
         &self,
         space_id: impl Into<String>,
@@ -1415,7 +1415,7 @@ impl BodyRequest<'_> {
         self
     }
 
-    /// Executes `ObjectShow`, validates the returned graph, and returns the
+    /// Executes gRPC `ObjectShow`, validates the returned graph, and returns the
     /// snapshot. Every possibly accepted show owns a bounded close; a cleanup
     /// failure takes precedence over the show or application response.
     ///

@@ -51,18 +51,18 @@ example, object endpoints return `Object`, not an internal
 
 ### Name, key, and ID resolution
 
-The [`resolve` module](../anytype-api/src/resolve.rs) allows user-facing tools to accept
+The [`resolve` module](../src/resolve.rs) allows user-facing tools to accept
 names and keys where the server requires IDs:
 
-| Helper                                                  | Accepted input                                     | Result                   |
-| ------------------------------------------------------- | -------------------------------------------------- | ------------------------ |
-| `resolve_space_id`                                      | space name or ID                                   | space ID                 |
-| `resolve_type` / `resolve_type_id` / `resolve_type_key` | type key, name, or ID                              | typed `Type`, ID, or key |
-| `resolve_type_ids`                                      | multiple type keys, names, or IDs                  | type IDs                 |
-| `resolve_view_id`                                       | view name or ID                                    | view ID                  |
-| `resolve_property_id`                                   | property key or ID                                 | property ID              |
-| `resolve_chat_target` / `resolve_chat_ids`              | chat or space name/ID, with optional space context | `ChatTarget` or chat IDs |
-| `resolve_chat_name`                                     | chat ID                                            | display name             |
+- `resolve_space_id`: space name or ID to space ID.
+- `resolve_type`, `resolve_type_id`, and `resolve_type_key`: type key, name, or
+  ID to a typed `Type`, ID, or key.
+- `resolve_type_ids`: multiple type keys, names, or IDs to type IDs.
+- `resolve_view_id`: view name or ID to view ID.
+- `resolve_property_id`: property key or ID to property ID.
+- `resolve_chat_target` and `resolve_chat_ids`: chat or space name/ID, with
+  optional space context, to `ChatTarget` or chat IDs.
+- `resolve_chat_name`: chat ID to display name.
 
 Values that syntactically look like IDs are passed through when possible.
 Name matching is case-insensitive and reports `AnytypeError::Ambiguous` rather
@@ -79,7 +79,7 @@ changes made by other clients immediately.
 
 ### Request-value conversion
 
-The [`SetProperty` trait](../anytype-api/src/properties.rs) builds the JSON shape expected
+The [`SetProperty` trait](../src/properties.rs) builds the JSON shape expected
 by object create and update endpoints through typed setters such as
 `set_text`, `set_number`, `set_date`, `set_checkbox`, `set_select`,
 `set_multi_select`, `set_files`, and `set_objects`.
@@ -148,23 +148,33 @@ does not introduce a reverse `anytype-rpc` dependency on this crate.
 ## gRPC-only extensions
 
 The following public Rust features use gRPC because REST lacks the capability
-or equivalent fidelity. Some surrounding APIs also have REST variants; the
-table calls out only the additional gRPC behavior.
+or equivalent fidelity. Some surrounding APIs also have REST variants; this
+list calls out only the additional gRPC behavior.
 
-| Area             | Capability unavailable from REST                                                                                                        | Primary Rust entry points                                                                            |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Files            | List/search/get rich file-object metadata                                                                                               | `files().list`, `files().search`, `files().get`                                                      |
-| Files            | URL upload and uploads with file type, placement style, details, or creation context                                                    | `files().upload(...).from_url(...)`; rich options on `FileUploadRequest`                             |
-| Files            | Preload lifecycle                                                                                                                       | `files().preload`, `files().discard_preload`                                                         |
-| Files            | Ask Anytype Heart to download directly to a local destination path                                                                      | legacy `files().download`                                                                            |
-| Chats            | Cross-space chat discovery, full-text chat-object search, ID/name lookup through rich object metadata, and default space-chat discovery | `chats().list_chats`, `search_chats*`, `get_chat`, `resolve_chat_by_name`, `space_chat`              |
-| Chats            | Structured message blocks and full-fidelity replies, including per-user `ChatState` and fields absent from REST replies                 | `chats().add_message`, `edit_message`, `list_messages`, `get_messages` and the `MessageBlock*` types |
-| Chats            | Mark messages unread and perform global/cross-chat read operations                                                                      | `chats().unread_messages`, `chats().read_all`                                                        |
-| Chat events      | Reconnecting multi-chat event stream, cross-chat previews, runtime subscribe/unsubscribe, and per-chat catch-up watermarks              | `AnytypeClient::chat_stream` and `ChatStreamControl`                                                 |
-| Archived objects | Search/count the archive and permanently delete archived objects in batches                                                             | `list_archived`, `count_archived`, `delete_archived`, `delete_all_archived`                          |
-| Backups          | Export a space as JSON, protobuf, or Markdown with archive, file, nesting, back-link, and schema options                                | `backup_space` / `BackupSpaceRequest`                                                                |
-| Processes        | Subscribe to import/export/file process events, wait for completion, reconnect, cancel, and collect progress                            | `ProcessWatcher`                                                                                     |
-| Sharing          | Ask Heart for an object's share-by-link URL                                                                                             | `AnytypeClient::get_share_link`                                                                      |
+- **Files:** rich metadata list, search, and get; URL or rich-option uploads;
+  preload lifecycle; and direct-to-path legacy downloads. See `files().list`,
+  `files().search`, `files().get`, `FileUploadRequest`, `files().preload`, and
+  `files().discard_preload`.
+- **Chats:** cross-space discovery; chat-object text search; rich ID/name
+  lookup; default space-chat discovery; structured message blocks and
+  full-fidelity replies; unread mutations; and account-global reads. See the
+  direct `chats()` builders and `MessageBlock*` types.
+- **Chat events:** reconnecting multi-chat events, cross-chat previews,
+  subscription changes, and catch-up watermarks. See
+  `AnytypeClient::chat_stream` and `ChatStreamControl`.
+- **Spaces:** chat-space creation, permanent deletion, invitations, sharing,
+  and archived-object search, count, or deletion. See `create_chat_space`,
+  `delete_space`, `*_space_invite`, `*_space_sharing`, and `*_archived`.
+- **Backups:** space export as JSON, protobuf, or Markdown, with archive
+  selection. See `backup_space` and `BackupSpaceRequest`.
+- **Body blocks and discussions:** exact typed block reads and mutations, plus
+  discovery or creation of a page or note's derived discussion. See
+  `blocks().body`, `BodyRequest`, `BodyEditor`, and `attached_discussion`.
+- **Types and collections:** featured-property classification and canonical
+  direct collection membership. See `TypeRequest::classify_properties*`,
+  `observe_collection_membership`, and `collection_membership_page`.
+- **Processes:** import, export, and file-event subscriptions, including wait,
+  cancellation, and progress collection. See `ProcessWatcher`.
 
 ### Overlapping file operations
 
@@ -173,6 +183,9 @@ downloads, and deletion are REST-backed. Prefer `files().upload`,
 `download_bytes`, `download_request`, `metadata`, and `delete_request` for
 those cases. The upload builder automatically moves to gRPC only when its
 source or options require it.
+
+Object share links are constructed locally from validated space and object
+IDs. They do not call the retired `ObjectShareByLink` RPC.
 
 ## Chat message fidelity: REST/OpenAPI versus gRPC
 
@@ -280,20 +293,21 @@ numeric link-block and embed-processor values remain representable.
 Use the direct `chats()` gRPC builders when structured `MessageBlock` values,
 per-user chat state, cross-space discovery, unread-state mutation, or
 reconnecting multi-chat subscriptions are required. Relevant models and
-transport conversions are in [`chats.rs`](../anytype-api/src/chats.rs), and the
+transport conversions are in [`chats.rs`](../src/chats.rs), and the
 REST-versus-gRPC block-loss test is in
-[`test_chat_discovery.rs`](../anytype-api/tests/test_chat_discovery.rs).
+[`test_chat_discovery.rs`](../tests/test_chat_discovery.rs).
 
 ## Backend boundary in the source
 
 REST endpoint wrappers and ergonomics live primarily in the entity modules and
-[`http_client.rs`](../anytype-api/src/http_client.rs). The additional gRPC
-surface is isolated to [`files.rs`](../anytype-api/src/files.rs),
-[`chats.rs`](../anytype-api/src/chats.rs),
-[`chat_stream.rs`](../anytype-api/src/chat_stream.rs),
-[`process_watcher.rs`](../anytype-api/src/process_watcher.rs), the
-archived/backup portions of [`spaces.rs`](../anytype-api/src/spaces.rs), and
-share-link retrieval in [`objects.rs`](../anytype-api/src/objects.rs).
+[`http_client.rs`](../src/http_client.rs). The additional gRPC surface is
+isolated to [`files.rs`](../src/files.rs), [`chats.rs`](../src/chats.rs),
+[`chat_stream.rs`](../src/chat_stream.rs),
+[`process_watcher.rs`](../src/process_watcher.rs), the gRPC portions of
+[`spaces.rs`](../src/spaces.rs), [`body.rs`](../src/body.rs),
+[`body_mutation.rs`](../src/body_mutation.rs),
+[`attached_discussions.rs`](../src/attached_discussions.rs),
+[`types.rs`](../src/types.rs), and [`views.rs`](../src/views.rs).
 `anytype-rpc` remains the lower-level gRPC
 client; applications using `anytype` normally do not need to construct protobuf
 requests directly.

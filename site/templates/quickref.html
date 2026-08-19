@@ -32,6 +32,7 @@ endblock title %} {% block content %}
     <h2>Contents</h2>
     <ul>
       <li><a href="#output">Output and help</a></li>
+      <li><a href="#connection">Connection and credentials</a></li>
       <li><a href="#authentication">Authentication</a></li>
       <li><a href="#spaces">Spaces</a></li>
       <li><a href="#tasks">Tasks</a></li>
@@ -83,6 +84,57 @@ anyr chat messages send --help</code></pre>
             <pre><code>anyr --url http://127.0.0.1:31012 \
   --grpc http://127.0.0.1:31010 \
   --keystore file space list</code></pre>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section id="connection">
+      <h2>Connection and credentials</h2>
+      <p>
+        HTTP and gRPC authenticate separately. See
+        <a href="/reference/connections/">Connections and gRPC</a>
+        for headless-server installation and authentication.
+      </p>
+      <details open>
+        <summary>Hide or show settings</summary>
+        <div class="commands">
+          <div class="entry">
+            <h3>HTTP endpoint</h3>
+            <pre><code>ANYTYPE_URL=http://127.0.0.1:31012 anyr space list
+anyr --url http://127.0.0.1:31012 space list</code></pre>
+            <p>
+              Without either selector, <code>anyr</code> uses
+              <code>http://127.0.0.1:31012</code> when the selected keystore
+              contains gRPC credentials; otherwise it uses
+              <code>http://127.0.0.1:31009</code>.
+            </p>
+          </div>
+          <div class="entry">
+            <h3>gRPC endpoint</h3>
+            <pre><code>ANYTYPE_GRPC_ENDPOINT=http://127.0.0.1:31010 anyr auth status
+anyr --grpc http://127.0.0.1:31010 auth status</code></pre>
+            <p>The default is <code>http://127.0.0.1:31010</code>.</p>
+          </div>
+          <div class="entry">
+            <h3>Credential storage</h3>
+            <pre><code>ANYTYPE_KEYSTORE=file anyr auth status
+anyr --keystore file auth status</code></pre>
+            <p>
+              The selector is optional. See the
+              <a href="/reference/keystores/">keystore reference</a>
+              for platform stores, file encryption, and environment credentials.
+            </p>
+          </div>
+          <div class="entry">
+            <h3>Authenticate a headless server</h3>
+            <pre><code>anyr init-cli
+anyr auth status --pretty</code></pre>
+            <p>
+              Commands marked
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>
+              need a healthy gRPC ping.
+            </p>
           </div>
         </div>
       </details>
@@ -140,6 +192,10 @@ anyr space get "Work" --pretty</code></pre>
             <h3>Create a regular or chat space</h3>
             <pre><code>anyr space create "Work" --description "Team documents"
 anyr space create "Team Chat" --chat</code></pre>
+            <p>
+              <code>--chat</code>:
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+            </p>
           </div>
           <div class="entry">
             <h3>Rename a space</h3>
@@ -149,17 +205,25 @@ anyr space create "Team Chat" --chat</code></pre>
             <h3>Count or remove archived objects</h3>
             <pre><code>anyr space count-archived "Work"
 anyr space delete-archived "Work" --confirm</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+            </p>
           </div>
           <div class="entry">
             <h3>Delete with an exact pre-delete archive</h3>
             <pre><code>anyr space delete "Old Work" \
   --archive ./old-work.zip --confirm</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>
+              for the backup and permanent deletion.
+            </p>
           </div>
           <div class="entry">
             <h3>Delete interactively</h3>
             <pre><code>anyr space delete "Old Work"</code></pre>
             <p>
               The prompt offers a backup, then requires the exact space name.
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
             </p>
           </div>
         </div>
@@ -246,7 +310,9 @@ anyr search --space "Work" --text "meeting notes" --table</code></pre>
     <section id="body">
       <h2>Body blocks and discussions</h2>
       <p>
-        These diagnostics require HTTP and gRPC access. Object and block operands are exact IDs.
+        <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+        Attached-discussion operations also use HTTP preflight. Object and block operands are
+        exact IDs.
       </p>
       <details open>
         <summary>Show commands</summary>
@@ -343,6 +409,10 @@ JSON</code></pre>
 
     <section id="chats">
       <h2>Chats</h2>
+      <p>
+        A chat name operand requires gRPC name resolution, even when the command itself can use
+        REST. Pass an exact chat ID to keep a REST-backed operation HTTP-only.
+      </p>
       <details open>
         <summary>Show commands</summary>
         <div class="commands">
@@ -366,6 +436,9 @@ anyr chat create "Work" "Ops"</code></pre>
             <h3>List recent messages</h3>
             <pre><code>anyr chat messages list "Work" "Ops" \
   --limit 50 --table</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+            </p>
           </div>
           <div class="entry">
             <h3>Filter a message window since a date</h3>
@@ -374,6 +447,7 @@ anyr chat create "Work" "Ops"</code></pre>
             <p>
               This filters one bounded window. Use order-ID continuation to inspect older
               windows.
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
             </p>
           </div>
           <div class="entry">
@@ -396,6 +470,19 @@ anyr chat messages react "Work" "Ops" "$MESSAGE_ID" "👍"</code></pre>
             <h3>Mark a chat read</h3>
             <pre><code>anyr chat read-all "Work" "Ops"</code></pre>
           </div>
+          <div class="entry">
+            <h3>Use gRPC-only chat operations</h3>
+            <pre><code>anyr chat list
+anyr chat get "Work" "Ops"
+anyr chat messages get "Work" "Ops" "$MESSAGE_ID"
+anyr chat unread "Work" "Ops" --after "$ORDER_ID"</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              Cross-space or text-filtered chat lists, message list/get/delete,
+              <code>unread</code>, <code>--blocks-json</code>, and multi-chat or
+              preview listeners also select gRPC.
+            </p>
+          </div>
         </div>
       </details>
     </section>
@@ -409,6 +496,10 @@ anyr chat messages react "Work" "Ops" "$MESSAGE_ID" "👍"</code></pre>
             <h3>List matching files</h3>
             <pre><code>anyr file list "Personal" --file-type image \
   --size-gte 1048576 --name-contains report --table</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <code>file search</code> and <code>file get</code> use the same backend.
+            </p>
           </div>
           <div class="entry">
             <h3>Upload a local file</h3>
@@ -424,6 +515,12 @@ anyr chat messages react "Work" "Ops" "$MESSAGE_ID" "👍"</code></pre>
             <h3>Upload from a URL with rich placement</h3>
             <pre><code>anyr file upload "Personal" --url https://example.com/logo.png \
   --file-type image --style embed</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              On <code>file upload</code>, <code>--url</code>, <code>--file-type</code>,
+              <code>--style</code>, <code>--details</code>, and creation-context options
+              select gRPC. File preload and discard-preload also require it.
+            </p>
           </div>
           <div class="entry">
             <h3>Download file bytes</h3>
@@ -475,6 +572,16 @@ anyr property list "Work" --table</code></pre>
             <h3>List templates for a type</h3>
             <pre><code>anyr template list "Work" task --table</code></pre>
           </div>
+          <div class="entry">
+            <h3>Add a property without replacing the type list</h3>
+            <pre><code>anyr type update "Work" task --add-property status</code></pre>
+            <p>
+              <code>--add-property</code>:
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <code>--set-property</code> and <code>--clear-properties</code> remain
+              REST-backed.
+            </p>
+          </div>
         </div>
       </details>
     </section>
@@ -519,16 +626,25 @@ anyr list remove "Work" "$LIST_ID" "$OBJECT_ID"</code></pre>
           <div class="entry">
             <h3>Create a writer invitation</h3>
             <pre><code>anyr space invite create "Work" --writer</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+            </p>
           </div>
           <div class="entry">
             <h3>Show or revoke invitations</h3>
             <pre><code>anyr space invite show "Work"
 anyr space invite revoke "Work"</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+            </p>
           </div>
           <div class="entry">
             <h3>Enable or disable public sharing</h3>
             <pre><code>anyr space enable-sharing "Work"
 anyr space disable-sharing "Work"</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+            </p>
           </div>
         </div>
       </details>
@@ -544,12 +660,16 @@ anyr space disable-sharing "Work"</code></pre>
             <pre><code>anyr backup create --space "Work" --dir ./backups</code></pre>
             <p>
               Add <code>--include-files</code> to embed file objects and binaries.
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
             </p>
           </div>
           <div class="entry">
             <h3>Create an exact archive path</h3>
             <pre><code>anyr backup create --space "Work" \
   --dest ./backups/work.zip --include-files</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+            </p>
           </div>
           <div class="entry">
             <h3>Inspect archive contents</h3>
@@ -560,11 +680,15 @@ anyr backup manifest ./backups/work.zip --pretty</code></pre>
             <h3>Validate a restore</h3>
             <pre><code>anyr backup restore ./backups/work.zip \
   --space "Restored Work" --dry-run</code></pre>
+            <p>The dry run reads the archive locally and resolves the destination over HTTP.</p>
           </div>
           <div class="entry">
             <h3>Restore into an existing space</h3>
             <pre><code>anyr backup restore ./backups/work.zip \
   --space "Restored Work" --log restore.json</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+            </p>
           </div>
           <div class="entry">
             <h3>Compare archives</h3>
@@ -590,6 +714,11 @@ anyr backup manifest ./backups/work.zip --pretty</code></pre>
           <div class="entry">
             <h3>Run the MCP server</h3>
             <pre><code>anyr mcp</code></pre>
+            <p>
+              The compact base catalog is HTTP-complete. The standard read-write
+              catalog and some optional toolsets require
+              <a href="/reference/connections/">gRPC access</a>.
+            </p>
           </div>
           <div class="entry">
             <h3>Initialize or check MCP configuration</h3>

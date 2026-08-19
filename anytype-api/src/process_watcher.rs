@@ -252,7 +252,7 @@ impl fmt::Debug for ProcessWatcher {
 }
 
 impl ProcessWatcher {
-    /// Subscribe to process events and open the session event stream.
+    /// Subscribes to process events and opens the gRPC session event stream.
     pub async fn subscribe(
         grpc: &AnytypeGrpcClient,
         timeouts: ProcessWatcherTimeouts,
@@ -345,7 +345,7 @@ impl ProcessWatcher {
         })
     }
 
-    /// Wait for a matching process to complete.
+    /// Waits for a matching process on the open gRPC event stream.
     pub async fn wait_for_process(
         &mut self,
         grpc: &AnytypeGrpcClient,
@@ -369,7 +369,7 @@ impl ProcessWatcher {
         .await
     }
 
-    /// Wait for a process started after `generation` was established.
+    /// Waits on the gRPC event stream for a process started after `generation`.
     pub async fn wait_for_generation(
         &mut self,
         _grpc: &AnytypeGrpcClient,
@@ -483,7 +483,7 @@ impl ProcessWatcher {
         }
     }
 
-    /// Unsubscribe from process events.
+    /// Unsubscribes from gRPC process events.
     pub async fn unsubscribe(&self, grpc: &AnytypeGrpcClient) -> Result<()> {
         let mut commands = grpc.client_commands();
         let mut request =

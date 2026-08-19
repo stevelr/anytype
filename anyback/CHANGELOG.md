@@ -12,6 +12,9 @@
 
 ### Changed
 
+- Move backup and restore command usage to the documentation site. The crate
+  README now describes the embedded library and implementation boundary and
+  directs users to `anyr backup`.
 - Compose backup and restore under one absolute workflow deadline, including
   selection, export/import, process watching, verification, and local result
   publication. Timeout environment values now use strict finite ranges, and

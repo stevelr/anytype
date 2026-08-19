@@ -514,6 +514,9 @@ impl AnytypeClient {
 
     /// Resolves a chat reference into a [`ChatTarget`].
     ///
+    /// Name resolution and default-space-chat discovery require a gRPC
+    /// backend. An exact chat ID with an explicit space needs no gRPC call.
+    ///
     /// The reference forms, in order of interpretation:
     ///
     /// - space given: `chat_id_or_name` is a chat id, or a chat name
@@ -588,6 +591,9 @@ impl AnytypeClient {
 
     /// Resolves an array of chat references into chat ids.
     ///
+    /// Inputs that are not exact chat IDs may require a gRPC backend, as
+    /// described by [`resolve_chat_target`](AnytypeClient::resolve_chat_target).
+    ///
     /// Batch form of
     /// [`resolve_chat_target`](AnytypeClient::resolve_chat_target);
     /// fails on the first item that does not resolve.
@@ -610,6 +616,8 @@ impl AnytypeClient {
     /// Resolves a chat id into its display name, falling back to the id
     /// when the chat has no name.
     ///
+    /// This method requires a gRPC backend.
+    ///
     /// # Errors
     /// - [`AnytypeError::NotFound`] if no space is given and no chat has that id
     pub async fn resolve_chat_name(&self, space_id: Option<&str>, chat_id: &str) -> Result<String> {
@@ -628,6 +636,9 @@ impl AnytypeClient {
     }
 
     /// Resolves a message reference into its message id.
+    ///
+    /// Resolving an order ID requires a gRPC backend. A value that already
+    /// looks like a message ID is returned without a backend call.
     ///
     /// Accepts either a message id (returned unchanged when it already looks
     /// like an object id ([`looks_like_object_id`])) or a chat `order_id`. An
@@ -670,6 +681,8 @@ impl AnytypeClient {
     }
 
     /// Resolves an array of message references into message ids.
+    ///
+    /// Any order-ID input requires a gRPC backend; exact message IDs do not.
     ///
     /// Batch form of
     /// [`resolve_message_id`](AnytypeClient::resolve_message_id); fails on the

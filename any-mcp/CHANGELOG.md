@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Move MCP setup and runtime configuration to the documentation site. The
+  crate README now focuses on the server's architecture, boundaries, and
+  development checks and identifies `anyr mcp` as the executable entry point.
 - Verify OAuth resource-server JWTs through `jsonwebtoken`'s `aws-lc-rs`
   backend instead of `rust_crypto`, and without the optional PEM feature.
   This drops the `rsa` crate (RUSTSEC-2023-0071, Marvin timing side channel,

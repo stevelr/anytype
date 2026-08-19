@@ -5,6 +5,8 @@ sort_by = "weight"
 insert_anchor_links = "right"
 +++
 
-Use the [Rust libraries and components reference](/reference/rust-libraries/)
-to choose between the high-level `anytype` client, the low-level gRPC client,
-and the libraries behind the Toolbox command groups.
+Use these references when configuring or embedding Anytype Toolbox:
+
+- [Connections and gRPC](/reference/connections/)
+- [Keystores](/reference/keystores/)
+- [Rust libraries and components](/reference/rust-libraries/)

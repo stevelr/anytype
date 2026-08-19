@@ -1074,13 +1074,15 @@ CLI's default `~/.anytype/config.json`, or from an explicit path, without
 storing them. A missing file is reported separately from malformed or
 unreadable configuration so account-bootstrap callers can fail safely.
 
-More info about using and configuring keystores is in [Keystores](./Keystores.md)
+See the [keystore reference](https://docs.anytype-toolbox.org/reference/keystores/)
+for backend selection, environment credentials, and encrypted file storage.
 
 ## Known issues & Troubleshooting
 
 See [Troubleshooting](./Troubleshooting.md)
 
-For keystore-related issues, see [Keystores](./Keystores.md)
+For keystore-related issues, see the
+[keystore reference](https://docs.anytype-toolbox.org/reference/keystores/).
 
 ## Eventual Consistency
 

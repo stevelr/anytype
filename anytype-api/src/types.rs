@@ -570,7 +570,7 @@ impl TypeRequest {
     }
 
     /// Reads the exact property classification with a caller-selected finite
-    /// deadline for `ObjectShow`.
+    /// deadline for the gRPC `ObjectShow` operation.
     ///
     /// The deadline must be nonzero and no greater than
     /// [`MAX_TYPE_PROPERTY_RPC_TIMEOUT`]. Every explicit or detached
