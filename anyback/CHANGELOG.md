@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `restore` no longer fails every batch with "import response could not be
+  correlated to process completion". The real server returns no collection
+  identifier for ordinary object imports; such batches now complete on their
+  dispatch generation, while a returned identifier still binds completion and
+  reuse still fails closed.
+
 ### Changed
 
 - Compose backup and restore under one absolute workflow deadline, including

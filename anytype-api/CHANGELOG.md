@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- `ProcessWatcher::correlate_generation` accepts a dispatch response that omits
+  the root collection identifier and binds completion to the generation alone,
+  instead of rejecting it; non-empty identifiers remain unique per batch.
 - `chat_stream` no longer reconnects endlessly against a real server. The
   session-event reader held at most one decoded event, and a fresh
   `ListenSessionEvents` stream delivers several events while the worker is

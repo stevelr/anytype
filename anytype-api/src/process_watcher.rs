@@ -201,11 +201,16 @@ impl fmt::Debug for ProcessWatchProgress {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessWatchGeneration(u64);
 
-/// Server-issued correlation for one dispatched process generation.
+/// Correlation for one dispatched process generation.
+///
+/// Carries the server-issued root collection identifier when the dispatch
+/// response supplied one; otherwise completion binds to the generation alone
+/// (the process started after the dispatch barrier, or the import-finish
+/// fallback that the request enables).
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProcessWatchCorrelation {
     generation: ProcessWatchGeneration,
-    root_collection_id: String,
+    root_collection_id: Option<String>,
 }
 
 impl fmt::Debug for ProcessWatchCorrelation {
@@ -213,7 +218,10 @@ impl fmt::Debug for ProcessWatchCorrelation {
         formatter
             .debug_struct("ProcessWatchCorrelation")
             .field("generation", &self.generation)
-            .field("root_collection_id", &"redacted")
+            .field(
+                "root_collection_id",
+                &self.root_collection_id.as_ref().map(|_| "redacted"),
+            )
             .finish()
     }
 }
@@ -298,9 +306,15 @@ impl ProcessWatcher {
         Ok(ProcessWatchGeneration(self.generation))
     }
 
-    /// Bind a generation to the non-empty server correlation returned by the
-    /// dispatch RPC. Reuse is rejected so an event from an earlier batch
-    /// cannot complete a later batch.
+    /// Bind a generation to the server correlation returned by the dispatch
+    /// RPC.
+    ///
+    /// A non-empty root collection identifier must be fresh: reuse is rejected
+    /// so an event from an earlier batch cannot complete a later batch. The
+    /// server omits the identifier for imports that create no root collection
+    /// (ordinary `External` object imports); those batches complete on the
+    /// generation alone, which the dispatch barrier already isolates from
+    /// earlier batches.
     pub fn correlate_generation(
         &mut self,
         generation: ProcessWatchGeneration,
@@ -312,8 +326,9 @@ impl ProcessWatcher {
             });
         }
         if root_collection_id.is_empty() {
-            return Err(AnytypeError::Other {
-                message: "dispatch response omitted process correlation".to_string(),
+            return Ok(ProcessWatchCorrelation {
+                generation,
+                root_collection_id: None,
             });
         }
         if !self
@@ -326,7 +341,7 @@ impl ProcessWatcher {
         }
         Ok(ProcessWatchCorrelation {
             generation,
-            root_collection_id: root_collection_id.to_string(),
+            root_collection_id: Some(root_collection_id.to_string()),
         })
     }
 
@@ -366,7 +381,7 @@ impl ProcessWatcher {
             _grpc,
             request,
             correlation.generation,
-            Some(correlation.root_collection_id.as_str()),
+            correlation.root_collection_id.as_deref(),
             cancel_rx,
         )
         .await
@@ -932,16 +947,31 @@ mod tests {
     }
 
     #[test]
-    fn server_correlations_must_be_nonempty_and_unique_per_batch() {
+    fn omitted_server_correlation_binds_to_the_generation_alone() {
         let mut watcher = ProcessWatcher {
             generation: 1,
             ..ProcessWatcher::default()
         };
+        let correlation = watcher
+            .correlate_generation(ProcessWatchGeneration(1), "")
+            .expect("omitted identifier falls back to the generation");
+        assert_eq!(correlation.generation, ProcessWatchGeneration(1));
+        assert!(correlation.root_collection_id.is_none());
+        assert!(watcher.used_correlations.is_empty());
         assert!(
             watcher
-                .correlate_generation(ProcessWatchGeneration(1), "")
-                .is_err()
+                .correlate_generation(ProcessWatchGeneration(2), "")
+                .is_err(),
+            "a stale generation is still rejected"
         );
+    }
+
+    #[test]
+    fn server_correlations_must_be_unique_per_batch() {
+        let mut watcher = ProcessWatcher {
+            generation: 1,
+            ..ProcessWatcher::default()
+        };
         watcher
             .correlate_generation(ProcessWatchGeneration(1), "collection-one")
             .expect("first server correlation");
@@ -959,7 +989,7 @@ mod tests {
         let hostile = "HOSTILE_ID\nC:\\secret\\token";
         let correlation = ProcessWatchCorrelation {
             generation: ProcessWatchGeneration(7),
-            root_collection_id: hostile.to_string(),
+            root_collection_id: Some(hostile.to_string()),
         };
         let mut watcher = ProcessWatcher {
             process_id: Some(hostile.to_string()),

@@ -11074,11 +11074,15 @@ async fn run_body_blocks_real_workflow() -> OptionalRealWorkflowRun {
 }
 
 #[cfg(feature = "acceptance-harness")]
-#[tokio::test]
+// The shared stable/preview body workflow nests four child lifecycles and
+// their futures; the default 2 MiB test-thread stack overflows in debug builds.
+#[test]
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials and an authenticated headless Anytype server"]
-async fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
-    let _ = run_body_blocks_real_workflow().await;
+fn headless_body_blocks_shared_direct_stable_preview_scenarios() {
+    run_live_scenario_on_large_stack("body-blocks-shared-stable-preview", || async {
+        let _ = run_body_blocks_real_workflow().await;
+    });
 }
 
 #[cfg(feature = "acceptance-harness")]
@@ -11128,16 +11132,22 @@ fn optional_real_workflow_registration_is_exact() {
     }
 }
 
+// Every registered workflow (including the shared body workflow above) runs
+// on one thread here, so it needs the same large stack.
 #[cfg(feature = "acceptance-harness")]
-#[tokio::test]
+#[test]
 #[serial_test::serial]
 #[ignore = "requires env-only disposable credentials, an authenticated headless Anytype server, and descriptor-bound reviewed server-log context"]
-async fn headless_stdio_all_registered_optional_real_workflows() {
-    for registration in OPTIONAL_REAL_WORKFLOWS {
-        require_optional_workflow_executed(registration.run().await).unwrap_or_else(|message| {
-            panic!("{message}: {:?}", registration.workflow);
-        });
-    }
+fn headless_stdio_all_registered_optional_real_workflows() {
+    run_live_scenario_on_large_stack("all-registered-optional-real-workflows", || async {
+        for registration in OPTIONAL_REAL_WORKFLOWS {
+            require_optional_workflow_executed(registration.run().await).unwrap_or_else(
+                |message| {
+                    panic!("{message}: {:?}", registration.workflow);
+                },
+            );
+        }
+    });
 }
 
 #[cfg(feature = "acceptance-harness")]

@@ -1252,10 +1252,17 @@ mod tests {
             .expect("schema-property direct dispatch")
     }
 
+    /// Sends one modern `tools/call` frame and waits up to `response_wait`
+    /// for the response frame.
+    ///
+    /// A request the handler cancels is suppressed by the transport, so the
+    /// wait is bounded: `None` means no frame arrived and the stream was
+    /// closed afterwards.
     async fn preview_stdio_exchange(
         server: AnyMcpServer,
         name: &'static str,
         arguments: Value,
+        response_wait: Duration,
     ) -> Option<Value> {
         let (client_io, server_io) = duplex(64 * 1024);
         let (server_reader, server_writer) = split(server_io);
@@ -1287,10 +1294,11 @@ mod tests {
             .expect("write stdio request");
         let mut client_reader = BufReader::new(client_reader);
         let mut line = String::new();
-        client_reader
-            .read_line(&mut line)
-            .await
-            .expect("read stdio response");
+        if let Ok(read) =
+            tokio::time::timeout(response_wait, client_reader.read_line(&mut line)).await
+        {
+            read.expect("read stdio response");
+        }
         drop(client_writer);
         drop(client_reader);
         task.await
@@ -1303,12 +1311,18 @@ mod tests {
         }
     }
 
+    /// Generous bound for a request whose response the transport delivers.
+    const STDIO_RESPONSE_WAIT: Duration = Duration::from_secs(60);
+    /// Short bound for a request the handler cancels: the transport suppresses
+    /// its response unless the handler finished in the same poll.
+    const STDIO_CANCELLED_RESPONSE_WAIT: Duration = Duration::from_millis(500);
+
     async fn preview_stdio_call(
         server: AnyMcpServer,
         name: &'static str,
         arguments: Value,
     ) -> Value {
-        preview_stdio_exchange(server, name, arguments)
+        preview_stdio_exchange(server, name, arguments, STDIO_RESPONSE_WAIT)
             .await
             .expect("stdio response")
     }
@@ -2473,6 +2487,7 @@ mod tests {
                                                 ),
                                                 PROPERTY_CREATE,
                                                 input,
+                                                STDIO_CANCELLED_RESPONSE_WAIT,
                                             )
                                             .await;
                                             if let Some(response) = response {
@@ -2545,6 +2560,7 @@ mod tests {
                                                 ),
                                                 PROPERTY_UPDATE,
                                                 input,
+                                                STDIO_CANCELLED_RESPONSE_WAIT,
                                             )
                                             .await;
                                             if let Some(response) = response {

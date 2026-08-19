@@ -497,7 +497,10 @@ mod tests {
         assert!(!error.contains("indeterminate"));
     }
 
-    #[tokio::test]
+    // Paused time keeps the second wait from completing in the same coarse
+    // timer tick as the deadline (Windows timers), which `timeout_at` would
+    // report as success.
+    #[tokio::test(start_paused = true)]
     async fn one_absolute_deadline_is_not_reset_between_waits() {
         let deadline = WorkflowDeadline::new(
             Some(Duration::from_millis(50)),

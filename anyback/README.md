@@ -83,11 +83,14 @@ Archive publication binds an owned staging identity before creating the final
 path. Its manifest records the exact staged archive length and SHA-256 digest,
 then the archive becomes the final commit record. A sidecar left before that
 commit cannot validate against a missing or different archive.
-Each restore batch binds completion to the non-empty collection correlation
-returned by its import RPC. Completion requires the same correlation on the
-server's `importFinish` event; missing or reused correlations fail closed.
-Uncorrelated lifecycle events cannot establish success, while terminal failure
-events still fail the restore closed.
+Each restore batch binds completion to the collection correlation returned by
+its import RPC when the server supplies one: completion then requires the same
+correlation on the server's `importFinish` event, and a reused correlation
+fails closed. Ordinary object imports create no root collection, so the server
+returns no correlation; those batches complete on the dispatch generation alone
+(the import process started after the batch's dispatch barrier). Uncorrelated
+lifecycle events cannot establish success, while terminal failure events still
+fail the restore closed.
 
 Restore progress limits use seconds and remain mandatory:
 

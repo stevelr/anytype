@@ -329,7 +329,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   launcher fixture resolves host helpers from `PATH` instead of a NixOS install
   prefix, client-root fixture cleanup tolerates a late-released directory
   handle on Windows, and process-group teardown treats a zombie left under a
-  non-reaping init (a container without an init process) as terminated.
+  non-reaping init (a container without an init process) as terminated. The
+  schema property/type live tests bound their stdio response wait (a request
+  the handler cancels has its frame suppressed), and the fixture-heavy body
+  workflows run on a large-stack thread.
 - Stop rejecting every document import under a `text/markdown` or `*/*`
   `file-mime` validator. `document_import_create` and `document_import_update`
   now declare `text/markdown` or `text/plain` from `source_format` for validator
