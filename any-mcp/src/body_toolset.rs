@@ -3144,7 +3144,7 @@ where
     let mut marked = false;
     std::future::poll_fn(move |context: &mut Context<'_>| {
         if !marked {
-            let _ = page_create_polls.fetch_update(
+            let _ = page_create_polls.try_update(
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
                 |current| Some(current.saturating_add(1)),

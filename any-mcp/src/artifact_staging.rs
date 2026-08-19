@@ -625,11 +625,12 @@ impl Drop for StagingTaskGuard {
             self.state.shutdown.cancel();
         }
         if self.registered {
-            let _ = self.state.task_active.fetch_update(
-                Ordering::AcqRel,
-                Ordering::Acquire,
-                |active| active.checked_sub(1),
-            );
+            let _ =
+                self.state
+                    .task_active
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                        active.checked_sub(1)
+                    });
         }
         self.state.task_notify.notify_waiters();
     }
@@ -1497,7 +1498,7 @@ impl ArtifactStaging {
         let registered = self
             .state
             .task_active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_add(1)
             })
             .is_ok();

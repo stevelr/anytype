@@ -494,7 +494,7 @@ impl Drop for ImportSettlementAdmission {
             let _gate = self.gate();
             let _ = self
                 .active
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                     active.checked_sub(1)
                 });
         }
@@ -950,7 +950,7 @@ impl RuntimeContext {
 
     fn next_operation_correlation_id(&self) -> u64 {
         self.next_correlation_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current.saturating_add(1))
             })
             .unwrap_or(u64::MAX)
@@ -1172,7 +1172,7 @@ impl RuntimeContext {
             if let Err(result) = sender.send(result) {
                 abandoned(result);
             }
-            let _ = active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            let _ = active.try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_sub(1)
             });
             notify.notify_waiters();

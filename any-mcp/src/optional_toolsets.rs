@@ -166,7 +166,6 @@ impl OptionalToolsetSelection {
     }
 
     /// Returns the exact canonical selected names.
-    #[must_use]
     pub fn names(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
         self.entries.iter().map(|entry| entry.name)
     }

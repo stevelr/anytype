@@ -285,7 +285,7 @@ impl PendingCandidate {
     pub(crate) fn claim_get_attempt(&self) -> bool {
         self.0
             .attempts
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |attempts| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |attempts| {
                 (attempts < 3).then_some(attempts + 1)
             })
             .is_ok()

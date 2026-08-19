@@ -127,7 +127,7 @@ impl BodyRpcMetrics {
     }
 
     fn increment(value: &AtomicUsize) {
-        let _ = value.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        let _ = value.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             Some(current.saturating_add(1))
         });
     }
