@@ -765,10 +765,6 @@ struct OwnedChild {
 impl OwnedChild {
     #[cfg_attr(not(windows), allow(clippy::unused_async))]
     async fn new(child: tokio::process::Child, cleanup_timeout: Duration) -> Result<Self> {
-        #[cfg(windows)]
-        let mut child = child;
-        #[cfg(not(windows))]
-        let child = child;
         #[cfg(not(windows))]
         let _ = cleanup_timeout;
         #[cfg(unix)]
@@ -792,7 +788,7 @@ impl OwnedChild {
             }
         };
         #[cfg(windows)]
-        if let Err(error) = job.resume(&child) {
+        if let Err(error) = OwnedJob::resume(&child) {
             let owned = Self { child, job };
             let cleanup = stop_child(owned, cleanup_timeout).await;
             return match cleanup {
@@ -812,25 +808,26 @@ impl OwnedChild {
         })
     }
 
-    fn signal_tree(&mut self) -> Result<()> {
-        #[cfg(unix)]
-        {
-            let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
-            if result != 0 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error).context("failed to signal child process group");
-                }
+    #[cfg(unix)]
+    fn signal_tree(&self) -> Result<()> {
+        let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error).context("failed to signal child process group");
             }
-            Ok(())
         }
-        #[cfg(not(unix))]
-        {
-            #[cfg(windows)]
-            return self.job.terminate();
-            #[cfg(not(windows))]
-            return self.child.start_kill().context("failed to signal child");
-        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn signal_tree(&self) -> Result<()> {
+        self.job.terminate()
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn signal_tree(&mut self) -> Result<()> {
+        self.child.start_kill().context("failed to signal child")
     }
 }
 
@@ -842,15 +839,12 @@ async fn terminate_unowned_child(
     child
         .start_kill()
         .context("failed to terminate suspended child leader")?;
-    match tokio::time::timeout(cleanup_timeout, child.wait()).await {
-        Ok(result) => {
-            result.context("failed to reap suspended child leader")?;
-            Ok(())
-        }
-        Err(_) => {
-            spawn_unowned_reaper(child)?;
-            bail!("suspended child cleanup exceeded its fixed bound; owned reaper continues")
-        }
+    if let Ok(result) = tokio::time::timeout(cleanup_timeout, child.wait()).await {
+        result.context("failed to reap suspended child leader")?;
+        Ok(())
+    } else {
+        spawn_unowned_reaper(child)?;
+        bail!("suspended child cleanup exceeded its fixed bound; owned reaper continues")
     }
 }
 
@@ -915,7 +909,7 @@ impl OwnedJob {
         Ok(job)
     }
 
-    fn resume(&self, child: &tokio::process::Child) -> Result<()> {
+    fn resume(child: &tokio::process::Child) -> Result<()> {
         use windows_sys::Win32::{
             Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
             System::{

@@ -153,10 +153,12 @@ impl OwnedChild {
         let Some(baseline) = &self.cgroup_baseline else {
             return Ok(());
         };
-        for pid in cgroup_members()?.difference(baseline) {
-            if *pid == std::process::id() {
-                continue;
-            }
+        let members = cgroup_members()?;
+        let fresh = members
+            .difference(baseline)
+            .filter(|pid| **pid != std::process::id());
+        #[cfg(unix)]
+        for pid in fresh {
             let pid = i32::try_from(*pid)
                 .map_err(|_| "cgroup member pid is outside the supported range".to_owned())?;
             // SAFETY: the PID came from the dedicated service's cgroup.procs.
@@ -165,6 +167,12 @@ impl OwnedChild {
             if result != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
                 return Err("cannot terminate owned cgroup descendant".to_owned());
             }
+        }
+        // A cgroup baseline exists only under the Linux supervisor; without
+        // Unix signals an unexpected member cannot be terminated here.
+        #[cfg(not(unix))]
+        if fresh.count() > 0 {
+            return Err("cannot terminate owned cgroup descendant".to_owned());
         }
         Ok(())
     }
@@ -280,6 +288,7 @@ impl JsonRpcHost {
         )
     }
 
+    #[cfg(target_os = "linux")]
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_in_namespace_for_test(
         server: &Server,
@@ -397,18 +406,18 @@ impl JsonRpcHost {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let inherited_fds = domain
-            .map(|_| {
-                server
-                    .credentials
-                    .iter()
-                    .map(|credential| credential.source_fd)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
+            let inherited_fds = domain
+                .map(|_| {
+                    server
+                        .credentials
+                        .iter()
+                        .map(|credential| credential.source_fd)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             // SAFETY: setpgid is async-signal-safe and neither allocates nor
             // acquires locks between fork and exec.
             unsafe {

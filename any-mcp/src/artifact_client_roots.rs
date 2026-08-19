@@ -932,6 +932,26 @@ mod tests {
         (base, import, export)
     }
 
+    /// Removes a fixture tree once every capability handle has closed.
+    ///
+    /// A blocking intersection task, or a decision that still owns a registry
+    /// clone, may release its directory handles slightly after the test's own
+    /// drops. Windows refuses to delete a directory with an open handle, so
+    /// removal retries briefly instead of racing that release.
+    fn remove_temporary_tree(base: std::path::PathBuf) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match fs::remove_dir_all(&base) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => {
+                    assert!(std::time::Instant::now() < deadline, "cleanup: {error}");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+    }
+
     fn relative(value: &str) -> RelativeNativePath {
         RelativeNativePath::from_utf8(value).expect("relative path")
     }
@@ -1038,7 +1058,7 @@ mod tests {
         drop(first);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1069,7 +1089,7 @@ mod tests {
         drop(initialized);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1112,7 +1132,7 @@ mod tests {
 
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1143,7 +1163,7 @@ mod tests {
         drop(first_status);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1235,7 +1255,7 @@ mod tests {
 
         drop(runtime);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1345,7 +1365,7 @@ mod tests {
 
         drop(runtime);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1403,7 +1423,7 @@ mod tests {
         drop(primary);
         drop(foreign);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[test]
@@ -1443,7 +1463,7 @@ mod tests {
         drop(decision);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[test]
@@ -1458,7 +1478,7 @@ mod tests {
         );
 
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1484,7 +1504,7 @@ mod tests {
         drop(effective);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1511,7 +1531,7 @@ mod tests {
         drop(effective);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[cfg(any(unix, windows))]
@@ -1547,7 +1567,7 @@ mod tests {
         assert_eq!(source.calls(), 1);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1572,7 +1592,7 @@ mod tests {
         drop(effective);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1595,7 +1615,7 @@ mod tests {
         assert_eq!(source.calls(), 1);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1615,7 +1635,7 @@ mod tests {
         );
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1633,7 +1653,7 @@ mod tests {
         );
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1650,7 +1670,7 @@ mod tests {
         );
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1705,8 +1725,9 @@ mod tests {
             (0, 0)
         );
 
+        drop((direct, narrowed, empty, disabled));
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1768,7 +1789,7 @@ mod tests {
         drop(decision);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1800,7 +1821,7 @@ mod tests {
         drop(decision);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1825,7 +1846,7 @@ mod tests {
         drop(first);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1890,7 +1911,7 @@ mod tests {
         drop(operation_first);
         drop(status_first);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1937,7 +1958,7 @@ mod tests {
         drop(equal_gate);
         drop(before_gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1972,7 +1993,7 @@ mod tests {
         drop(timed_out);
         drop(gate);
         drop(registry);
-        fs::remove_dir_all(base).expect("cleanup");
+        remove_temporary_tree(base);
     }
 
     #[tokio::test]
@@ -1993,7 +2014,7 @@ mod tests {
             drop(decision);
             drop(gate);
             drop(registry);
-            fs::remove_dir_all(base).expect("cleanup");
+            remove_temporary_tree(base);
         }
     }
 

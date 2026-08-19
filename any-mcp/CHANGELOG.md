@@ -322,6 +322,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Build the benchmark harness binary and its tests cleanly on macOS and
+  Windows: Linux-only supervisor, run-root, credential-descriptor, and artifact
+  pinning code is now compiled only where it has a caller, and cgroup member
+  termination no longer references Unix signals on other platforms. The
+  launcher fixture resolves host helpers from `PATH` instead of a NixOS install
+  prefix, and client-root fixture cleanup tolerates a late-released directory
+  handle on Windows.
 - Stop rejecting every document import under a `text/markdown` or `*/*`
   `file-mime` validator. `document_import_create` and `document_import_update`
   now declare `text/markdown` or `text/plain` from `source_format` for validator

@@ -52,7 +52,8 @@ chmod +x "$test_root/bin/dist"
   test -f "$checksum"
   test -f dist-manifest.json
 
-  tar -tf "$archive" | sort > archive-files.txt
+  # Byte order keeps the expected listing stable across host locales.
+  tar -tf "$archive" | LC_ALL=C sort > archive-files.txt
   diff -u - archive-files.txt <<'EOF'
 anyr-x86_64-unknown-linux-gnu/
 anyr-x86_64-unknown-linux-gnu/CHANGELOG.md

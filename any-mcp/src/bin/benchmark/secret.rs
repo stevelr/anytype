@@ -64,7 +64,7 @@ impl SecretSet {
         })
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     pub fn read_fd(fd: i32) -> Result<Zeroizing<Vec<u8>>, String> {
         use std::{fs::File, io::Read, os::fd::FromRawFd as _};
 
@@ -91,11 +91,6 @@ impl SecretSet {
             return Err("credential descriptor has an invalid payload length".to_owned());
         }
         Ok(value)
-    }
-
-    #[cfg(not(unix))]
-    pub fn read_fd(_fd: i32) -> Result<Zeroizing<Vec<u8>>, String> {
-        Err("credential descriptors require Unix".to_owned())
     }
 
     pub fn scanner(&self) -> SecretScanner<'_> {

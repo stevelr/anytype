@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- `chat_stream` no longer reconnects endlessly against a real server. The
+  session-event reader held at most one decoded event, and a fresh
+  `ListenSessionEvents` stream delivers several events while the worker is
+  still resubscribing, so every connection hit the `queue_saturated` boundary
+  before any chat event reached the caller. The reader now queues up to 256
+  decoded events; exceeding that bound remains the saturation reconnect
+  boundary.
+
 ### Changed
 
 - `KeyStore` now keeps every credential for a service (HTTP token, gRPC

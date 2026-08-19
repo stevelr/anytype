@@ -56,10 +56,10 @@ fn bounded_host_rejects_floods_depth_and_cross_chunk_secrets() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn bounded_host_times_out_blocked_stdin_and_cleans_pipe_descendant() {
     let executable = env!("CARGO_BIN_EXE_any-mcp-benchmark");
-    #[cfg(unix)]
     {
         let blocked = Command::new(executable)
             .args(["self-test-blocked-stdin", executable])
@@ -302,7 +302,13 @@ exit 0
             .env("ANY_MCP_BENCHMARK_CREDENTIAL_FDS", "9")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(state.join("launcher-stderr"))
+                    .expect("open launcher stderr capture"),
+            );
         // SAFETY: dup2 is async-signal-safe and only duplicates the already
         // open fixture into the explicitly reserved descriptor 9.
         unsafe {
@@ -316,12 +322,22 @@ exit 0
         }
         command
     };
+    let launcher_stderr = || fs::read_to_string(state.join("launcher-stderr")).unwrap_or_default();
     let mut child = make_command(false).spawn().expect("start launcher fixture");
-    let ready_deadline = Instant::now() + Duration::from_secs(5);
+    // The first launch pays the cold-start cost of every helper process on a
+    // loaded CI runner, so its readiness window is deliberately generous.
+    let ready_deadline = Instant::now() + Duration::from_secs(30);
     while !state.join("active").exists() {
+        if let Some(status) = child.try_wait().expect("poll launcher fixture") {
+            panic!(
+                "launcher exited with {status} before the fake service started: {}",
+                launcher_stderr()
+            );
+        }
         assert!(
             Instant::now() < ready_deadline,
-            "fake service did not start"
+            "fake service did not start: {}",
+            launcher_stderr()
         );
         thread::sleep(Duration::from_millis(10));
     }
@@ -376,11 +392,12 @@ exit 0
     let mut immediate = make_command(true)
         .spawn()
         .expect("start registration-race fixture");
-    let request_deadline = Instant::now() + Duration::from_secs(5);
+    let request_deadline = Instant::now() + Duration::from_secs(30);
     while !state.join("requested").exists() {
         assert!(
             Instant::now() < request_deadline,
-            "fake service request did not start"
+            "fake service request did not start: {}",
+            launcher_stderr()
         );
         thread::sleep(Duration::from_millis(10));
     }
@@ -578,10 +595,36 @@ fn write_executable(path: &std::path::Path, contents: &str) {
         .expect("make fake executable runnable");
 }
 
+/// Resolves the real helper the forwarder execs from the test process PATH.
+///
+/// The fixture PATH prepends the fake-binary directory only when the launcher
+/// runs, so this lookup sees the host toolchain (Nix profile, distribution
+/// packages, or a CI runner image) rather than one hard-coded install prefix.
+#[cfg(target_os = "linux")]
+fn resolve_host_executable(name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let path = std::env::var_os("PATH").expect("test PATH");
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| {
+            std::fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+        .unwrap_or_else(|| panic!("host executable {name} is not on PATH"))
+}
+
 #[cfg(target_os = "linux")]
 fn write_checked_forwarder(path: &std::path::Path, name: &str) {
+    let target = resolve_host_executable(name);
+    let target = target.to_str().expect("UTF-8 host executable path");
+    assert!(
+        !target.contains('\''),
+        "host executable path must not contain a single quote"
+    );
     let contents = format!(
-        "#!/bin/sh\nif [ -e /proc/$$/fd/9 ]; then : > \"$BENCH_FAKE_STATE/leaked-fd\"; exit 97; fi\nprintf '%s\\n' '{name}' >> \"$BENCH_FAKE_STATE/helpers\"\nexec '/run/current-system/sw/bin/{name}' \"$@\"\n"
+        "#!/bin/sh\nif [ -e /proc/$$/fd/9 ]; then : > \"$BENCH_FAKE_STATE/leaked-fd\"; exit 97; fi\nprintf '%s\\n' '{name}' >> \"$BENCH_FAKE_STATE/helpers\"\nexec '{target}' \"$@\"\n"
     );
     write_executable(path, &contents);
 }

@@ -51,8 +51,8 @@ fn conflict_warning_goes_to_stderr_not_stdout() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--json conflicts with --table"),
-        "the conflict warning must reach stderr, got: {stderr:?}"
+        stderr.contains("conflicting output formats: --json, --table"),
+        "the conflict diagnostic must reach stderr, got: {stderr:?}"
     );
 }
 

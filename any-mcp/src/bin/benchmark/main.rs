@@ -7,6 +7,7 @@ mod config;
 #[allow(dead_code)]
 mod oracle;
 mod protocol;
+#[cfg(target_os = "linux")]
 mod run_root;
 mod secret;
 mod stats;
@@ -1152,12 +1153,16 @@ fn verify_file_hash(path: &str, expected: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Artifact pinning backs the Linux supervisor and its portable unit tests;
+// other release builds have no caller.
+#[cfg(any(target_os = "linux", test))]
 struct PinnedArtifact {
     path: std::path::PathBuf,
     file: std::fs::File,
     metadata: std::fs::Metadata,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl PinnedArtifact {
     fn open_verified(path: &str, expected: &str) -> Result<Self, String> {
         let mut pin = Self::open(path)?;
@@ -1234,6 +1239,8 @@ impl PinnedArtifact {
         Ok(reader)
     }
 
+    // The rename-over-open-file revalidation test is Unix-only.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn revalidate_path_identity(&self) -> Result<(), String> {
         let reopened = Self::open(
             self.path
@@ -1269,6 +1276,7 @@ fn verify_npm_sri(path: &str, integrity: &str) -> Result<(), String> {
     verify_npm_sri_pinned(&PinnedArtifact::open(path)?, integrity)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn verify_npm_sri_pinned(pin: &PinnedArtifact, integrity: &str) -> Result<(), String> {
     use base64::Engine as _;
     use sha2::Digest as _;
@@ -1314,6 +1322,7 @@ fn verify_tarball_bundle(
     )
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn verify_tarball_bundle_pinned(
     tarball: &PinnedArtifact,
     target_entry: &str,
@@ -1395,6 +1404,7 @@ fn verify_tarball_bundle_pinned(
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
@@ -1413,6 +1423,7 @@ fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn tar_name(header: &[u8; 512]) -> Result<String, String> {
     fn field(bytes: &[u8]) -> Result<&str, String> {
         let end = bytes
@@ -1430,6 +1441,7 @@ fn tar_name(header: &[u8; 512]) -> Result<String, String> {
     })
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn tar_octal(bytes: &[u8]) -> Result<u64, String> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| "npm tarball size is invalid".to_owned())?
@@ -1437,6 +1449,7 @@ fn tar_octal(bytes: &[u8]) -> Result<u64, String> {
     u64::from_str_radix(text, 8).map_err(|_| "npm tarball size is invalid".to_owned())
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn hex_digest(bytes: &[u8]) -> String {
     let mut result = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {
@@ -1965,10 +1978,6 @@ mod tests {
             "any-mcp-benchmark-spec-{}-{suffix}.json",
             std::process::id()
         ));
-        let link = std::env::temp_dir().join(format!(
-            "any-mcp-benchmark-spec-link-{}-{suffix}.json",
-            std::process::id()
-        ));
         let contents = br#"{"openapi":"3.0.0","paths":{}}"#;
         std::fs::write(&path, contents).expect("write spec fixture");
         let digest = hex_digest(&sha2::Sha256::digest(contents));
@@ -1979,6 +1988,10 @@ mod tests {
         );
         #[cfg(unix)]
         {
+            let link = std::env::temp_dir().join(format!(
+                "any-mcp-benchmark-spec-link-{}-{suffix}.json",
+                std::process::id()
+            ));
             std::os::unix::fs::symlink(&path, &link).expect("create spec symlink");
             assert!(verify_file_hash(link.to_str().expect("UTF-8 link path"), &digest).is_err());
             std::fs::remove_file(&link).expect("remove spec symlink");

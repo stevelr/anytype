@@ -50,6 +50,12 @@ use crate::{
 };
 
 const DEFAULT_BUFFER_CAPACITY: usize = 256;
+/// Decoded session events the reader task may hold before the worker drains
+/// them. Resubscription, control mutations, and caller delivery all run while
+/// the server keeps pushing events (a fresh `ListenSessionEvents` stream emits
+/// several at once), so this absorbs ordinary bursts while keeping memory
+/// bounded; exceeding it is the `queue_saturated` reconnect boundary.
+const SESSION_READER_QUEUE_CAPACITY: usize = 256;
 const DEFAULT_LAST_MESSAGES_LIMIT: u32 = 1;
 const STABLE_EVENT_DELIVERIES: u32 = 2;
 const CONTROL_BOUNDARY_METADATA: &str = "x-anytype-control-boundary";
@@ -328,6 +334,8 @@ enum SessionReaderBoundary {
     QueueSaturated,
 }
 
+/// Task-owned reader that decodes one session event stream into a bounded
+/// queue and reports the stream's terminal boundary separately.
 struct SessionEventReader {
     receiver: mpsc::Receiver<Box<Event>>,
     boundary: watch::Receiver<Option<SessionReaderBoundary>>,
@@ -347,7 +355,7 @@ impl SessionEventReader {
         S: Stream<Item = std::result::Result<Event, tonic::Status>> + Send + Unpin + 'static,
         F: Future<Output = ()> + Send + 'static,
     {
-        let (sender, receiver) = mpsc::channel(1);
+        let (sender, receiver) = mpsc::channel(SESSION_READER_QUEUE_CAPACITY);
         let (boundary_sender, boundary) = watch::channel(None);
         let task = tokio::spawn(async move {
             start.await;
@@ -1670,18 +1678,37 @@ mod tests {
         )
     }
 
+    /// One more decoded event than the reader queue holds, so an undrained
+    /// reader reaches the saturation boundary.
     fn raw_saturated_stream() -> tonic::Streaming<Event> {
-        let event = Event {
+        raw_saturated_event_stream(Event {
+            messages: Vec::new(),
+            context_id: "saturation-test".to_owned(),
+            initiator: None,
+            trace_id: String::new(),
+        })
+    }
+
+    fn raw_saturated_event_stream(event: Event) -> tonic::Streaming<Event> {
+        raw_event_stream(std::iter::repeat_n(
+            event,
+            SESSION_READER_QUEUE_CAPACITY + 1,
+        ))
+    }
+
+    /// One decoded event followed by enough empty events to saturate an
+    /// undrained reader, so exactly one delivery precedes the boundary.
+    fn raw_event_then_saturation_stream(event: Event) -> tonic::Streaming<Event> {
+        let filler = Event {
             messages: Vec::new(),
             context_id: "saturation-test".to_owned(),
             initiator: None,
             trace_id: String::new(),
         };
-        raw_event_stream([event.clone(), event])
-    }
-
-    fn raw_saturated_event_stream(event: Event) -> tonic::Streaming<Event> {
-        raw_event_stream([event.clone(), event])
+        raw_event_stream(
+            std::iter::once(event)
+                .chain(std::iter::repeat_n(filler, SESSION_READER_QUEUE_CAPACITY)),
+        )
     }
 
     fn raw_saturated_session_reader() -> SessionEventReader {
@@ -1920,7 +1947,9 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        assert!(matches!(reader.recv().await, SessionReaderEvent::Event(_)));
+        for _ in 0..SESSION_READER_QUEUE_CAPACITY {
+            assert!(matches!(reader.recv().await, SessionReaderEvent::Event(_)));
+        }
         assert!(matches!(
             reader.recv().await,
             SessionReaderEvent::Boundary(SessionReaderBoundary::QueueSaturated)
@@ -1986,7 +2015,7 @@ mod tests {
             let mut attempt = 0_u32;
             for order in 1..=4 {
                 let event = message_event("chat-1", &sub_id, &format!("{order:04}"));
-                let mut reader = SessionEventReader::spawn(raw_saturated_event_stream(event));
+                let mut reader = SessionEventReader::spawn(raw_event_then_saturation_stream(event));
                 assert!(
                     worker
                         .connected_loop(grpc.clone(), &mut reader, &mut attempt, None)
