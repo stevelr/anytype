@@ -2,11 +2,6 @@
 
 set -euo pipefail
 
-if [ -z "$TEAM_ID" ]; then
-  echo "set TEAM_ID">&2
-  exit 1
-fi
-
 repository_root=$(cd "$(dirname "$0")/../.." && pwd)
 script=$repository_root/.github/scripts/sign-macos-release.sh
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/test-sign-macos-release.XXXXXX")
@@ -20,7 +15,7 @@ mkdir -p "$mock_bin" "$fixture_dir" "$uploaded_dir"
 source_commit=0123456789abcdef0123456789abcdef01234567
 release_tag=anyr-v0.5.0-pre.8
 source_run_id=123456
-team_id=$TEAM_ID
+team_id=TESTTEAM01
 printf '#!/bin/sh\nprintf anyr\n' > "$fixture_dir/anyr"
 chmod 0755 "$fixture_dir/anyr"
 binary_hash=$(shasum -a 256 "$fixture_dir/anyr" | awk '{print $1}')
@@ -65,8 +60,8 @@ for argument in "$@"; do
   if [[ "$argument" == --display ]]; then
     {
       printf 'Identifier=com.stevelr.anyr\n'
-      printf 'Authority=Developer ID Application: Test Operator ($TEAM_ID)\n'
-      printf 'TeamIdentifier=$TEAM_ID\n'
+      printf 'Authority=Developer ID Application: Test Operator (TESTTEAM01)\n'
+      printf 'TeamIdentifier=TESTTEAM01\n'
     } >&2
     exit 0
   fi
@@ -169,7 +164,7 @@ export MOCK_UPLOADED_DIR=$uploaded_dir
 
 PATH="$mock_bin:$PATH" "$script" \
   --run-id "$source_run_id" \
-  --identity "Developer ID Application: Test Operator ($TEAM_ID)" \
+  --identity "Developer ID Application: Test Operator (TESTTEAM01)" \
   --notary-profile anyr-notary \
   --repo stevelr/anytype
 
@@ -182,7 +177,7 @@ jq -e \
     .source_commit == $source_commit and
     .release_tag == $release_tag and
     .team_id == $team_id and
-    .signing_authority == "Developer ID Application: Test Operator ($TEAM_ID)" and
+    .signing_authority == "Developer ID Application: Test Operator (TESTTEAM01)" and
     .identifier == "com.stevelr.anyr"
   ' "$uploaded_dir/anyr-aarch64-apple-darwin.signed.json" >/dev/null
 grep -q 'release upload' "$MOCK_LOG"
