@@ -23,6 +23,11 @@ concurrency:
 jobs:
   validate-source:
     runs-on: ubuntu-22.04
+    # contents: write is required to see the draft release; drafts are
+    # invisible to a read-only token.
+    permissions:
+      actions: read
+      contents: write
     outputs:
       plan: ${{ steps.validate.outputs.plan }}
       source-sha: ${{ steps.validate.outputs.source-sha }}
@@ -76,6 +81,11 @@ jobs:
   package-signed-macos:
     needs: validate-source
     runs-on: macos-15
+    # contents: write is required to download assets from the draft release;
+    # drafts are invisible to a read-only token.
+    permissions:
+      actions: read
+      contents: write
     env:
       EXPECTED_IDENTIFIER: com.stevelr.anyr
       EXPECTED_TEAM_ID: ${{ vars.MACOS_DEVELOPER_TEAM_ID }}
