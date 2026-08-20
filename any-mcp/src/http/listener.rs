@@ -1605,15 +1605,22 @@ pub(crate) mod tests {
             .await
             .expect("write partial header");
         tokio::time::sleep(HEADER_READ_WAIT).await;
+        // The header deadline has fired in virtual time, but the peer close
+        // arrives over a real socket; resume the clock so auto-advance cannot
+        // run the timeout ahead of OS FIN delivery.
+        tokio::time::resume();
         let mut byte = [0_u8; 1];
-        let read = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte))
             .await
             .expect("peer close deadline")
             .expect("socket read");
         assert_eq!(read, 0);
         shutdown.cancel();
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(server.await.expect("server join"), Ok(()));
+        let result = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("shutdown deadline")
+            .expect("server join");
+        assert_eq!(result, Ok(()));
     }
 
     #[tokio::test]

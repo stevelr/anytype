@@ -3,7 +3,7 @@
 Current status document for test coverage of the `anytype` crate's public
 network-facing surface. Originated as the fixed-scope audit for any-gc5
 (parent any-q1n, review gate any-jzn) dated 2026-07-21; now maintained as a
-living inventory. Status as of 2026-08-18, reconciled from jj change
+living inventory. Status as of 2026-08-20, reconciled from jj change
 `kmnyrwzy` / Git commit `4d76af1e` through the current `main` history, the
 crate and any-mcp CHANGELOG `[Unreleased]` sections, and tracker closures in
 the same interval.
@@ -211,7 +211,7 @@ Coverage classes:
 | Helpers: all `resolve_*` operations                 | Unit: 33 bounded scan, ambiguity, deduplication, and fast-path cases<br>Live: type and template resolution                                                | covered                                                                         |
 | Helpers: `verify_semantic` / `ensure_available`     | Unit: 11 cap, backoff, classification, and drop-safety cases                                                                                              | covered                                                                         |
 | Helpers: `PagedResult::collect_all` / `into_stream` | Unit: 12 cases<br>Live: `test_pagination` (4)                                                                                                             | covered                                                                         |
-| gRPC: `ProcessWatcher` subscribe/wait/unsubscribe   | Unit: reducer and space correlation, setup classification, and hostile diagnostic redaction (7)<br>Live: Markdown import and single-subscription fallback | covered; real connection faults remain `any-vvue` (P2), blocked by `any-k6o5.6` |
+| gRPC: `ProcessWatcher` subscribe/wait/unsubscribe   | Unit: reducer and space correlation, setup classification, and hostile diagnostic redaction (7)<br>Live: Markdown import and single-subscription fallback | covered; real connection faults remain `any-vvue` (P3), blocked by `any-k6o5.6` |
 | Harness: disposable-space lifecycle                 | Unit: lease, ledger, sweep, readiness, and credential suites<br>Live: every fixture-heavy target                                                          | covered                                                                         |
 
 ## Supplemental any-mcp transport coverage
@@ -226,8 +226,10 @@ The HTTP interface is nevertheless substantially automated:
   Host/Origin/CORS gates, authentication ordering, session ownership and
   deletion, protocol negotiation, preview behavior, listener admission, and
   real-loopback process and load/fault cases. The portable workflow runs this
-  library suite on every supported CI platform; literal per-platform
-  `--all-targets` and clippy evidence reconciliation is `any-ucd.4` (P2).
+  library suite on every supported CI platform, and literal per-platform
+  `cargo test -p any-mcp --all-targets` plus clippy `-D warnings` evidence is
+  recorded for all five supported platform rows in
+  `.docs/any-mcp/evidence/http-multiplatform-ci.md` (`any-ucd.4`, closed).
 - Real-socket stable tests cover authentication, CORS preflight, initialize and
   initialized lifecycle, POST SSE responses, exact `tools/list` catalog parity,
   opening the standalone GET SSE stream, and session DELETE. These tests run
@@ -307,6 +309,14 @@ Tracker reconciliation for tickets closed after the baseline:
   cancellation/cleanup, bounded modern stdio, all five portable platform rows,
   and both Windows architectures are covered. The new HTTP signal tests extend
   that process contract but are not the basis of those prior closures.
+- Space-description semantics closed `any-e7ei.3` (commit `7cea4f04`):
+  `update_space` gained an explicit `clear_description()` builder with unit
+  omission/replacement/clear body serialization and the ignored disposable
+  `test_space_description` registered in the required gate. Multi-platform
+  transport reconciliation closed `any-ucd.4`: `cargo test -p any-mcp
+  --all-targets` plus clippy `-D warnings` passed on linux x86_64/aarch64,
+  macos aarch64, and windows x86_64/aarch64, recorded in
+  `.docs/any-mcp/evidence/http-multiplatform-ci.md`.
 
 The current Arch-only recurrence in
 `chat_delete_toolset::tests::handler_verification_cancellation_and_deadline_are_indeterminate`
@@ -322,9 +332,7 @@ review.
 
 | Priority | Coverage owner            | Gap                                                                                                                                 |
 | -------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| P2       | `any-e7ei.3`              | Verified update-space omission, replacement, and clearing behavior.                                                                 |
-| P2       | `any-vvue`                | Real-server `ProcessWatcher` reconnect and fault coverage, blocked by the P4 `any-k6o5.4`–`any-k6o5.6` design/review/harness chain. |
-| P2       | `any-ucd.4`               | Literal all-target and clippy evidence on all five supported platform rows.                                                         |
+| P3       | `any-vvue`                | Real-server `ProcessWatcher` reconnect and fault coverage, blocked by the P4 `any-k6o5.4`–`any-k6o5.6` design/review/harness chain. |
 | P3       | `any-upsa`                | Direct assertions on the public HTTP metrics snapshot.                                                                              |
 | P3       | `any-vjj`                 | Direct `delete_all_archived` live coverage.                                                                                         |
 | P3       | `any-gz2k`                | Real-server negative tag-filter pagination.                                                                                         |
@@ -334,7 +342,9 @@ Completed owners retained for historical reconciliation include auth
 (`any-fzsd`), paged lookups (`any-kmji`), bounded archive counts (`any-h94e`),
 legacy file download (`any-gb01`), URL upload (`any-uvck`), direct chat
 reads/edit (`any-5vbi`), selective unsubscribe (`any-n1lm`), search/filter wire
-shapes (`any-vnj5`), and second-view continuation (`any-v06h`).
+shapes (`any-vnj5`), second-view continuation (`any-v06h`), verified
+space-description omission/replacement/clearing (`any-e7ei.3`), and
+five-platform all-target and clippy transport evidence (`any-ucd.4`).
 
 No separate ticket is needed for `backup_space`, protected anyr file
 list/search/get/preload/discard evidence, delegating legacy REST aliases, or
