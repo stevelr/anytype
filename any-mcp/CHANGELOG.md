@@ -108,8 +108,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Allow two minutes for each spawned stdio response in portable conformance
   tests, keeping a finite hang bound while accommodating debug builds on
   emulated aarch64 runners.
-- Make portable stdio cancellation cases prove permit release with a follow-up
-  upstream read before releasing the canceled fixture request.
+- Make portable stdio cancellation cases observe the canceled fixture
+  connection closing before the follow-up upstream read proves permit release.
+  Process timeouts report fixed child state, output byte counts, and the
+  metadata-only transcript tail.
 - Give every accepted artifact-import fixture distinct bytes when its identity
   or display name matters, matching Anytype's content-addressed file reuse.
   The reverse-traversal case records an explicit unsupported outcome when the

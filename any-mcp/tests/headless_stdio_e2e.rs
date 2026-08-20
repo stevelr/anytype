@@ -11543,7 +11543,10 @@ mod keystore_tests {
             .map(String::as_str)
             .or_else(|| panic.downcast_ref::<&str>().copied())
             .unwrap_or("non-string panic");
-        assert_eq!(panic_text, "bounded protocol process failed: child_eof");
+        assert!(
+            panic_text.starts_with("bounded protocol process failed: child_eof; child=exit_code;")
+        );
+        assert!(panic_text.contains("last_exchange=none"));
         for secret in [HTTP_TOKEN, CIPHER, BODY] {
             assert!(!panic_text.contains(secret));
         }

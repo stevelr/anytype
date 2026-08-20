@@ -329,14 +329,23 @@ impl ProtocolProcess {
                     mpsc::RecvTimeoutError::Timeout => "response_timeout",
                     mpsc::RecvTimeoutError::Disconnected => "child_eof",
                 };
+                let exit_category = output.exit_category;
+                let stdout_bytes = output.stdout.len();
+                let stderr_bytes = output.stderr.len();
+                let last_exchange = transcript.lines().last().unwrap_or("none").to_owned();
                 self.failure = Some(ProcessFailureEvidence {
                     category,
                     transcript,
                     output,
                 });
-                // Raw stderr remains in `failure` for the scenario owner to
-                // sanitize. The panic hook must never format it first.
-                panic!("bounded protocol process failed: {category}");
+                // Raw output remains in `failure` for the scenario owner to
+                // sanitize. The panic includes only fixed categories, byte
+                // counts, and the metadata-only transcript tail.
+                panic!(
+                    "bounded protocol process failed: {category}; child={exit_category}; \
+                     stdout_bytes={stdout_bytes}; stderr_bytes={stderr_bytes}; \
+                     last_exchange={last_exchange}"
+                );
             }
         };
         assert_eq!(bytes.last(), Some(&b'\n'), "one LF-delimited stdout frame");

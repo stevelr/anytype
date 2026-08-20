@@ -126,6 +126,7 @@ struct HttpFixture {
     arm_hang: Arc<AtomicBool>,
     release_hangs: Arc<AtomicBool>,
     hang_started: mpsc::Receiver<()>,
+    hang_cancelled: mpsc::Receiver<()>,
     accept_thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -141,6 +142,7 @@ impl HttpFixture {
         let release_hangs = Arc::new(AtomicBool::new(false));
         let hang_claimed = Arc::new(AtomicBool::new(false));
         let (hang_tx, hang_started) = mpsc::channel();
+        let (cancelled_tx, hang_cancelled) = mpsc::channel();
         let thread_stop = stop.clone();
         let thread_arm = arm_hang.clone();
         let thread_release = release_hangs.clone();
@@ -155,9 +157,10 @@ impl HttpFixture {
                         let release = thread_release.clone();
                         let claimed = hang_claimed.clone();
                         let started = hang_tx.clone();
+                        let cancelled = cancelled_tx.clone();
                         workers.push(thread::spawn(move || {
                             handle_http_connection(
-                                stream, &stop, &arm, &release, &claimed, &started,
+                                stream, &stop, &arm, &release, &claimed, &started, &cancelled,
                             );
                         }));
                     }
@@ -191,6 +194,7 @@ impl HttpFixture {
             arm_hang,
             release_hangs,
             hang_started,
+            hang_cancelled,
             accept_thread: Some(accept_thread),
         }
     }
@@ -203,6 +207,12 @@ impl HttpFixture {
 
     fn arm_hanging_request(&self) {
         self.arm_hang.store(true, Ordering::SeqCst);
+    }
+
+    fn wait_for_hanging_cancellation(&self) {
+        self.hang_cancelled
+            .recv_timeout(DEADLINE)
+            .expect("production closed the cancelled fixture request");
     }
 
     fn release_hanging_requests(&self) {
@@ -241,6 +251,7 @@ fn handle_http_connection(
     release_hangs: &AtomicBool,
     hang_claimed: &AtomicBool,
     hang_started: &mpsc::Sender<()>,
+    hang_cancelled: &mpsc::Sender<()>,
 ) {
     // BSD-derived platforms may retain the listener's nonblocking mode on an
     // accepted socket. Workers use bounded blocking I/O, so make that contract
@@ -290,8 +301,35 @@ fn handle_http_connection(
         && !hang_claimed.swap(true, Ordering::SeqCst)
     {
         let _ = hang_started.send(());
+        stream
+            .set_read_timeout(Some(POLL_INTERVAL))
+            .expect("HTTP fixture cancellation observation timeout");
+        let mut byte = [0_u8; 1];
         while !stop.load(Ordering::SeqCst) && !release_hangs.load(Ordering::SeqCst) {
-            thread::sleep(POLL_INTERVAL);
+            match stream.read(&mut byte) {
+                Ok(0) => {
+                    let _ = hang_cancelled.send(());
+                    return;
+                }
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    let _ = hang_cancelled.send(());
+                    return;
+                }
+                Err(error) => panic!("observe HTTP fixture cancellation: {error}"),
+            }
         }
         return;
     }
@@ -774,6 +812,7 @@ fn run_legacy_stdio_regression(read_only: bool) {
         "notifications/cancelled",
         json!({"requestId": 80, "reason": "bounded conformance cancellation"}),
     );
+    fixture.wait_for_hanging_cancellation();
     // With one runtime permit, this read cannot complete until cancellation
     // has released the hanging request's permit.
     let after_cancel = process.request(81, "resources/read", json!({"uri": RESOURCE_URI}));
@@ -984,6 +1023,7 @@ fn run_modern_stdio_acceptance(read_only: bool) {
         "notifications/cancelled",
         json!({"requestId": 80, "reason": "bounded modern cancellation"}),
     );
+    fixture.wait_for_hanging_cancellation();
     // With one runtime permit, this read cannot complete until cancellation
     // has released the hanging request's permit.
     let after_cancel = process.modern_request(
