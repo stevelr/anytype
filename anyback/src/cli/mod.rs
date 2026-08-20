@@ -122,10 +122,10 @@ fn spawn_import_cancel_signal_forwarder(
 #[derive(Subcommand, Debug)]
 #[command(next_display_order = None)]
 pub enum Commands {
-    /// Create a backup archive
+    /// Create a backup (requires Anytype CLI server and gRPC credentials)
     Create(BackupCreateArgs),
 
-    /// Restore objects from an archive
+    /// Restore objects (CLI server/gRPC credentials required unless --dry-run)
     Restore(RestoreApplyArgs),
 
     /// List archive contents
@@ -140,10 +140,10 @@ pub enum Commands {
     /// Extract one object from an archive
     Extract(ExtractArgs),
 
-    /// Export selected objects to an archive
+    /// Export objects (requires Anytype CLI server and gRPC credentials)
     Export(BackupCreateArgs),
 
-    /// Import objects from an archive
+    /// Import objects (CLI server/gRPC credentials required unless --dry-run)
     Import(RestoreApplyArgs),
 
     /// Interactive archive browser (TUI)

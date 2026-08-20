@@ -147,34 +147,83 @@ does not introduce a reverse `anytype-rpc` dependency on this crate.
 
 ## gRPC-only extensions
 
-The following public Rust features use gRPC because REST lacks the capability
-or equivalent fidelity. Some surrounding APIs also have REST variants; this
-list calls out only the additional gRPC behavior.
+The following capabilities need a running Anytype CLI server and gRPC
+credentials in the configured keystore. Some have lower-fidelity REST
+counterparts. The methods listed here execute gRPC or select it when the
+corresponding option is present.
 
-- **Files:** rich metadata list, search, and get; URL or rich-option uploads;
-  preload lifecycle; and direct-to-path legacy downloads. See `files().list`,
-  `files().search`, `files().get`, `FileUploadRequest`, `files().preload`, and
-  `files().discard_preload`.
-- **Chats:** cross-space discovery; chat-object text search; rich ID/name
-  lookup; default space-chat discovery; structured message blocks and
-  full-fidelity replies; unread mutations; and account-global reads. See the
-  direct `chats()` builders and `MessageBlock*` types.
-- **Chat events:** reconnecting multi-chat events, cross-chat previews,
-  subscription changes, and catch-up watermarks. See
-  `AnytypeClient::chat_stream` and `ChatStreamControl`.
-- **Spaces:** chat-space creation, permanent deletion, invitations, sharing,
-  and archived-object search, count, or deletion. See `create_chat_space`,
-  `delete_space`, `*_space_invite`, `*_space_sharing`, and `*_archived`.
-- **Backups:** space export as JSON, protobuf, or Markdown, with archive
-  selection. See `backup_space` and `BackupSpaceRequest`.
-- **Body blocks and discussions:** exact typed block reads and mutations, plus
-  discovery or creation of a page or note's derived discussion. See
-  `blocks().body`, `BodyRequest`, `BodyEditor`, and `attached_discussion`.
-- **Types and collections:** featured-property classification and canonical
-  direct collection membership. See `TypeRequest::classify_properties*`,
-  `observe_collection_membership`, and `collection_membership_page`.
-- **Processes:** import, export, and file-event subscriptions, including wait,
-  cancellation, and progress collection. See `ProcessWatcher`.
+### Connection and process primitives
+
+- `AnytypeClient::grpc_client` creates the authenticated low-level client, and
+  `AnytypeClient::ping_grpc` verifies that connection.
+- `ProcessWatcher::subscribe`, `wait_for_process`, `wait_for_generation`, and
+  `unsubscribe` observe import, export, and file processes over the session
+  event stream.
+
+### Files
+
+- `files().list(...).list()`, `files().search(...).search()`, and
+  `files().get(...).get()` return rich file-object metadata through gRPC.
+- `files().download(...).download()` is the legacy direct-to-path gRPC
+  download. `download_bytes`, `download_request`, and `metadata` use REST.
+- `FileUploadRequest::from_url`, `file_type`, `style`, `details`,
+  `created_in_context`, and `created_in_context_ref` select gRPC for the unified
+  upload. Plain path, byte, and reader uploads use REST.
+- `files().preload(...).preload()` and
+  `files().discard_preload(...).discard()` implement the preload lifecycle.
+
+### Chats and chat events
+
+- `list_chats()` without a space lists across spaces through gRPC.
+  `search_chats`, `search_chats_in`, `get_chat`, `resolve_chat_by_name`, and
+  `space_chat` provide gRPC discovery and rich object reads. A space-scoped
+  `list_chats_in(...).list()` uses REST.
+- The direct `ChatClient` message builders use gRPC: `send_text`, `edit_text`,
+  `toggle_reaction`, `add_message`, `edit_message`, `delete_message`,
+  `list_messages`, `get_messages`, `read_messages`, `unread_messages`, and
+  `read_all_account`. `SpaceChatsClient`, returned by `chats().in_space(...)`,
+  is the REST chat surface.
+- gRPC replies add structured `MessageBlock` values, per-user `ChatState`, and
+  message read, mention, synchronization, and unread-reaction flags. REST
+  replies omit those fields.
+- `resolve_chat_target`, `resolve_chat_ids`, and `resolve_message_id(s)` need
+  gRPC when they resolve names, default space chats, or order IDs. Exact IDs
+  with the required space context pass through without a gRPC request.
+- `AnytypeClient::chat_stream`, `ChatStreamBuilder`, and `ChatStreamControl`
+  provide reconnecting multi-chat events, cross-chat previews, dynamic
+  subscriptions, and catch-up watermarks through gRPC.
+
+### Spaces, backups, and archived objects
+
+- `create_chat_space` and `delete_space` create a chat workspace and
+  permanently delete a space through gRPC. Ordinary `new_space` creation uses
+  REST.
+- `list_space_invites`, `create_space_invite`, and `revoke_space_invite`
+  manage member and guest invitations through gRPC.
+- `enable_space_sharing` and `disable_space_sharing` change public sharing
+  through gRPC.
+- `list_archived`, `count_archived`, `count_archived_bounded`,
+  `delete_archived`, and `delete_all_archived` inspect or permanently remove
+  archived objects through gRPC.
+- `backup_space(...).backup()` exports a space as JSON, protobuf, or Markdown
+  and can include selected objects, nested objects, files, archived objects,
+  backlinks, and space metadata.
+
+### Body blocks, discussions, types, and collections
+
+- `blocks().body(...).fetch()` reads the exact typed block graph through gRPC.
+  `BodySnapshot::edit` returns a `BodyEditor`; its `create`, `append`, `update`,
+  `delete`, `move_block`, and `apply_all` methods execute verified gRPC
+  mutations.
+- `attached_discussion(...).get()` and `ensure()` combine an exact REST parent
+  preflight with gRPC object show, close, and optional discussion creation.
+  Both credential families are required.
+- `TypeRequest::classify_properties` and
+  `classify_properties_with_deadline` combine a direct REST type read with
+  gRPC source lists to distinguish featured and recommended properties.
+- `observe_collection_membership` and `collection_membership_page` combine
+  REST identity checks with bounded gRPC subscriptions to read canonical
+  direct collection membership.
 
 ### Overlapping file operations
 

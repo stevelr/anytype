@@ -44,6 +44,11 @@ deadline. Restore completion is correlated with the import process when Heart
 returns a collection identifier; ordinary object imports without one are
 bound to the dispatch generation.
 
+`anyr backup create|export` and non-dry-run `restore|import` require a running
+Anytype CLI server and gRPC credentials. Restore and import with `--dry-run`
+validate the local archive and resolve the destination space over HTTP without
+dispatching an import.
+
 ## Development
 
 Run the offline crate checks:

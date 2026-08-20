@@ -526,7 +526,10 @@ impl AnytypeClient {
         }
     }
 
-    /// Minimal authenticated gRPC ping (list apps).
+    /// Sends a minimal authenticated gRPC ping (list apps).
+    ///
+    /// This method requires an Anytype CLI server and gRPC credentials in the
+    /// configured keystore.
     pub async fn ping_grpc(&self) -> Result<()> {
         use anytype_rpc::{
             anytype::rpc::account::local_link::list_apps::Request as ListAppsRequest,

@@ -131,9 +131,8 @@ anyr --keystore file auth status</code></pre>
             <pre><code>anyr init-cli
 anyr auth status --pretty</code></pre>
             <p>
-              Commands marked
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>
-              need a healthy gRPC ping.
+              <strong>CLI + gRPC</strong> means a running Anytype CLI server and a healthy
+              authenticated gRPC ping.
             </p>
           </div>
         </div>
@@ -171,6 +170,15 @@ source ./anytype.env</code></pre>
             <pre><code>anyr init-cli --join "$INVITE_LINK"</code></pre>
           </div>
           <div class="entry">
+            <h3>Store supplied credentials</h3>
+            <pre><code>printf '%s\n' "$HTTP_TOKEN" | anyr auth set-http
+printf '%s\n' "$ACCOUNT_KEY" | anyr auth set-grpc --account-key</code></pre>
+            <p>
+              Both commands read the secret from standard input. The gRPC account key comes
+              from the Anytype CLI server account.
+            </p>
+          </div>
+          <div class="entry">
             <h3>Clear stored credentials</h3>
             <pre><code>anyr auth logout</code></pre>
           </div>
@@ -194,7 +202,7 @@ anyr space get "Work" --pretty</code></pre>
 anyr space create "Team Chat" --chat</code></pre>
             <p>
               <code>--chat</code>:
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
           <div class="entry">
@@ -206,7 +214,7 @@ anyr space create "Team Chat" --chat</code></pre>
             <pre><code>anyr space count-archived "Work"
 anyr space delete-archived "Work" --confirm</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
           <div class="entry">
@@ -214,7 +222,7 @@ anyr space delete-archived "Work" --confirm</code></pre>
             <pre><code>anyr space delete "Old Work" \
   --archive ./old-work.zip --confirm</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>
               for the backup and permanent deletion.
             </p>
           </div>
@@ -223,7 +231,7 @@ anyr space delete-archived "Work" --confirm</code></pre>
             <pre><code>anyr space delete "Old Work"</code></pre>
             <p>
               The prompt offers a backup, then requires the exact space name.
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
         </div>
@@ -310,7 +318,7 @@ anyr search --space "Work" --text "meeting notes" --table</code></pre>
     <section id="body">
       <h2>Body blocks and discussions</h2>
       <p>
-        <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+        <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
         Attached-discussion operations also use HTTP preflight. Object and block operands are
         exact IDs.
       </p>
@@ -410,8 +418,9 @@ JSON</code></pre>
     <section id="chats">
       <h2>Chats</h2>
       <p>
-        A chat name operand requires gRPC name resolution, even when the command itself can use
-        REST. Pass an exact chat ID to keep a REST-backed operation HTTP-only.
+        A chat name operand requires the Anytype CLI server and gRPC credentials for name
+        resolution, even when the command itself can use REST. Pass an exact chat ID to keep a
+        REST-backed operation HTTP-only.
       </p>
       <details open>
         <summary>Show commands</summary>
@@ -437,7 +446,7 @@ anyr chat create "Work" "Ops"</code></pre>
             <pre><code>anyr chat messages list "Work" "Ops" \
   --limit 50 --table</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
           <div class="entry">
@@ -447,7 +456,7 @@ anyr chat create "Work" "Ops"</code></pre>
             <p>
               This filters one bounded window. Use order-ID continuation to inspect older
               windows.
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
           <div class="entry">
@@ -475,9 +484,10 @@ anyr chat messages react "Work" "Ops" "$MESSAGE_ID" "👍"</code></pre>
             <pre><code>anyr chat list
 anyr chat get "Work" "Ops"
 anyr chat messages get "Work" "Ops" "$MESSAGE_ID"
+anyr chat messages delete "Work" "Ops" "$MESSAGE_ID"
 anyr chat unread "Work" "Ops" --after "$ORDER_ID"</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
               Cross-space or text-filtered chat lists, message list/get/delete,
               <code>unread</code>, <code>--blocks-json</code>, and multi-chat or
               preview listeners also select gRPC.
@@ -497,7 +507,7 @@ anyr chat unread "Work" "Ops" --after "$ORDER_ID"</code></pre>
             <pre><code>anyr file list "Personal" --file-type image \
   --size-gte 1048576 --name-contains report --table</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
               <code>file search</code> and <code>file get</code> use the same backend.
             </p>
           </div>
@@ -516,7 +526,7 @@ anyr chat unread "Work" "Ops" --after "$ORDER_ID"</code></pre>
             <pre><code>anyr file upload "Personal" --url https://example.com/logo.png \
   --file-type image --style embed</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
               On <code>file upload</code>, <code>--url</code>, <code>--file-type</code>,
               <code>--style</code>, <code>--details</code>, and creation-context options
               select gRPC. File preload and discard-preload also require it.
@@ -532,6 +542,19 @@ anyr chat unread "Work" "Ops" --after "$ORDER_ID"</code></pre>
             <p>
               <code>--width</code>
               selects the image variant whose headers are returned.
+            </p>
+          </div>
+          <div class="entry">
+            <h3>Update or delete a file object over REST</h3>
+            <pre><code>anyr file update "Personal" "$FILE_ID" --name report-final.pdf
+anyr file delete "Personal" "$FILE_ID" --permanent</code></pre>
+          </div>
+          <div class="entry">
+            <h3>Preload or discard a file</h3>
+            <pre><code>anyr file preload "Personal" --file ./draft.png --file-type image
+anyr file discard-preload "Personal" "$PRELOAD_ID"</code></pre>
+            <p>
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
         </div>
@@ -577,7 +600,7 @@ anyr property list "Work" --table</code></pre>
             <pre><code>anyr type update "Work" task --add-property status</code></pre>
             <p>
               <code>--add-property</code>:
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
               <code>--set-property</code> and <code>--clear-properties</code> remain
               REST-backed.
             </p>
@@ -627,7 +650,7 @@ anyr list remove "Work" "$LIST_ID" "$OBJECT_ID"</code></pre>
             <h3>Create a writer invitation</h3>
             <pre><code>anyr space invite create "Work" --writer</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
           <div class="entry">
@@ -635,7 +658,7 @@ anyr list remove "Work" "$LIST_ID" "$OBJECT_ID"</code></pre>
             <pre><code>anyr space invite show "Work"
 anyr space invite revoke "Work"</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
           <div class="entry">
@@ -643,7 +666,7 @@ anyr space invite revoke "Work"</code></pre>
             <pre><code>anyr space enable-sharing "Work"
 anyr space disable-sharing "Work"</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
         </div>
@@ -660,7 +683,7 @@ anyr space disable-sharing "Work"</code></pre>
             <pre><code>anyr backup create --space "Work" --dir ./backups</code></pre>
             <p>
               Add <code>--include-files</code> to embed file objects and binaries.
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
           <div class="entry">
@@ -668,7 +691,7 @@ anyr space disable-sharing "Work"</code></pre>
             <pre><code>anyr backup create --space "Work" \
   --dest ./backups/work.zip --include-files</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
           <div class="entry">
@@ -687,7 +710,7 @@ anyr backup manifest ./backups/work.zip --pretty</code></pre>
             <pre><code>anyr backup restore ./backups/work.zip \
   --space "Restored Work" --log restore.json</code></pre>
             <p>
-              <strong><a href="/reference/connections/">gRPC backend required</a></strong>.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
             </p>
           </div>
           <div class="entry">
@@ -715,9 +738,9 @@ anyr backup manifest ./backups/work.zip --pretty</code></pre>
             <h3>Run the MCP server</h3>
             <pre><code>anyr mcp</code></pre>
             <p>
-              The compact base catalog is HTTP-complete. The standard read-write
-              catalog and some optional toolsets require
-              <a href="/reference/connections/">gRPC access</a>.
+              The compact base catalog is HTTP-complete. The standard read-write catalog and
+              some optional toolsets require a running Anytype CLI server and
+              <a href="/reference/connections/">gRPC credentials</a>.
             </p>
           </div>
           <div class="entry">

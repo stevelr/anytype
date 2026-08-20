@@ -34,7 +34,7 @@ anyr space list -t     # output as table (-t/--table)
 # Create a chat space
 anyr space create "Team Chat" --chat
 
-# Create and inspect space invitations (gRPC credentials required)
+# Create and inspect invitations (Anytype CLI server and gRPC credentials required)
 anyr space invite create "Work" --writer
 anyr space invite show "Work"
 anyr space invite revoke "Work"
@@ -55,7 +55,7 @@ anyr space delete-archived "Work" --confirm
 # List Pages in space "Work"
 anyr object list "Work" --type page -t
 
-# List Files in a space (requires gRPC credentials)
+# List files (Anytype CLI server and gRPC credentials required)
 anyr file list "Personal" -t
 
 # Download/upload file bytes
@@ -65,16 +65,16 @@ anyr file upload "Personal" -f ./path/to/file.png
 
 # Create a chat in a regular space
 anyr chat create "Work" "Ops"
-# Get chat messages from a chat in a space (gRPC credentials required)
+# Get messages (Anytype CLI server and gRPC credentials required)
 anyr chat messages list "Work" "Ops" -t
 # Post a message over REST by using the exact chat ID
 anyr chat messages send "Work" <CHAT_ID> --text "hello world?"
 
-# Discover or attach the discussion derived from an exact page or note
+# Discover or attach a derived discussion (HTTP plus CLI/gRPC required)
 anyr object discussion get "Work" OBJECT_ID
 anyr object discussion attach "Work" OBJECT_ID
 
-# Inspect a page body in exact document order
+# Inspect a page body (Anytype CLI server and gRPC credentials required)
 anyr body list "Work" OBJECT_ID -t
 anyr body show "Work" OBJECT_ID BLOCK_ID --pretty
 
@@ -83,7 +83,7 @@ anyr md get "Work" OBJECT_ID -o page.md
 anyr md update -i page.md
 anyr md edit "Work" OBJECT_ID
 
-# Backup and archive workflows (the former anyback commands)
+# Backup and archive workflows; create and restore require CLI/gRPC
 anyr backup create --space "Work" --dir ./backups
 anyr backup list ./backups/ARCHIVE.zip
 anyr backup restore ./backups/ARCHIVE.zip --space "Work"
@@ -115,7 +115,52 @@ is intentionally top-level; `anyr mcp --version` is rejected with guidance to
 use `anyr --version`. The archive inspector is included in the default anyr
 build.
 
+## Command map
+
+Most commands use the local HTTP API. Entries marked **CLI + gRPC** require a
+running Anytype CLI server, its gRPC endpoint, and gRPC credentials in the
+selected keystore. `anyr init-cli` provisions both HTTP and gRPC credentials
+from that server, so it does not require them to be stored first.
+
+- `auth`: `login`, `logout`, `status`, `set-http`, `set-grpc`, and
+  `find-grpc`.
+- `backup`: `create` and `export` are **CLI + gRPC**. `restore` and `import`
+  are **CLI + gRPC** unless `--dry-run` is used. `list`, `manifest`, `diff`,
+  `extract`, and `inspect` read local archives.
+- `body`: `list`, `show`, `create`, `update`, `delete`, and `move` are
+  **CLI + gRPC**.
+- `chat`: transport depends on the operation and `--transport`; see
+  [Chat transport](#chat-transport).
+- `completions`: generates Bash, Fish, PowerShell, or Zsh completions locally.
+- `file`: `list`, `search`, `get`, `preload`, and `discard-preload` are
+  **CLI + gRPC**. `download`, `metadata`, `update`, and `delete` use HTTP.
+  `upload` uses HTTP unless one of the gRPC-only upload options listed below
+  is present.
+- `init-cli`: initializes credentials from a running Anytype CLI server and
+  optionally joins a space or writes a sourceable environment file.
+- `list`: `objects`, `views`, `add`, and `remove` use HTTP list and collection
+  endpoints.
+- `mcp`: runs the embedded server or its `init` and `check` maintenance
+  aliases. Required transports depend on the configured MCP catalog.
+- `md`: `get`, `update`, and `edit` use the HTTP object API.
+- `member`: `list` and `get` use HTTP.
+- `object`: `list`, `get`, `link`, `create`, `update`, and `delete` use HTTP.
+  `discussion get|attach` require both HTTP and **CLI + gRPC**.
+- `property`: `list`, `get`, `create`, `update`, and `delete` use HTTP.
+- `search`: searches globally or within one space over HTTP.
+- `space`: `list`, `get`, regular `create`, and `update` use HTTP. `create
+  --chat`, `count-archived`, `delete-archived`, `delete`, `invite`,
+  `enable-sharing`, and `disable-sharing` are **CLI + gRPC**.
+- `tag`: `list`, `get`, `create`, `update`, and `delete` use HTTP.
+- `template`: `list` and `get` use HTTP.
+- `type`: `list`, `get`, `create`, `update`, and `delete` use HTTP. The
+  `type update --add-property` read phase additionally requires **CLI + gRPC**.
+- `view`: `objects` uses HTTP.
+
 ### Attached discussions and typed body blocks
+
+These commands require HTTP access plus a running Anytype CLI server and gRPC
+credentials.
 
 `anyr object discussion get SPACE OBJECT_ID` returns either an `absent` state
 or the verified derived discussion ID for one exact page or note. `attach`
@@ -195,7 +240,7 @@ These options apply to most commands.
     </tr>
     <tr>
       <td><code>--grpc URL</code></td>
-      <td>gRPC endpoint. Default: <code>http://127.0.0.1:31010</code></td>
+      <td>Anytype CLI server gRPC endpoint. Default: <code>http://127.0.0.1:31010</code></td>
       <td>ANYTYPE_GRPC_ENDPOINT</td>
     </tr>
     <tr>
@@ -279,6 +324,8 @@ anyr search --space "Work" --type task --text customer -t
 
 **Archived object cleanup**
 
+These commands require a running Anytype CLI server and gRPC credentials.
+
 ```sh
 space="Work"
 anyr space count-archived "$space"
@@ -302,6 +349,9 @@ done
 
 **Find files**
 
+File list, search, and get require a running Anytype CLI server and gRPC
+credentials.
+
 ```sh
 # list images in space Personal, larger than 1MB with a name containing "report"
 anyr file list "Personal" --file-type image --size-gte 1048576 --name-contains report -t
@@ -317,7 +367,8 @@ anyr file search "Personal" --sort last_modified_date --desc -t
 **Upload files (unified builder picks REST or gRPC automatically)**
 
 A plain path or stdin upload uses REST; `--url`, `--file-type`, `--style`,
-`--details`, or a creation-context option promotes the request to gRPC.
+`--details`, or a creation-context option selects gRPC and requires a running
+Anytype CLI server plus gRPC credentials.
 
 ```sh
 # REST: a plain path (optionally with an explicit --mime)
@@ -335,7 +386,10 @@ anyr file upload "Personal" --url https://example.com/logo.png \
 `--http` on upload is a deprecated no-op; it errors when combined with a
 gRPC-only option instead of silently dropping it.
 
-**Preload a file for later placement (gRPC)**
+**Preload a file for later placement**
+
+Preload and discard-preload require a running Anytype CLI server and gRPC
+credentials.
 
 ```sh
 # preload returns a preload file id; source is either --file or --url
@@ -391,7 +445,7 @@ anyr view objects --view All "$space" "$query_or_collection_id" -t
 anyr view objects --view All "Work" Task -t
 
 # show columns: Name, Created By, and Status (note: column names are specified by property_key)
-anyr view objects --view All "Work" Task --cols name,creator,status
+anyr view objects --view All "Work" Task --columns name,creator,status
 
 # get tasks from view ByProject in json, with all properties
 anyr view objects --view ByProject "Work" Task --json
@@ -418,7 +472,7 @@ anyr property update "Work" Status --key task_status
 **Update a type's property list**
 
 ```sh
-# merge a property into the exact non-featured list (requires HTTP and gRPC)
+# merge a property into the exact non-featured list (HTTP plus CLI/gRPC required)
 anyr type update "Work" Task --add-property Status
 
 # replace the complete non-featured property list (KEY:FORMAT:NAME, repeatable)
@@ -444,7 +498,9 @@ If you have a list or grid formatted view, you can use `view objects` to list th
 
 Table listing features for `view objects`:
 
-- Table listing defaults to name column only. Specify columns in table output with `--cols/--columns` and a comma-separated list of property keys. Example `--cols name,creator,created_date,status`
+- Table listing defaults to the name column only. Specify columns in table
+  output with `--columns` and a comma-separated list of property keys. Example:
+  `--columns name,creator,created_date,status`.
 - Format dates with strftime format: `--date-format` or `ANYTYPE_DATE_FORMAT`, defaults to `%Y-%m-%d %H:%M:%S`.
 - Members names are displayed instead of member id.
 
@@ -466,15 +522,17 @@ Chat commands accept `anyr chat --transport auto|rest|grpc <command>` (default
   lookup requires gRPC, message `list`/`get`/`delete` report their gRPC
   requirement, and `--blocks-json` cannot be combined with it).
 - `grpc` selects the gRPC backend, which carries the full-fidelity 0.4 message
-  reply shape. REST-only operations such as message `search` reject it.
+  reply shape. It requires a running Anytype CLI server and gRPC credentials.
+  REST-only operations such as message `search` reject it.
 
 The resolved backend is reported only in verbose diagnostics (`-v`), never
 injected into the JSON payload. Because REST replies intentionally contain fewer
 fields (no `ChatState` or structured blocks), pick `--transport grpc` when a
 script needs the full reply shape.
 
-A chat name still needs gRPC name resolution. Pass an exact chat ID when a
-REST-backed command must remain HTTP-only.
+A chat name still needs a running Anytype CLI server and gRPC credentials for
+name resolution. Pass an exact chat ID when a REST-backed command must remain
+HTTP-only.
 
 **Chat listing, creation, and messages**
 

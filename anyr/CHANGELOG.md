@@ -30,9 +30,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Changed
 
 - Expand the documentation site with backup, MCP, connection, and keystore
-  guides. The quick reference now documents endpoint variables and marks
-  commands that require a gRPC backend; README and quick-reference examples
-  use the current command syntax.
+  guides. The README, quick reference, embedded help, and `anyr` skill now use
+  current command syntax and identify commands or options that require a
+  running Anytype CLI server and gRPC credentials.
 - Build the Linux and macOS release archives from the repository's pinned Nix
   flake outputs. Linux packages use the fully static musl binary; macOS
   packages use the portable flake binary. The macOS binary is signed and

@@ -59,7 +59,7 @@ pub struct Cli {
     #[arg(short = 'u', long, env = "ANYTYPE_URL")]
     pub url: Option<String>,
 
-    /// gRPC endpoint URL (overrides defaults)
+    /// Anytype CLI server gRPC endpoint URL (overrides defaults)
     #[arg(long, env = "ANYTYPE_GRPC_ENDPOINT")]
     pub grpc: Option<String>,
 
@@ -131,11 +131,11 @@ pub enum Commands {
     /// Authentication commands
     Auth(AuthArgs),
 
-    /// Chat commands (gRPC)
+    /// Chat commands with automatic REST/gRPC transport selection
     #[command(alias = "chats")]
     Chat(ChatArgs),
 
-    /// Typed document body block diagnostics and mutations (gRPC)
+    /// Typed body block operations (requires Anytype CLI server and gRPC credentials)
     Body(BodyArgs),
 
     /// Space list and CRUD operations
@@ -308,7 +308,7 @@ pub enum SpaceCommands {
         #[arg(long)]
         description: Option<String>,
 
-        /// create a chat space instead of a regular space
+        /// create a chat space (requires Anytype CLI server and gRPC credentials)
         #[arg(long)]
         chat: bool,
     },
@@ -324,12 +324,12 @@ pub enum SpaceCommands {
         #[arg(long)]
         description: Option<String>,
     },
-    /// Count archived objects in a space
+    /// Count archived objects (requires Anytype CLI server and gRPC credentials)
     CountArchived {
         /// space id or name
         space: String,
     },
-    /// Permanently delete all archived objects in a space
+    /// Permanently delete archived objects (requires Anytype CLI server and gRPC credentials)
     DeleteArchived {
         /// space id or name
         space: String,
@@ -339,7 +339,7 @@ pub enum SpaceCommands {
         confirm: bool,
     },
 
-    /// Permanently delete a space after guarded backup and confirmation
+    /// Permanently delete a space (requires Anytype CLI server and gRPC credentials)
     Delete {
         /// space id or name
         space: String,
@@ -357,16 +357,16 @@ pub enum SpaceCommands {
         confirm: bool,
     },
 
-    /// Manage space invitations
+    /// Manage invitations (requires Anytype CLI server and gRPC credentials)
     Invite(InviteArgs),
 
-    /// Enable sharing for a space
+    /// Enable sharing (requires Anytype CLI server and gRPC credentials)
     EnableSharing {
         /// space id or name
         space: String,
     },
 
-    /// Disable sharing for a space
+    /// Disable sharing (requires Anytype CLI server and gRPC credentials)
     DisableSharing {
         /// space id or name
         space: String,
@@ -596,6 +596,7 @@ pub struct FileArgs {
 #[derive(Subcommand, Debug)]
 #[command(next_display_order = None)]
 pub enum FileCommands {
+    /// List rich file objects (requires Anytype CLI server and gRPC credentials)
     List {
         /// space id or name
         space: String,
@@ -609,6 +610,7 @@ pub enum FileCommands {
         #[command(flatten)]
         filter: FilterArgs,
     },
+    /// Search rich file objects (requires Anytype CLI server and gRPC credentials)
     Search {
         /// space id or name
         space: String,
@@ -634,6 +636,7 @@ pub enum FileCommands {
         #[command(flatten)]
         filter: FilterArgs,
     },
+    /// Get rich file metadata (requires Anytype CLI server and gRPC credentials)
     Get {
         /// space id or name
         space: String,
@@ -767,7 +770,7 @@ pub enum FileCommands {
         #[arg(short = 'f', long, value_name = "FILE")]
         file: Option<PathBuf>,
 
-        /// remote URL to fetch and upload (selects the gRPC backend)
+        /// remote URL to fetch and upload (requires Anytype CLI server and gRPC credentials)
         #[arg(long, value_name = "URL")]
         url: Option<String>,
 
@@ -783,23 +786,23 @@ pub enum FileCommands {
         #[arg(long, value_name = "MIME")]
         mime: Option<String>,
 
-        /// file type hint (selects the gRPC backend)
+        /// file type hint (requires Anytype CLI server and gRPC credentials)
         #[arg(long, value_enum)]
         file_type: Option<FileTypeArg>,
 
-        /// file style: auto, link, or embed (selects the gRPC backend)
+        /// file style: auto, link, or embed (requires Anytype CLI server and gRPC credentials)
         #[arg(long, value_enum)]
         style: Option<FileStyleArg>,
 
-        /// extra object details as JSON or `@FILE` (selects the gRPC backend)
+        /// extra details as JSON or `@FILE` (requires Anytype CLI server and gRPC credentials)
         #[arg(long, value_name = "JSON_OR_@FILE")]
         details: Option<String>,
 
-        /// object id the file is created in context of (selects the gRPC backend)
+        /// containing object id (requires Anytype CLI server and gRPC credentials)
         #[arg(long, value_name = "OBJECT_ID")]
         created_in_context: Option<String>,
 
-        /// block id the file is created in context of (selects the gRPC backend)
+        /// containing block id (requires Anytype CLI server and gRPC credentials)
         #[arg(long, value_name = "BLOCK_ID")]
         created_in_context_ref: Option<String>,
 
@@ -807,7 +810,7 @@ pub enum FileCommands {
         #[arg(long)]
         http: bool,
     },
-    /// Preload a file for a later object (gRPC), returning a preload id.
+    /// Preload a file (requires Anytype CLI server and gRPC credentials)
     #[command(
         group = ArgGroup::new("preload_source")
             .args(["file", "url"])
@@ -838,7 +841,7 @@ pub enum FileCommands {
         #[arg(long, value_name = "BLOCK_ID")]
         created_in_context_ref: Option<String>,
     },
-    /// Discard a previously preloaded file (gRPC).
+    /// Discard a preload (requires Anytype CLI server and gRPC credentials)
     DiscardPreload {
         /// space id or name
         space: String,
@@ -981,7 +984,7 @@ pub enum ObjectCommands {
         /// id of object to delete
         object_id: String,
     },
-    /// Discover or attach the discussion derived from an exact page or note
+    /// Derived discussion operations (require HTTP plus CLI server/gRPC credentials)
     Discussion(ObjectDiscussionArgs),
 }
 
@@ -1069,7 +1072,7 @@ pub enum TypeCommands {
         #[arg(long, value_enum)]
         layout: Option<TypeLayoutArg>,
 
-        /// add property to the exact non-featured list (requires HTTP and gRPC)
+        /// add property to the exact list (requires HTTP plus CLI server/gRPC credentials)
         #[arg(long = "add-property", value_name = "PROP_NAME_OR_ID")]
         add_properties: Vec<String>,
 
@@ -1448,9 +1451,7 @@ pub struct ListArgs {
 
 #[derive(Args, Debug)]
 pub struct ChatArgs {
-    /// transport policy for chat operations: auto (per-operation policy),
-    /// rest (reject gRPC-only operations/options), or grpc (reject REST-only
-    /// operations/options)
+    /// transport policy: grpc requires an Anytype CLI server and gRPC credentials
     #[arg(long, value_enum, default_value = "auto")]
     pub transport: TransportArg,
 
@@ -1461,13 +1462,13 @@ pub struct ChatArgs {
 #[derive(Subcommand, Debug)]
 #[command(next_display_order = None)]
 pub enum ChatCommands {
-    /// List chats
+    /// List chats; cross-space and --text forms require CLI server/gRPC credentials
     List {
         /// space id or name (optional)
         #[arg(long)]
         space: Option<String>,
 
-        /// search text (name/title)
+        /// search text (requires Anytype CLI server and gRPC credentials)
         #[arg(long)]
         text: Option<String>,
 
@@ -1496,12 +1497,12 @@ pub enum ChatCommands {
         icon_file: Option<String>,
     },
 
-    /// Get chat object
+    /// Get a rich chat object (requires Anytype CLI server and gRPC credentials)
     Get {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
     },
 
@@ -1514,7 +1515,7 @@ pub enum ChatCommands {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
 
         /// read type (messages or mentions)
@@ -1539,7 +1540,7 @@ pub enum ChatCommands {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
 
         /// mark reactions read through this order id
@@ -1552,16 +1553,16 @@ pub enum ChatCommands {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
     },
 
-    /// Mark messages as unread
+    /// Mark messages unread (requires Anytype CLI server and gRPC credentials)
     Unread {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
 
         /// unread type (messages or mentions)
@@ -1573,21 +1574,21 @@ pub enum ChatCommands {
         after: Option<String>,
     },
 
-    /// Listen for new chat messages
+    /// Listen for messages; some forms require CLI server/gRPC credentials
     Listen {
-        /// chat id or name/title (repeatable)
+        /// chat id or name; names or multiple values require CLI server/gRPC credentials
         #[arg(long = "chat")]
         chats: Vec<String>,
 
-        /// space id or name (required when chat is name/title unless chat is a space name/id)
+        /// REST space scope; omitting it requires CLI server/gRPC credentials
         #[arg(long)]
         space: Option<String>,
 
-        /// preload last N messages per chat before streaming
+        /// preload history (requires Anytype CLI server and gRPC credentials)
         #[arg(long)]
         include_history: Option<usize>,
 
-        /// start watermark for preload/listing
+        /// start gRPC watermark (requires Anytype CLI server and gRPC credentials)
         #[arg(long)]
         after: Option<String>,
 
@@ -1603,11 +1604,11 @@ pub enum ChatCommands {
         #[arg(long)]
         heartbeat: Option<u32>,
 
-        /// (gRPC) subscribe to cross-chat message previews
+        /// subscribe to cross-chat previews (requires Anytype CLI server and gRPC credentials)
         #[arg(long)]
         previews: bool,
 
-        /// (gRPC) event buffer capacity
+        /// gRPC event buffer capacity (requires Anytype CLI server and gRPC credentials)
         #[arg(long)]
         buffer: Option<usize>,
     },
@@ -1622,12 +1623,12 @@ pub struct ChatMessagesArgs {
 #[derive(Subcommand, Debug)]
 #[command(next_display_order = None)]
 pub enum ChatMessagesCommands {
-    /// List messages for a chat
+    /// List full-fidelity messages (requires Anytype CLI server and gRPC credentials)
     List {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
 
         /// show messages after order id
@@ -1651,12 +1652,12 @@ pub enum ChatMessagesCommands {
         unread_only: Option<ChatReadTypeArg>,
     },
 
-    /// Get messages by id
+    /// Get messages by id (requires Anytype CLI server and gRPC credentials)
     Get {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
 
         /// message ids or order ids
@@ -1669,7 +1670,7 @@ pub enum ChatMessagesCommands {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
 
         /// message text (overrides positional TEXT)
@@ -1700,7 +1701,7 @@ pub enum ChatMessagesCommands {
         #[arg(long)]
         reply_to: Option<String>,
 
-        /// structured message blocks as a JSON array (@file, @-, or -); requires gRPC
+        /// structured blocks (@file, @-, or -); requires CLI server and gRPC credentials
         #[arg(long)]
         blocks_json: Option<String>,
 
@@ -1714,7 +1715,7 @@ pub enum ChatMessagesCommands {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
 
         /// message id or order id
@@ -1740,17 +1741,17 @@ pub enum ChatMessagesCommands {
         #[arg(long)]
         content_json: Option<String>,
 
-        /// structured message blocks as a JSON array (@file, @-, or -); requires gRPC
+        /// structured blocks (@file, @-, or -); requires CLI server and gRPC credentials
         #[arg(long)]
         blocks_json: Option<String>,
     },
 
-    /// Delete a message
+    /// Delete a message (requires Anytype CLI server and gRPC credentials)
     Delete {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
 
         /// message id or order id
@@ -1762,7 +1763,7 @@ pub enum ChatMessagesCommands {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
 
         /// full-text search query
@@ -1777,7 +1778,7 @@ pub enum ChatMessagesCommands {
         /// space id or name
         space: String,
 
-        /// chat id or name/title
+        /// chat id or name/title (names require CLI server/gRPC credentials)
         chat: String,
 
         /// message id or order id

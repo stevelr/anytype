@@ -225,7 +225,7 @@ pub struct ChatStreamControl {
 }
 
 impl ChatStreamControl {
-    /// Subscribe to a chat while the stream is running.
+    /// Subscribes to a chat through the running gRPC stream worker.
     pub async fn subscribe_chat(&self, chat_id: impl Into<String>) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let message = ControlMessage::SubscribeChat {
@@ -243,7 +243,7 @@ impl ChatStreamControl {
         })?
     }
 
-    /// Unsubscribe from a chat while the stream is running.
+    /// Unsubscribes from a chat through the running gRPC stream worker.
     pub async fn unsubscribe_chat(&self, chat_id: impl Into<String>) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let message = ControlMessage::UnsubscribeChat {
@@ -261,7 +261,7 @@ impl ChatStreamControl {
         })?
     }
 
-    /// Shut down the chat stream worker.
+    /// Shuts down the gRPC chat stream worker.
     pub async fn shutdown(&self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let message = ControlMessage::Shutdown { respond_to: tx };

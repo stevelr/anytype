@@ -31,9 +31,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Changed
 
 - Move the keystore guide to the documentation site and link it from the crate
-  README. Public builders and terminal methods now state when they require a
-  gRPC backend, and the HTTP/gRPC inventory reflects the current transport
-  split.
+  README. Public builders and terminal methods state when they require a gRPC
+  backend, and the HTTP/gRPC inventory itemizes the current method-level
+  transport split.
 - `KeyStore` now keeps every credential for a service (HTTP token, gRPC
   account id, account key, session token) in a single keystore entry
   (`user = "credentials"`, a JSON document) instead of one entry per

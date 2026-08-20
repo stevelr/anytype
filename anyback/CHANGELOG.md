@@ -12,6 +12,8 @@
 
 ### Changed
 
+- Mark the embedded create, export, restore, and import help with their gRPC
+  requirements; dry-run restore and import remain HTTP-only preflight.
 - Move backup and restore command usage to the documentation site. The crate
   README now describes the embedded library and implementation boundary and
   directs users to `anyr backup`.

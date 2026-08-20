@@ -787,7 +787,7 @@ impl<'a> ChatClient<'a> {
         }
     }
 
-    /// Mark every chat known to the current Heart session as read.
+    /// Marks every chat known to the current Heart session as read through gRPC.
     ///
     /// `space_id` is validated for compatibility but is not sent on the wire
     /// and does not scope the mutation. Use [`Self::read_all_account`] to make
