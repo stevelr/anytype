@@ -4,7 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased]
+## 0.5.0
+
+Highlights:
+
+- Unified binary `anyr` combines cli, backup/restore, editor hooks, archive inspection, and MCP server.
+- New MCP server and agent skills
+- Simpler setup and authentication with headless cli server with `anyr init-cli`.
+- Uses HTTP/REST backend and, if available, uses gRPC backend for additional file, chat, and block-level capabilities.
+
+Links:
+
+- [Online documentation](https://docs.anytype-toolbox.org/)
+- [anyr cli quick reference](https://docs.anytype-toolbox.org/cli/quick-reference/)
+- [Rust api docs](https://crates.io/crates/anytype)
+- [Binary downloads and install scripts](https://github.com/stevelr/anytype/releases)
+- [Source](https://github.com/stevelr/anytype) (Apache 2.0 License)
+- [Agent skills](https://github.com/stevelr/anytype/tree/main/skills)
 
 ### Added
 

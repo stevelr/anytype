@@ -7,10 +7,10 @@
 name = "anyr"
 version.workspace = true
 authors.workspace = true
-categories = ["api-bindings"]
+categories = ["command-line-utilities"]
 edition.workspace = true
 homepage.workspace = true
-keywords = ["anytype", "cli"]
+keywords = ["anytype", "cli", "automation", "knowledge-base", "mcp"]
 license.workspace = true
 publish = true
 readme = "README.md"

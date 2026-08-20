@@ -15,19 +15,6 @@ endblock title %} {% block content %}
     </p>
   </header>
 
-  <aside class="warning">
-    <strong>High-impact commands:</strong> <code>space delete</code> removes a space
-    permanently after confirmation. Its interactive flow offers a backup; automation must pass
-    <code>--archive</code> or
-    <code>--skip-archive</code>.
-    <code>space delete-archived</code>
-    permanently removes every archived object in the selected space.
-    <code>space enable-sharing</code>
-    exposes a space through its public sharing controls.
-    <code>body delete</code>
-    removes the named block and its descendants after checking the expected subtree size.
-  </aside>
-
   <div class="quickref-nav" aria-label="Quick-reference contents">
     <h2>Contents</h2>
     <ul>
@@ -105,8 +92,8 @@ anyr chat messages send --help</code></pre>
 anyr --url http://127.0.0.1:31012 space list</code></pre>
             <p>
               Without either selector, <code>anyr</code> uses
-              <code>http://127.0.0.1:31012</code> when the selected keystore
-              contains gRPC credentials; otherwise it uses
+              <code>http://127.0.0.1:31012</code> when the selected keystore contains gRPC
+              credentials; otherwise it uses
               <code>http://127.0.0.1:31009</code>.
             </p>
           </div>
@@ -331,8 +318,8 @@ anyr search --space "Work" --text "meeting notes" --table</code></pre>
 anyr object discussion attach "Work" "$OBJECT_ID" --pretty</code></pre>
             <p>
               <code>get</code> returns an <code>absent</code> or <code>attached</code>
-              state. <code>attach</code> creates the derived discussion when absent and
-              returns the verified discussion ID.
+              state. <code>attach</code> creates the derived discussion when absent and returns
+              the verified discussion ID.
             </p>
           </div>
           <div class="entry">
@@ -340,8 +327,8 @@ anyr object discussion attach "Work" "$OBJECT_ID" --pretty</code></pre>
             <pre><code>anyr body list "Work" "$OBJECT_ID" --table
 anyr body show "Work" "$OBJECT_ID" "$BLOCK_ID" --pretty</code></pre>
             <p>
-              List output preserves document order and reports each block's parent and
-              sibling position.
+              List output preserves document order and reports each block's parent and sibling
+              position.
             </p>
           </div>
           <div class="entry">
@@ -360,8 +347,8 @@ JSON</code></pre>
             <pre><code>anyr body update "Work" "$OBJECT_ID" "$BLOCK_ID" --change \
   '{"kind":"text","text":"Checked","marks":[]}'</code></pre>
             <p>
-              Changes cover text and marks, style, checkbox state, colors, callout
-              icons, embeds, link appearance, and alignment.
+              Changes cover text and marks, style, checkbox state, colors, callout icons,
+              embeds, link appearance, and alignment.
             </p>
           </div>
           <div class="entry">
@@ -378,8 +365,8 @@ JSON</code></pre>
             <pre><code>anyr body delete "Work" "$OBJECT_ID" "$BLOCK_ID" \
   --expected-subtree-blocks 1 --confirm</code></pre>
             <p>
-              The command rereads the body and refuses deletion when the current
-              subtree size differs from the supplied count.
+              The command rereads the body and refuses deletion when the current subtree size
+              differs from the supplied count.
             </p>
           </div>
         </div>
@@ -489,8 +476,8 @@ anyr chat unread "Work" "Ops" --after "$ORDER_ID"</code></pre>
             <p>
               <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
               Cross-space or text-filtered chat lists, message list/get/delete,
-              <code>unread</code>, <code>--blocks-json</code>, and multi-chat or
-              preview listeners also select gRPC.
+              <code>unread</code>, <code>--blocks-json</code>, and multi-chat or preview
+              listeners also select gRPC.
             </p>
           </div>
         </div>
@@ -526,10 +513,10 @@ anyr chat unread "Work" "Ops" --after "$ORDER_ID"</code></pre>
             <pre><code>anyr file upload "Personal" --url https://example.com/logo.png \
   --file-type image --style embed</code></pre>
             <p>
-              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>.
-              On <code>file upload</code>, <code>--url</code>, <code>--file-type</code>,
-              <code>--style</code>, <code>--details</code>, and creation-context options
-              select gRPC. File preload and discard-preload also require it.
+              <strong><a href="/reference/connections/">CLI + gRPC required</a></strong>. On
+              <code>file upload</code>, <code>--url</code>, <code>--file-type</code>,
+              <code>--style</code>, <code>--details</code>, and creation-context options select
+              gRPC. File preload and discard-preload also require it.
             </p>
           </div>
           <div class="entry">
@@ -703,7 +690,9 @@ anyr backup manifest ./backups/work.zip --pretty</code></pre>
             <h3>Validate a restore</h3>
             <pre><code>anyr backup restore ./backups/work.zip \
   --space "Restored Work" --dry-run</code></pre>
-            <p>The dry run reads the archive locally and resolves the destination over HTTP.</p>
+            <p>
+              The dry run reads the archive locally and resolves the destination over HTTP.
+            </p>
           </div>
           <div class="entry">
             <h3>Restore into an existing space</h3>

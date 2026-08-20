@@ -1,7 +1,6 @@
 # Anytype Toolbox
 
-Automate your Anytype workspace from the terminal, scripts, an external editor,
-or an AI client.
+Automate Anytype with anyr CLI, external editor, or MCP server.
 
 The unified binary `anyr` can manage spaces and objects, work with files and chats,
 edit documents in Markdown, export and restore spaces, and run a workflow-oriented MCP server.
