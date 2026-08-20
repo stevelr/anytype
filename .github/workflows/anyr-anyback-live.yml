@@ -190,7 +190,7 @@ jobs:
       # evidence rather than a secret-exposure risk.
       - name: Retain bounded gate output on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: anyr-anyback-live-gate-output
           path: ${{ runner.temp }}/anyr-anyback-gate-output.log
@@ -214,7 +214,7 @@ jobs:
 
       - name: Retain bounded server evidence on failure
         if: ${{ failure() && env.ANYBACK_HEADLESS_REDACTED_LOG_ARTIFACT != '' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: anyr-anyback-live-server-log
           path: ${{ env.ANYBACK_HEADLESS_REDACTED_LOG_ARTIFACT }}

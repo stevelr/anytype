@@ -49,7 +49,7 @@ jobs:
     needs: preflight
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain (from rust-toolchain.toml)
@@ -139,7 +139,7 @@ jobs:
       # credentials are per-run throwaways.
       - name: Retain bounded gate output on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: anytype-api-gate-output-${{ github.job }}
           path: ${{ runner.temp }}/anytype-api-gate-output.log
@@ -188,7 +188,7 @@ jobs:
           printf 'ANYTYPE_API_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
       - name: Retain bounded reviewed server evidence on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: anytype-api-required-server-log
           path: ${{ env.ANYTYPE_API_LIVE_FAILURE_EVIDENCE }}
@@ -256,7 +256,7 @@ jobs:
           trap - EXIT
       - name: Retain bounded gate output on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: anytype-api-account-global-output
           path: ${{ runner.temp }}/anytype-api-account-global-output.log
@@ -275,7 +275,7 @@ jobs:
           fi
       - name: Retain bounded reviewed server evidence on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: anytype-api-account-global-server-log
           path: ${{ runner.temp }}/anytype-api-account-global-reviewed.log
@@ -358,7 +358,7 @@ jobs:
       # credentials are per-run throwaways.
       - name: Retain bounded gate output on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: anytype-api-gate-output-${{ github.job }}
           path: ${{ runner.temp }}/anytype-api-gate-output.log
@@ -407,7 +407,7 @@ jobs:
           printf 'ANYTYPE_API_LIVE_FAILURE_EVIDENCE=%s\n' "$artifact" >> "$GITHUB_ENV"
       - name: Retain bounded reviewed server evidence on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: anytype-api-soak-server-log
           path: ${{ env.ANYTYPE_API_LIVE_FAILURE_EVIDENCE }}
