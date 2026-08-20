@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## 0.5.0
+## 0.5.1
 
 Highlights:
 
@@ -21,6 +21,14 @@ Links:
 - [Binary downloads and install scripts](https://github.com/stevelr/anytype/releases)
 - [Source](https://github.com/stevelr/anytype) (Apache 2.0 License)
 - [Agent skills](https://github.com/stevelr/anytype/tree/main/skills)
+
+### Changes
+
+0.5.0..0.5.1 patch release:
+
+- Fixes unit tests and github workflows. No functionality changes.
+
+## 0.5.0
 
 ### Added
 
