@@ -19,6 +19,8 @@ Options:
   --identifier ID          Code-signing identifier (default: com.stevelr.anyr)
   --keychain PATH          Keychain containing the identity (default: user default)
   --repo OWNER/REPO        GitHub repository (default: repository for this checkout)
+  --finalize-ref REF       Ref whose finalize-release.yml is dispatched
+                           (default: the release tag)
   --keep-work-dir          Keep downloaded and generated files after completion
   -h, --help               Show this help
 
@@ -47,6 +49,7 @@ notary_profile=
 identifier=com.stevelr.anyr
 repository=
 keychain_path=
+finalize_ref=
 keep_work_dir=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -79,6 +82,11 @@ while [[ "$#" -gt 0 ]]; do
     --keychain)
       [[ "$#" -ge 2 ]] || die '--keychain requires a value'
       keychain_path=$2
+      shift 2
+      ;;
+    --finalize-ref)
+      [[ "$#" -ge 2 ]] || die '--finalize-ref requires a value'
+      finalize_ref=$2
       shift 2
       ;;
     --keep-work-dir)
@@ -213,7 +221,20 @@ notary_submission_id=$(jq -r '.id // ""' "$notary_result")
 xcrun notarytool log "$notary_submission_id" \
   --keychain-profile "$notary_profile" \
   "$notary_log"
-spctl --assess --type execute --verbose=4 "$signed_binary"
+jq -e '.status == "Accepted" and ((.issues // []) | length == 0)' "$notary_log" >/dev/null \
+  || die 'the notarization log reports a non-Accepted status or open issues'
+
+# macOS 15+ spctl refuses to assess standalone executables: it exits nonzero
+# with "the code is valid but does not seem to be an app" even for a correctly
+# signed and notarized binary. Accept exactly that verdict; fail on any other
+# rejection.
+assessment_status=0
+assessment=$(spctl --assess --type execute --verbose=4 "$signed_binary" 2>&1) || assessment_status=$?
+if [[ "$assessment_status" -ne 0 ]]; then
+  printf '%s\n' "$assessment" >&2
+  [[ "$assessment" == *'the code is valid but does not seem to be an app'* ]] \
+    || die 'Gatekeeper assessment rejected the signed binary'
+fi
 
 signed_binary_hash=$(sha256_of "$signed_binary")
 signed_asset="$work_dir/anyr-aarch64-apple-darwin.signed"
@@ -264,9 +285,10 @@ gh release upload "$release_tag" \
   --repo "$repository" \
   --clobber
 
+[[ -n "$finalize_ref" ]] || finalize_ref=$release_tag
 gh workflow run finalize-release.yml \
   --repo "$repository" \
-  --ref "$release_tag" \
+  --ref "$finalize_ref" \
   --field "source_run_id=$run_id" \
   --field "release_tag=$release_tag"
 

@@ -12,6 +12,7 @@ CLAUDE.md
 graphify-out
 tmp/
 
+*.cer
 .github/scripts/__pycache__
 .agent-notes
 .orchestrator-notes

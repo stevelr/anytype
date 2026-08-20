@@ -165,7 +165,16 @@ jobs:
           test "$(sed -n 's/^Identifier=//p' "$RUNNER_TEMP/codesign-details.txt" | head -n 1)" = "$EXPECTED_IDENTIFIER"
           test "$(sed -n 's/^Authority=//p' "$RUNNER_TEMP/codesign-details.txt" | head -n 1)" = \
             "$(jq -r .signing_authority "$signed_manifest")"
-          spctl --assess --type execute --verbose=4 "$signed_binary"
+          # macOS 15+ spctl cannot assess standalone executables: it exits
+          # nonzero with "the code is valid but does not seem to be an app"
+          # even for a correctly signed and notarized binary. Accept exactly
+          # that verdict; fail on any other rejection.
+          assessment_status=0
+          assessment=$(spctl --assess --type execute --verbose=4 "$signed_binary" 2>&1) || assessment_status=$?
+          if [[ "$assessment_status" -ne 0 ]]; then
+            printf '%s\n' "$assessment" >&2
+            [[ "$assessment" == *'the code is valid but does not seem to be an app'* ]] || exit 1
+          fi
 
           cp "$source_binary" "$RUNNER_TEMP/source-without-signature"
           cp "$signed_binary" "$RUNNER_TEMP/signed-without-signature"

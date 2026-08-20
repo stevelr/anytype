@@ -87,7 +87,19 @@ EOF
 
 cat > "$mock_bin/spctl" <<'EOF'
 #!/usr/bin/env bash
-printf 'accepted\n'
+case "${MOCK_SPCTL_MODE:-notarized-cli}" in
+  accepted)
+    printf '%s: accepted\n' "${@: -1}"
+    ;;
+  notarized-cli)
+    printf '%s: rejected (the code is valid but does not seem to be an app)\n' "${@: -1}" >&2
+    exit 3
+    ;;
+  *)
+    printf '%s: rejected\n' "${@: -1}" >&2
+    exit 3
+    ;;
+esac
 EOF
 
 cat > "$mock_bin/xcrun" <<'EOF'
@@ -97,7 +109,7 @@ if [[ "$1 $2" == 'notarytool submit' ]]; then
   exit 0
 fi
 if [[ "$1 $2" == 'notarytool log' ]]; then
-  printf '{}\n' > "${@: -1}"
+  printf '{"status":"Accepted","issues":[]}\n' > "${@: -1}"
   exit 0
 fi
 exit 2
@@ -201,7 +213,15 @@ jq -e \
     .identifier == "com.stevelr.anyr"
   ' "$uploaded_dir/anyr-aarch64-apple-darwin.signed.json" >/dev/null
 grep -q 'release upload' "$MOCK_LOG"
-grep -q 'workflow run finalize-release.yml' "$MOCK_LOG"
+grep -q -- 'workflow run finalize-release.yml --repo stevelr/anytype --ref anyr-v0.5.0-pre.8' "$MOCK_LOG"
+
+PATH="$mock_bin:$PATH" "$script" \
+  --run-id "$source_run_id" \
+  --identity "Developer ID Application: Test Operator (TESTTEAM01)" \
+  --notary-profile anyr-notary \
+  --repo stevelr/anytype \
+  --finalize-ref main
+grep -q -- 'workflow run finalize-release.yml --repo stevelr/anytype --ref main' "$MOCK_LOG"
 
 if PATH="$mock_bin:$PATH" "$script" \
   --run-id invalid \
@@ -209,5 +229,15 @@ if PATH="$mock_bin:$PATH" "$script" \
   --notary-profile test >/dev/null 2>&1
 then
   printf 'invalid run ID was accepted\n' >&2
+  exit 1
+fi
+
+if MOCK_SPCTL_MODE=rejected PATH="$mock_bin:$PATH" "$script" \
+  --run-id "$source_run_id" \
+  --identity "Developer ID Application: Test Operator (TESTTEAM01)" \
+  --notary-profile anyr-notary \
+  --repo stevelr/anytype >/dev/null 2>&1
+then
+  printf 'a genuine Gatekeeper rejection was accepted\n' >&2
   exit 1
 fi
