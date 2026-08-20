@@ -102,21 +102,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/source" "$RUNNER_TEMP/signed" "$HOME/.cargo/bin"
+          mkdir -p "$RUNNER_TEMP/source" "$RUNNER_TEMP/signed"
           gh run download "$SOURCE_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --name macos-signing-input \
             --dir "$RUNNER_TEMP/source"
-          gh run download "$SOURCE_RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name cargo-dist-cache \
-            --dir "$HOME/.cargo/bin"
           gh release download "$RELEASE_TAG" \
             --pattern anyr-aarch64-apple-darwin.signed \
             --pattern anyr-aarch64-apple-darwin.signed.json \
             --dir "$RUNNER_TEMP/signed"
-          chmod +x "$HOME/.cargo/bin/dist" "$RUNNER_TEMP/source/anyr" \
+          chmod +x "$RUNNER_TEMP/source/anyr" \
             "$RUNNER_TEMP/signed/anyr-aarch64-apple-darwin.signed"
+      - name: Install dist
+        # The cargo-dist-cache artifact holds the Linux binary the ubuntu jobs
+        # reuse; this macOS job installs dist natively at the same version
+        # release.yml pins.
+        shell: bash
+        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.3/cargo-dist-installer.sh | sh"
       - name: Verify Nix provenance, Developer ID, and notarization
         shell: bash
         run: |
