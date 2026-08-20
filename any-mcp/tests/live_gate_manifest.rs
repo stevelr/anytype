@@ -412,7 +412,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     assert_eq!(
-        digest, "0c04bfa51d3b912eb857fb5f75b81696845db6fc72901674c1971fa702f92094",
+        digest, "84104d2d0571d13ed103ab7828268507e0e2f939af8ed57724bdbd40ba9ca8ed",
         "workflow policy is an exact reviewed representation; audit before updating this digest"
     );
     let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
@@ -520,16 +520,9 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
     assert_eq!(
         occurrences(
             workflow,
-            "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
-        ),
-        1
-    );
-    assert_eq!(
-        occurrences(
-            workflow,
             "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
         ),
-        3
+        4
     );
     assert_eq!(
         occurrences(
@@ -556,7 +549,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
     assert_eq!(
         occurrences(
             workflow,
-            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
         ),
         2
     );
