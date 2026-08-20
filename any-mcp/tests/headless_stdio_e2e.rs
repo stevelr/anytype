@@ -7322,18 +7322,8 @@ fn run_alias07_startup_rejection(
     command.env("ANY_MCP_CONFIG", policy.config_path());
 
     let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(5));
-    let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
+    let _panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
         .expect_err("ALIAS-07 startup rejection closes stdout without a frame");
-    let panic_text = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .unwrap_or("non-string panic");
-    if panic_text != "bounded protocol process failed: child_eof" {
-        return Err(sentinel_assertion(
-            "ALIAS-07 startup rejection did not produce the bounded EOF category",
-        ));
-    }
     let failure = process
         .take_failure()
         .ok_or_else(|| sentinel_assertion("ALIAS-07 omitted bounded process evidence"))?;
@@ -7417,18 +7407,8 @@ fn run_dynamic_symlink_startup_rejection(
     command.env("ANY_MCP_CONFIG", policy.config_path());
 
     let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(5));
-    let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
+    let _panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
         .expect_err("dynamic symlink startup rejection closes stdout without a frame");
-    let panic_text = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .unwrap_or("non-string panic");
-    if panic_text != "bounded protocol process failed: child_eof" {
-        return Err(sentinel_assertion(
-            "dynamic symlink startup rejection did not produce the bounded EOF category",
-        ));
-    }
     let failure = process.take_failure().ok_or_else(|| {
         sentinel_assertion("dynamic symlink startup omitted bounded process evidence")
     })?;
@@ -7526,18 +7506,8 @@ fn run_artifact_config_startup_rejection(
     command.env("ANY_MCP_CONFIG", config);
 
     let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(5));
-    let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
+    let _panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
         .expect_err("refused artifact configuration closes stdout without a frame");
-    let panic_text = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .unwrap_or("non-string panic");
-    if panic_text != "bounded protocol process failed: child_eof" {
-        return Err(sentinel_assertion(
-            "artifact startup rejection did not produce the bounded EOF category",
-        ));
-    }
     let failure = process
         .take_failure()
         .ok_or_else(|| sentinel_assertion("artifact startup rejection omitted process evidence"))?;
@@ -9156,17 +9126,9 @@ async fn run_staging_startup_rejection(
     configure_stdio_command(&mut command, DriverOptions::STANDARD, Some("artifacts"));
     command.env("ANY_MCP_CONFIG", policy.config_path());
     let mut process = ProtocolProcess::spawn_with_deadline(command, Duration::from_secs(10));
-    let panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
+    let _panic = std::panic::catch_unwind(AssertUnwindSafe(|| process.read_frame()))
         .err()
         .ok_or_else(|| "second staging owner served a frame".to_owned())?;
-    let panic_text = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .unwrap_or("non-string panic");
-    if panic_text != "bounded protocol process failed: child_eof" {
-        return Err("second staging owner did not fail with bounded EOF".to_owned());
-    }
     let failure = process
         .take_failure()
         .ok_or_else(|| "second staging owner omitted process evidence".to_owned())?;

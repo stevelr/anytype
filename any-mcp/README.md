@@ -121,6 +121,8 @@ The test suite also drives stable and preview Streamable HTTP over loopback,
 including authentication, sessions, event-stream resumption, cancellation,
 slow readers, shutdown, and protocol framing. Spawned stdio cancellation tests
 observe upstream closure before a one-permit follow-up read checks capacity.
+Expected process exits are matched by their fixed failure category while
+diagnostic metadata remains available for timeout investigation.
 
 Schema snapshots keep tool names, descriptions, input schemas, annotations,
 resources, and catalog composition reviewable. Optional registries have direct

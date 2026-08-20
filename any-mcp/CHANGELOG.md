@@ -111,7 +111,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Make portable stdio cancellation cases observe the canceled fixture
   connection closing before the follow-up upstream read proves permit release.
   Process timeouts report fixed child state, output byte counts, and the
-  metadata-only transcript tail.
+  metadata-only transcript tail. Live startup-rejection probes classify these
+  failures by category without depending on the diagnostic metadata format.
 - Give every accepted artifact-import fixture distinct bytes when its identity
   or display name matters, matching Anytype's content-addressed file reuse.
   The reverse-traversal case records an explicit unsupported outcome when the
