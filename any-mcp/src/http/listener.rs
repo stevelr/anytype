@@ -1604,8 +1604,7 @@ pub(crate) mod tests {
             .write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost")
             .await
             .expect("write partial header");
-        tokio::task::yield_now().await;
-        tokio::time::advance(HEADER_READ_WAIT).await;
+        tokio::time::sleep(HEADER_READ_WAIT).await;
         let mut byte = [0_u8; 1];
         let read = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
             .await

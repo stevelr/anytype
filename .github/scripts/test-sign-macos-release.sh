@@ -18,7 +18,14 @@ source_run_id=123456
 team_id=TESTTEAM01
 printf '#!/bin/sh\nprintf anyr\n' > "$fixture_dir/anyr"
 chmod 0755 "$fixture_dir/anyr"
-binary_hash=$(shasum -a 256 "$fixture_dir/anyr" | awk '{print $1}')
+binary_hash=$(python3 - "$fixture_dir/anyr" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)
 jq -n \
   --argjson source_run_id "$source_run_id" \
   --arg source_commit "$source_commit" \
@@ -94,6 +101,19 @@ if [[ "$1 $2" == 'notarytool log' ]]; then
   exit 0
 fi
 exit 2
+EOF
+
+cat > "$mock_bin/shasum" <<'EOF'
+#!/usr/bin/env python3
+import hashlib
+import pathlib
+import sys
+
+if len(sys.argv) != 4 or sys.argv[1:3] != ["-a", "256"]:
+    print("unexpected shasum invocation", file=sys.stderr)
+    raise SystemExit(2)
+path = pathlib.Path(sys.argv[3])
+print(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path}")
 EOF
 
 cat > "$mock_bin/gh" <<'EOF'

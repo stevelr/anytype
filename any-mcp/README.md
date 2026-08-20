@@ -131,8 +131,8 @@ the same boundary clients use.
 Run the portable checks from the workspace root:
 
 ```sh
-cargo test -p any-mcp
-cargo clippy -p any-mcp --all-targets
+cargo test --locked -p any-mcp
+cargo clippy --locked -p any-mcp --all-targets
 cargo fmt --all -- --check
 ```
 

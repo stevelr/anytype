@@ -105,6 +105,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Supply the macOS signing workflow test with its own SHA-256 implementation,
+  keeping Arch Linux prerequisite checks independent of Perl's `shasum`.
 - Reconcile a newly created disposable test space from a complete inventory
   when the create response omits its ID, so the cleanup guard still owns and
   deletes the exact space after a later assertion failure.

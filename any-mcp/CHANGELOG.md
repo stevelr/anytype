@@ -331,6 +331,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Drive the partial-header deadline regression with Tokio's ordered
+  paused-clock sleep, ensuring Hyper installs its header timer before virtual
+  time advances on macOS runners.
 - Build the benchmark harness binary and its tests cleanly on macOS and
   Windows: Linux-only supervisor, run-root, credential-descriptor, and artifact
   pinning code is now compiled only where it has a caller, and cgroup member
