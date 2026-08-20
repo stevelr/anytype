@@ -9,7 +9,7 @@ default-members = ["anyr"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.0-pre.8"
+version = "0.5.0"
 authors = ["Steve Schoettler <stevelr-git@pm.me>"]
 edition = "2024"
 homepage = "https://github.com/stevelr/anytype"
@@ -17,19 +17,19 @@ license = "Apache-2.0"
 repository = "https://github.com/stevelr/anytype"
 
 [workspace.dependencies]
-any-edit = { version = "0.5.0-pre.8", path = "./any-edit" }
-any-mcp = { version = "0.5.0-pre.8", path = "./any-mcp" }
-anyback_reader = { package = "anyback", version = "0.5.0-pre.8", path = "./anyback", default-features = false }
-anytype = { version = "0.5.0-pre.8", path = "./anytype-api" }
-anytype-rpc = { version = "0.5.0-pre.8", path = "./anytype-rpc" }
+any-edit = { version = "0.5.0", path = "./any-edit" }
+any-mcp = { version = "0.5.0", path = "./any-mcp" }
+anyback_reader = { package = "anyback", version = "0.5.0", path = "./anyback", default-features = false }
+anytype = { version = "0.5.0", path = "./anytype-api" }
+anytype-rpc = { version = "0.5.0", path = "./anytype-rpc" }
 
 anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 base16ct = "1.0.0"
 base64 = "0.23.1"
 bytes = "1.12.1"
-cap-fs-ext = "4.0.2"
-cap-std = "4.0.2"
+cap-fs-ext = "4.0.3"
+cap-std = "4.0.3"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 clap_complete = "4.6.9"
@@ -57,7 +57,7 @@ prost-types = "0.14.4"
 ratatui = "0.30.2"
 regex = "1.13.1"
 reqwest = { version = "0.13.4", features = ["json", "multipart", "stream", "rustls", "query"] }
-rmcp = { version = "3.1.3", default-features = false, features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "3.1.4", default-features = false, features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
