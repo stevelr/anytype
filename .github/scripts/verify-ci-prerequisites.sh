@@ -52,6 +52,7 @@ gcc --version | head -n 1
 bash .github/scripts/test-release-tag-policy.sh
 PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_release_scripts.py
 bash .github/scripts/test-package-nix-dist-archive.sh
+bash .github/scripts/test-sign-macos-release.sh
 
 if "$check_gate"; then
   gate --version

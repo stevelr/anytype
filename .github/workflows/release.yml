@@ -3,12 +3,12 @@
 # Copyright 2022-2024, axodotdev
 # SPDX-License-Identifier: MIT or Apache-2.0
 #
-# Cargo-dist qualification and GitHub Release publication. This generated file
+# Cargo-dist qualification and release-input generation. This generated file
 # has an allow-dirty CI edit: Linux and macOS local archives come from flake
-# outputs, while dist retains the Windows, installer, formula, and host steps.
-# Manual and weekly runs build and validate artifacts without publishing. A
-# supported version tag on a commit reachable from main publishes the generated
-# archives, checksums, shell and PowerShell installers, and Homebrew formulae.
+# outputs, and tag runs export the macOS Nix binary for offline signing. Manual,
+# weekly, and tag runs build and validate without publishing. A maintainer signs
+# and notarizes the macOS input locally, then finalize-release.yml regenerates
+# checksums and installers before publishing the draft GitHub Release.
 
 name: Release artifacts
 permissions:
@@ -50,12 +50,11 @@ jobs:
   plan:
     runs-on: "ubuntu-22.04"
     permissions:
-      contents: write
+      contents: read
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ github.event_name == 'push' && github.ref_name || '' }}
       tag-flag: ${{ github.event_name == 'push' && format('--tag={0}', github.ref_name) || '' }}
-      publishing: ${{ github.event_name == 'push' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SELECTED_ARCHITECTURE: ${{ inputs.architecture || 'all' }}
@@ -79,7 +78,7 @@ jobs:
             printf 'release tag %s does not point to a commit reachable from main\n' "$RELEASE_TAG" >&2
             exit 1
           fi
-      # A tag publishes only from a commit on which every verification
+      # A tag produces signing inputs only from a commit on which every verification
       # workflow (smoke, CI, any-mcp, anytype-api live, anyr-anyback-live)
       # has already succeeded; push the tag after those main runs are green
       # or after release-qual.yml reports the commit eligible.
@@ -170,7 +169,7 @@ jobs:
         run: |
           if ! command -v cargo > /dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
@@ -237,6 +236,36 @@ jobs:
             }
           fi
           result/bin/anyr --help > /dev/null
+      - name: Prepare macOS offline-signing input
+        if: github.event_name == 'push' && matrix.targets[0] == 'aarch64-apple-darwin'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          signing_dir=target/macos-signing-input
+          mkdir -p "$signing_dir"
+          cp -L result/bin/anyr "$signing_dir/anyr"
+          chmod 0755 "$signing_dir/anyr"
+          binary_hash=$(shasum -a 256 "$signing_dir/anyr" | awk '{print $1}')
+          flake_lock_hash=$(shasum -a 256 flake.lock | awk '{print $1}')
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --argjson source_run_id "$GITHUB_RUN_ID" \
+            --arg source_commit "$GITHUB_SHA" \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg binary_sha256 "$binary_hash" \
+            --arg flake_lock_sha256 "$flake_lock_hash" \
+            '{
+              schema_version: 1,
+              repository: $repository,
+              source_run_id: $source_run_id,
+              source_commit: $source_commit,
+              release_tag: $release_tag,
+              target: "aarch64-apple-darwin",
+              binary_sha256: $binary_sha256,
+              flake_lock_sha256: $flake_lock_sha256
+            }' > "$signing_dir/manifest.json"
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
@@ -245,9 +274,11 @@ jobs:
         shell: bash
         run: |
           # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "paths<<EOF"
+            dist print-upload-files-from-manifest --manifest dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
@@ -257,6 +288,13 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+      - name: Upload macOS offline-signing input
+        if: github.event_name == 'push' && matrix.targets[0] == 'aarch64-apple-darwin'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-signing-input
+          path: target/macos-signing-input/
+          if-no-files-found: error
 
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
@@ -289,14 +327,22 @@ jobs:
           merge-multiple: true
       - id: cargo-dist
         shell: bash
+        env:
+          TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
         run: |
-          dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" > dist-manifest.json
+          dist_args=(--output-format=json --artifacts=global)
+          if [[ -n "$TAG_FLAG" ]]; then
+            dist_args+=("$TAG_FLAG")
+          fi
+          dist build "${dist_args[@]}" > dist-manifest.json
           echo "dist ran successfully"
 
           # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "paths<<EOF"
+            jq --raw-output ".upload_files[]" dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
@@ -381,139 +427,3 @@ jobs:
             ) | Out-Null
             if ($errors.Count -ne 0) { throw ($errors | Out-String) }
           }
-  # Determines if we should publish/announce
-  host:
-    needs:
-      - plan
-      - build-local-artifacts
-      - build-global-artifacts
-      - validate-posix-installers
-      - validate-powershell-installer
-    # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.validate-posix-installers.result == 'skipped' || needs.validate-posix-installers.result == 'success') && (needs.validate-powershell-installer.result == 'skipped' || needs.validate-powershell-installer.result == 'success') }}
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    runs-on: "ubuntu-22.04"
-    permissions:
-      contents: write
-    outputs:
-      val: ${{ steps.host.outputs.manifest }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          persist-credentials: false
-          submodules: recursive
-      - name: Install cached dist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: cargo-dist-cache
-          path: ~/.cargo/bin/
-      - run: chmod +x ~/.cargo/bin/dist
-      # Fetch artifacts from scratch-storage
-      - name: Fetch artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: artifacts-*
-          path: target/distrib/
-          merge-multiple: true
-      - id: host
-        shell: bash
-        run: |
-          dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
-          echo "artifacts uploaded and released successfully"
-          cat dist-manifest.json
-          echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
-      - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          # Overwrite the previous copy
-          name: artifacts-dist-manifest
-          path: dist-manifest.json
-      # Create a GitHub Release while uploading all files to it
-      - name: "Download GitHub Artifacts"
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: artifacts-*
-          path: artifacts
-          merge-multiple: true
-      - name: Cleanup
-        run: |
-          # Remove the granular manifests
-          rm -f artifacts/*-dist-manifest.json
-      - name: Create GitHub Release
-        env:
-          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
-          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
-          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
-          RELEASE_COMMIT: "${{ github.sha }}"
-        run: |
-          # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
-
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
-
-  publish-homebrew-formula:
-    needs:
-      - plan
-      - host
-    runs-on: "ubuntu-22.04"
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      PLAN: ${{ needs.plan.outputs.val }}
-      GITHUB_USER: "axo bot"
-      GITHUB_EMAIL: "admin+bot@axo.dev"
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          persist-credentials: true
-          repository: "stevelr/homebrew-tap"
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-      # So we have access to the formula
-      - name: Fetch homebrew formulae
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: artifacts-*
-          path: Formula/
-          merge-multiple: true
-      # This is extra complex because you can make your Formula name not match your app name
-      # so we need to find releases with a *.rb file, and publish with that filename.
-      - name: Commit formula files
-        run: |
-          git config --global user.name "${GITHUB_USER}"
-          git config --global user.email "${GITHUB_EMAIL}"
-
-          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
-            filename=$(echo "$release" | jq '.artifacts[] | select(endswith(".rb"))' --raw-output)
-            name=$(echo "$filename" | sed "s/\.rb$//")
-            version=$(echo "$release" | jq .app_version --raw-output)
-
-            export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
-            brew update
-            # We avoid reformatting user-provided data such as the app description and homepage.
-            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
-
-            git add "Formula/${filename}"
-            git commit -m "${name} ${version}"
-          done
-          git push
-
-  announce:
-    needs:
-      - plan
-      - host
-      - publish-homebrew-formula
-    # use "always() && ..." to allow us to wait for all publish jobs while
-    # still allowing individual publish jobs to skip themselves (for prereleases).
-    # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
-    runs-on: "ubuntu-22.04"
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          persist-credentials: false
-          submodules: recursive

@@ -35,9 +35,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   use the current command syntax.
 - Build the Linux and macOS release archives from the repository's pinned Nix
   flake outputs. Linux packages use the fully static musl binary; macOS
-  packages use the portable flake binary. Cargo-dist continues to build the
-  Windows archives and generates checksums, installers, and Homebrew formulae
-  from all five platform archives.
+  packages use the portable flake binary. The macOS binary is signed and
+  notarized from a maintainer's local keychain before cargo-dist regenerates
+  checksums, installers, and Homebrew formulae from all five platform archives.
 - Credentials are stored as one keystore entry per service instead of four
   (see the `anytype` crate changelog), so OS keychains prompt once per
   application. Existing keystores migrate automatically on first use.

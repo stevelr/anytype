@@ -1,0 +1,456 @@
+name: Finalize signed release
+
+permissions:
+  actions: read
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful tag-triggered Release artifacts workflow run
+        required: true
+        type: string
+      release_tag:
+        description: Release tag built by the source workflow
+        required: true
+        type: string
+
+concurrency:
+  group: finalize-release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate-source:
+    runs-on: ubuntu-22.04
+    outputs:
+      plan: ${{ steps.validate.outputs.plan }}
+      source-sha: ${{ steps.validate.outputs.source-sha }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag }}
+      - id: validate
+        name: Validate source run, tag, plan, and draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            printf 'source_run_id must be a positive integer\n' >&2
+            exit 2
+          }
+          run_json=$RUNNER_TEMP/source-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$run_json"
+          jq -e '
+            .conclusion == "success" and
+            .event == "push" and
+            .path == ".github/workflows/release.yml" and
+            (.head_sha | test("^[0-9a-f]{40}$"))
+          ' "$run_json" >/dev/null
+          source_sha=$(jq -r .head_sha "$run_json")
+          test "$(git rev-parse HEAD)" = "$source_sha"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$source_sha"
+
+          plan_dir=$RUNNER_TEMP/source-plan
+          mkdir -p "$plan_dir"
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name artifacts-plan-dist-manifest \
+            --dir "$plan_dir"
+          plan_path=$plan_dir/plan-dist-manifest.json
+          jq -e --arg tag "$RELEASE_TAG" '
+            .announcement_tag == $tag and
+            (.ci.github.artifacts_matrix.include | length) == 5
+          ' "$plan_path" >/dev/null
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+
+          echo "source-sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "plan=$(jq -c . "$plan_path")" >> "$GITHUB_OUTPUT"
+
+  package-signed-macos:
+    needs: validate-source
+    runs-on: macos-15
+    env:
+      EXPECTED_IDENTIFIER: com.stevelr.anyr
+      EXPECTED_TEAM_ID: ${{ vars.MACOS_DEVELOPER_TEAM_ID }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_SHA: ${{ needs.validate-source.outputs.source-sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.release_tag }}
+      - name: Download source and signed handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/source" "$RUNNER_TEMP/signed" "$HOME/.cargo/bin"
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name macos-signing-input \
+            --dir "$RUNNER_TEMP/source"
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name cargo-dist-cache \
+            --dir "$HOME/.cargo/bin"
+          gh release download "$RELEASE_TAG" \
+            --pattern anyr-aarch64-apple-darwin.signed \
+            --pattern anyr-aarch64-apple-darwin.signed.json \
+            --dir "$RUNNER_TEMP/signed"
+          chmod +x "$HOME/.cargo/bin/dist" "$RUNNER_TEMP/source/anyr" \
+            "$RUNNER_TEMP/signed/anyr-aarch64-apple-darwin.signed"
+      - name: Verify Nix provenance, Developer ID, and notarization
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_TEAM_ID" || {
+            printf 'repository variable MACOS_DEVELOPER_TEAM_ID is required\n' >&2
+            exit 1
+          }
+          source_binary=$RUNNER_TEMP/source/anyr
+          source_manifest=$RUNNER_TEMP/source/manifest.json
+          signed_binary=$RUNNER_TEMP/signed/anyr-aarch64-apple-darwin.signed
+          signed_manifest=$RUNNER_TEMP/signed/anyr-aarch64-apple-darwin.signed.json
+          source_hash=$(shasum -a 256 "$source_binary" | awk '{print $1}')
+          signed_hash=$(shasum -a 256 "$signed_binary" | awk '{print $1}')
+
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg run_id "$SOURCE_RUN_ID" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg tag "$RELEASE_TAG" \
+            --arg source_hash "$source_hash" '
+              .schema_version == 1 and
+              .repository == $repository and
+              (.source_run_id | tostring) == $run_id and
+              .source_commit == $source_sha and
+              .release_tag == $tag and
+              .target == "aarch64-apple-darwin" and
+              .binary_sha256 == $source_hash
+            ' "$source_manifest" >/dev/null
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg run_id "$SOURCE_RUN_ID" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg tag "$RELEASE_TAG" \
+            --arg source_hash "$source_hash" \
+            --arg signed_hash "$signed_hash" \
+            --arg team_id "$EXPECTED_TEAM_ID" \
+            --arg identifier "$EXPECTED_IDENTIFIER" '
+              .schema_version == 1 and
+              .repository == $repository and
+              (.source_run_id | tostring) == $run_id and
+              .source_commit == $source_sha and
+              .release_tag == $tag and
+              .target == "aarch64-apple-darwin" and
+              .unsigned_sha256 == $source_hash and
+              .signed_sha256 == $signed_hash and
+              .team_id == $team_id and
+              .identifier == $identifier and
+              (.signing_authority | startswith("Developer ID Application:")) and
+              (.notary_submission_id | test("^[0-9A-Fa-f-]{36}$"))
+            ' "$signed_manifest" >/dev/null
+
+          codesign --verify --strict --verbose=4 "$signed_binary"
+          codesign --display --verbose=4 "$signed_binary" 2> "$RUNNER_TEMP/codesign-details.txt"
+          test "$(sed -n 's/^TeamIdentifier=//p' "$RUNNER_TEMP/codesign-details.txt" | head -n 1)" = "$EXPECTED_TEAM_ID"
+          test "$(sed -n 's/^Identifier=//p' "$RUNNER_TEMP/codesign-details.txt" | head -n 1)" = "$EXPECTED_IDENTIFIER"
+          test "$(sed -n 's/^Authority=//p' "$RUNNER_TEMP/codesign-details.txt" | head -n 1)" = \
+            "$(jq -r .signing_authority "$signed_manifest")"
+          spctl --assess --type execute --verbose=4 "$signed_binary"
+
+          cp "$source_binary" "$RUNNER_TEMP/source-without-signature"
+          cp "$signed_binary" "$RUNNER_TEMP/signed-without-signature"
+          codesign --remove-signature "$RUNNER_TEMP/source-without-signature"
+          codesign --remove-signature "$RUNNER_TEMP/signed-without-signature"
+          cmp "$RUNNER_TEMP/source-without-signature" "$RUNNER_TEMP/signed-without-signature"
+          otool -L "$signed_binary"
+          if otool -L "$signed_binary" | grep -q '/nix/store'; then
+            printf 'signed binary references a /nix/store library\n' >&2
+            exit 1
+          fi
+          "$signed_binary" --help > /dev/null
+      - name: Package signed macOS archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          signed_binary=$RUNNER_TEMP/signed/anyr-aarch64-apple-darwin.signed
+          RELEASE_TAG=$RELEASE_TAG bash .github/scripts/package-nix-dist-archive.sh \
+            aarch64-apple-darwin "$signed_binary"
+          cp dist-manifest.json target/distrib/aarch64-apple-darwin-dist-manifest.json
+      - name: Upload signed macOS local artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: artifacts-build-local-aarch64-apple-darwin-signed
+          path: |
+            target/distrib/anyr-aarch64-apple-darwin.tar.xz
+            target/distrib/anyr-aarch64-apple-darwin.tar.xz.sha256
+            target/distrib/aarch64-apple-darwin-dist-manifest.json
+          if-no-files-found: error
+
+  build-global-artifacts:
+    needs:
+      - validate-source
+      - package-signed-macos
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.release_tag }}
+      - name: Download cargo-dist and local artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cargo/bin" target/distrib
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name cargo-dist-cache --dir "$HOME/.cargo/bin"
+          for artifact in \
+            artifacts-build-local-aarch64-unknown-linux-gnu \
+            artifacts-build-local-aarch64-pc-windows-msvc \
+            artifacts-build-local-x86_64-unknown-linux-gnu \
+            artifacts-build-local-x86_64-pc-windows-msvc
+          do
+            gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "$artifact" --dir target/distrib
+          done
+          chmod +x "$HOME/.cargo/bin/dist"
+      - name: Download signed macOS local artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: artifacts-build-local-aarch64-apple-darwin-signed
+          path: target/distrib
+      - id: cargo-dist
+        name: Generate checksums, installers, and formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist build --tag="$RELEASE_TAG" --output-format=json \
+            --artifacts=global > dist-manifest.json
+          {
+            echo "paths<<EOF"
+            jq --raw-output '.upload_files[]' dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          cp dist-manifest.json target/distrib/global-dist-manifest.json
+      - name: Upload global artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: artifacts-build-global-signed
+          path: |
+            ${{ steps.cargo-dist.outputs.paths }}
+            target/distrib/global-dist-manifest.json
+          if-no-files-found: error
+
+  validate-posix-installers:
+    name: Homebrew and shell installers (${{ matrix.platform }})
+    needs: build-global-artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: macos-aarch64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Download generated installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: artifacts-build-global-signed
+          path: artifacts
+      - name: Validate shell installers and Homebrew formulae
+        shell: bash
+        run: |
+          set -euo pipefail
+          shell_count=$(find artifacts -type f -name '*installer.sh' | wc -l | tr -d ' ')
+          formula_count=$(find artifacts -type f -name '*.rb' | wc -l | tr -d ' ')
+          test "$shell_count" -gt 0
+          test "$formula_count" -gt 0
+          find artifacts -type f -name '*installer.sh' -exec bash -n {} +
+          find artifacts -type f -name '*.rb' -exec ruby -c {} \;
+          if [[ "${{ runner.os }}" == macOS ]]; then
+            style_exceptions='FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict,Sorbet/StrictSigil,Sorbet/TrueSigil,Style/Documentation,Style/FrozenStringLiteralComment,Style/SoleNestedConditional,Style/MutableConstant,Layout/HashAlignment,Style/TrailingCommaInHashLiteral,Style/IfUnlessModifier'
+            tap_name='anytype/ci'
+            brew tap-new --no-git "$tap_name"
+            tap_root=$(brew --repository "$tap_name")
+            while IFS= read -r -d '' formula; do
+              cp "$formula" "$tap_root/Formula/$(basename "$formula")"
+            done < <(find artifacts -type f -name '*.rb' -print0)
+            formulae=("$tap_root"/Formula/*.rb)
+            brew style --formula --except-cops "$style_exceptions" "${formulae[@]}"
+          fi
+
+  validate-powershell-installer:
+    needs: build-global-artifacts
+    runs-on: windows-2025
+    steps:
+      - name: Download generated installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: artifacts-build-global-signed
+          path: artifacts
+      - name: Parse PowerShell installers
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem artifacts -Recurse -File -Filter '*installer.ps1')
+          if ($installers.Count -eq 0) { throw 'no PowerShell installer was generated' }
+          foreach ($installer in $installers) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $installer.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+          }
+
+  publish-release:
+    needs:
+      - validate-source
+      - package-signed-macos
+      - build-global-artifacts
+      - validate-posix-installers
+      - validate-powershell-installer
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      host: ${{ steps.host.outputs.manifest }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.release_tag }}
+      - name: Download cargo-dist and source local artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cargo/bin" target/distrib
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name cargo-dist-cache --dir "$HOME/.cargo/bin"
+          for artifact in \
+            artifacts-build-local-aarch64-unknown-linux-gnu \
+            artifacts-build-local-aarch64-pc-windows-msvc \
+            artifacts-build-local-x86_64-unknown-linux-gnu \
+            artifacts-build-local-x86_64-pc-windows-msvc
+          do
+            gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "$artifact" --dir target/distrib
+          done
+          chmod +x "$HOME/.cargo/bin/dist"
+      - name: Download signed local and global artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: artifacts-*
+          path: target/distrib
+          merge-multiple: true
+      - id: host
+        name: Generate release announcement
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist host --tag="$RELEASE_TAG" --steps=upload --steps=release \
+            --output-format=json > dist-manifest.json
+          echo "manifest=$(jq -c . dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: Upload final assets and publish draft
+        shell: bash
+        env:
+          ANNOUNCEMENT_BODY: ${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}
+          ANNOUNCEMENT_IS_PRERELEASE: ${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease }}
+          ANNOUNCEMENT_TITLE: ${{ fromJson(steps.host.outputs.manifest).announcement_title }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          find target/distrib -maxdepth 1 -type f \
+            ! -name '*-dist-manifest.json' \
+            ! -name 'dist-manifest.json' \
+            -exec cp {} artifacts/ \;
+          test "$(find artifacts -type f | wc -l | tr -d ' ')" -gt 0
+          gh release upload "$RELEASE_TAG" artifacts/* --clobber
+          gh release delete-asset "$RELEASE_TAG" anyr-aarch64-apple-darwin.signed --yes
+          gh release delete-asset "$RELEASE_TAG" anyr-aarch64-apple-darwin.signed.json --yes
+          printf '%s\n' "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
+          release_args=(
+            "$RELEASE_TAG"
+            --draft=false
+            --title "$ANNOUNCEMENT_TITLE"
+            --notes-file "$RUNNER_TEMP/notes.txt"
+          )
+          if [[ "$ANNOUNCEMENT_IS_PRERELEASE" == true ]]; then
+            release_args+=(--prerelease)
+          else
+            release_args+=(--prerelease=false)
+          fi
+          gh release edit "${release_args[@]}"
+      - name: Upload release artifacts for downstream publication
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: artifacts-final-release
+          path: |
+            artifacts/
+            dist-manifest.json
+          if-no-files-found: error
+
+  publish-homebrew-formula:
+    needs:
+      - validate-source
+      - publish-release
+    if: ${{ !fromJson(needs.validate-source.outputs.plan).announcement_is_prerelease || fromJson(needs.validate-source.outputs.plan).publish_prereleases }}
+    runs-on: ubuntu-22.04
+    env:
+      GITHUB_EMAIL: admin+bot@axo.dev
+      GITHUB_USER: axo bot
+      PLAN: ${{ needs.validate-source.outputs.plan }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: true
+          repository: stevelr/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      - name: Download final release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: artifacts-final-release
+          path: release-artifacts
+      - name: Commit formula files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p Formula
+          find release-artifacts -type f -name '*.rb' -exec cp {} Formula/ \;
+          for release in $(jq --compact-output \
+            '.releases[] | select([.artifacts[] | endswith(".rb")] | any)' <<< "$PLAN")
+          do
+            filename=$(jq -r '.artifacts[] | select(endswith(".rb"))' <<< "$release")
+            name=${filename%.rb}
+            version=$(jq -r .app_version <<< "$release")
+            export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+            brew update
+            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict \
+              --fix "Formula/$filename" || true
+            git config user.name "$GITHUB_USER"
+            git config user.email "$GITHUB_EMAIL"
+            git add "Formula/$filename"
+            git commit -m "$name $version"
+          done
+          git push

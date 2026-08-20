@@ -15,8 +15,7 @@ without the HTTP service. If the `anymcp` tools are absent from your tool
 list, report that the server was unreachable when your session started
 instead of trying to start one.
 
-Use any-mcp for verified, bounded Anytype workflows. Prefer its tools over shell
-commands whenever the required capability is advertised.
+*Tool choice*: Use advertised anymcp tools for ordinary Anytype workflows. Load the anyr skill only when the workflow reaches a documented CLI-only fallback or requires CLI setup and diagnosis.
 
 ## Start safely
 

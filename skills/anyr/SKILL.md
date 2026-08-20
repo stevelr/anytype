@@ -10,6 +10,8 @@ HTTP/REST API. Most work â€” including file download/upload and everyday chat â€
 runs over REST; only advanced operations fall back to gRPC (see below). Source
 and full README: `~/project/anytype/anyr/`.
 
+*Tool choice*: Use this skill for explicit CLI workflows, CLI authentication or endpoint setup, unavailable MCP tools, and the documented CLI-only fallbacks. When connected anymcp tools advertise the required capability, use the any-mcp skill instead.
+
 ## Mental model
 
 - Everything lives in a **space**. Commands take a space **name or id**

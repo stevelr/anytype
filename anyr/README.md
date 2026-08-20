@@ -529,7 +529,8 @@ brew install stevelr/tap/anyr
 ```
 
 The Homebrew formula and release archive install the portable binary built by
-the repository flake. Its system-library install names work without Nix.
+the repository flake, signed with an Apple Developer ID certificate, and
+notarized by Apple. Its system-library install names work without Nix.
 
 **Linux (arm64/x86_64)**
 
