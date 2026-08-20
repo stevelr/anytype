@@ -186,11 +186,67 @@ jobs:
             [[ "$assessment" == *'the code is valid but does not seem to be an app'* ]] || exit 1
           fi
 
-          cp "$source_binary" "$RUNNER_TEMP/source-without-signature"
-          cp "$signed_binary" "$RUNNER_TEMP/signed-without-signature"
-          codesign --remove-signature "$RUNNER_TEMP/source-without-signature"
-          codesign --remove-signature "$RUNNER_TEMP/signed-without-signature"
-          cmp "$RUNNER_TEMP/source-without-signature" "$RUNNER_TEMP/signed-without-signature"
+          # Byte comparison after codesign --remove-signature cannot work on
+          # arm64: the linker already embedded an ad-hoc signature, and
+          # re-signing rewrites the __LINKEDIT sizes, so signature removal
+          # never restores the original layout. Instead require byte equality
+          # of the header, every load command, and all segment and link-edit
+          # content, permitting differences only in the three size fields
+          # codesign must rewrite and in the signature blob itself.
+          python3 - "$source_binary" "$signed_binary" <<'PY'
+          import struct
+          import sys
+
+          LC_SEGMENT_64 = 0x19
+          LC_CODE_SIGNATURE = 0x1D
+          MH_MAGIC_64 = 0xFEEDFACF
+
+          def fail(message):
+              print(f"provenance check failed: {message}", file=sys.stderr)
+              raise SystemExit(1)
+
+          def parse(path):
+              with open(path, "rb") as handle:
+                  data = handle.read()
+              if len(data) < 32 or struct.unpack_from("<I", data, 0)[0] != MH_MAGIC_64:
+                  fail(f"{path} is not a thin 64-bit little-endian Mach-O binary")
+              ncmds, sizeofcmds = struct.unpack_from("<II", data, 16)
+              commands = bytearray(data[32 : 32 + sizeofcmds])
+              signature_offset = None
+              offset = 0
+              for _ in range(ncmds):
+                  cmd, cmdsize = struct.unpack_from("<II", commands, offset)
+                  if cmdsize < 8 or offset + cmdsize > sizeofcmds:
+                      fail(f"{path} has a malformed load command at {32 + offset}")
+                  if cmd == LC_SEGMENT_64 and commands[offset + 8 : offset + 24].rstrip(b"\0") == b"__LINKEDIT":
+                      commands[offset + 32 : offset + 40] = b"\0" * 8  # vmsize
+                      commands[offset + 48 : offset + 56] = b"\0" * 8  # filesize
+                  elif cmd == LC_CODE_SIGNATURE:
+                      if signature_offset is not None:
+                          fail(f"{path} has more than one LC_CODE_SIGNATURE")
+                      signature_offset = struct.unpack_from("<I", commands, offset + 8)[0]
+                      commands[offset + 12 : offset + 16] = b"\0" * 4  # datasize
+                  offset += cmdsize
+              if signature_offset is None or signature_offset > len(data):
+                  fail(f"{path} has no code signature")
+              return data, ncmds, sizeofcmds, bytes(commands), signature_offset
+
+          source_data, source_ncmds, source_sizeofcmds, source_commands, source_sig = parse(sys.argv[1])
+          signed_data, signed_ncmds, signed_sizeofcmds, signed_commands, signed_sig = parse(sys.argv[2])
+
+          if source_data[:32] != signed_data[:32]:
+              fail("Mach-O headers differ")
+          if (source_ncmds, source_sizeofcmds) != (signed_ncmds, signed_sizeofcmds):
+              fail("load command counts differ")
+          if source_commands != signed_commands:
+              fail("load commands differ outside the signature size fields")
+          if source_sig != signed_sig:
+              fail("code signature offsets differ")
+          body_start = 32 + source_sizeofcmds
+          if source_data[body_start:source_sig] != signed_data[body_start:signed_sig]:
+              fail("segment or link-edit content differs")
+          print(f"provenance verified: {source_sig - body_start} content bytes identical")
+          PY
           otool -L "$signed_binary"
           if otool -L "$signed_binary" | grep -q '/nix/store'; then
             printf 'signed binary references a /nix/store library\n' >&2
