@@ -32,6 +32,10 @@ the `anyr` and `any-mcp` runtime documentation.
 Release packages are checked offline for matching manifest and changelog
 versions, valid Agent Skills metadata and references, required files, safe
 archive paths, and accidental private paths or credential material.
+Tags named `anytype-toolbox-skills-vVERSION` publish reproducible ZIP and
+tar.gz archives with SHA-256 checksums. Skills releases use their matching
+changelog section as release notes and do not replace the repository's latest
+`anyr` release.
 
 Anytype Toolbox is licensed under the Apache License 2.0. See
 [LICENSE](LICENSE).

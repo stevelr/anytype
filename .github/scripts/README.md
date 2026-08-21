@@ -24,6 +24,25 @@ The validator accepts `--expected-version VERSION` for either an unpacked
 plugin or a ZIP. Release and prerelease versions use the same semantic-version
 comparison.
 
+`prepare_skills_release.py` accepts only
+`anytype-toolbox-skills-vVERSION` tags, checks that `VERSION` matches both
+plugin manifests and the first released changelog section, and writes
+reproducible ZIP and tar.gz archives, SHA-256 checksums, and release notes for
+that section. `validate-skills-release-ref.sh` separately proves that the tag
+already exists on `origin`, resolves to the checked-out commit, and is reachable
+from `origin/main`.
+
+```sh
+python3 .github/scripts/prepare_skills_release.py prepare \
+  anytype-toolbox-skills-v0.1.0 --output skills-release
+```
+
+The `Release skills plugin` workflow runs only for skills tags. Its packaging
+job is read-only; only the final publishing job receives `contents: write`.
+It publishes the three generated assets with the selected changelog section as
+notes and marks the release as non-latest so it cannot replace an `anyr`
+release in the repository-wide latest-release slot.
+
 The release workflow builds all platform archives and exports the Nix-built
 macOS binary as a signing input. It does not publish a GitHub Release. The
 macOS signing command verifies that input against its workflow run, applies a

@@ -1,0 +1,81 @@
+name: Release skills plugin
+
+permissions:
+  contents: read
+
+on:
+  push:
+    tags:
+      - "anytype-toolbox-skills-v*"
+
+concurrency:
+  group: skills-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify remote tag and main ancestry
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: bash .github/scripts/validate-skills-release-ref.sh "$RELEASE_TAG" "$GITHUB_SHA"
+      - name: Prepare deterministic release assets and notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 .github/scripts/prepare_skills_release.py prepare \
+            "$RELEASE_TAG" \
+            --package skills \
+            --output skills-release
+      - name: Upload validated release files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: skills-release-${{ github.sha }}
+          path: skills-release/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: package
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reverify remote tag before publication
+        run: bash .github/scripts/validate-skills-release-ref.sh "$RELEASE_TAG" "$GITHUB_SHA"
+      - name: Download validated release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: skills-release-${{ github.sha }}
+          path: skills-release
+      - name: Publish independent skills release
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "skills-release/$RELEASE_TAG.zip"
+          test -f "skills-release/$RELEASE_TAG.tar.gz"
+          test -f "skills-release/$RELEASE_TAG.sha256"
+          test -f "skills-release/$RELEASE_TAG-release-notes.md"
+          gh release create "$RELEASE_TAG" \
+            "skills-release/$RELEASE_TAG.zip" \
+            "skills-release/$RELEASE_TAG.tar.gz" \
+            "skills-release/$RELEASE_TAG.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_TAG" \
+            --notes-file "skills-release/$RELEASE_TAG-release-notes.md" \
+            --verify-tag \
+            --latest=false

@@ -16,3 +16,6 @@ Versioning independently from the Anytype Toolbox Rust crates.
 - Validate package directories and release ZIPs offline, including host
   manifests, skill metadata and references, version consistency, required
   files, public-path hygiene, credential patterns, and archive safety.
+- Release the plugin independently from Rust binaries with reproducible ZIP
+  and tar.gz archives, checksums, version-specific notes, and a non-latest
+  GitHub Release.
