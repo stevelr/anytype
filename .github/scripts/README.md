@@ -49,6 +49,40 @@ marketplace catalogs without installing them. It confines both entries to the
 metadata with the host manifests. `test_skills_marketplaces.py` covers path
 escape and metadata-drift failures.
 
+`test-skills-installation-e2e.sh` exercises the networked installation
+boundary without changing the operator's real home directory. A Bubblewrap
+sandbox mounts the checkout read-only and gives `npx skills` 1.5.23, Codex, and
+Claude disposable configuration and cache directories. A loopback server
+exercises the skills CLI's archive-download path, and a transient user scope
+contains its process tree. The test proves individual, combined, project,
+global, release-ZIP, marketplace, fixture-upgrade, and clean removal paths:
+
+```sh
+.github/scripts/test-skills-installation-e2e.sh
+```
+
+The test requires Linux, Bubblewrap, network access to npm, and the current
+`npx`, `codex`, and `claude` commands. It does not use Anytype credentials or a
+running Anytype service. On 2026-08-21 it passed with skills CLI 1.5.23, Codex
+0.149.0, and Claude Code 2.1.238. Both hosts discovered `anyr` and `any-mcp`
+from the same staged plugin; install, `0.1.0` to `0.1.1` fixture upgrade, and
+removal all passed.
+
+The trigger metadata was also reviewed against this prompt matrix:
+
+| Prompt shape                                           | Expected skill |
+| ------------------------------------------------------ | -------------- |
+| Use `anyr` to list Anytype pages from the command line | `anyr`         |
+| Search Anytype through the configured MCP connection   | `any-mcp`      |
+| Diagnose a missing MCP tool, then use a CLI fallback   | both           |
+| Refactor an unrelated Rust parser                      | neither        |
+
+The `anyr` prerequisite section names the missing executable, service,
+credentials, endpoint verification command, and operator escalation boundary.
+The `any-mcp` prerequisite section tells the agent to report an absent MCP
+connection or optional toolset instead of inventing a tool or starting a second
+server.
+
 The release workflow builds all platform archives and exports the Nix-built
 macOS binary as a signing input. It does not publish a GitHub Release. The
 macOS signing command verifies that input against its workflow run, applies a

@@ -21,3 +21,6 @@ Versioning independently from the Anytype Toolbox Rust crates.
   GitHub Release.
 - Add repository catalogs for Codex and Claude Code, with installation,
   exact-release, update, removal, prerequisite, and security-review guidance.
+- Prove disposable end-to-end discovery, selected installation, release-archive
+  loading, host marketplace upgrades, and clean removal across the skills CLI,
+  Codex, and Claude Code.
