@@ -1,5 +1,29 @@
 # Release scripts
 
+## Skills package validation
+
+`validate_skills_package.py` checks the unpacked Anytype Toolbox Skills plugin
+or a release ZIP without network access. It verifies both host manifests, Agent
+Skills frontmatter, local references, changelog and package versions, required
+files, public-path hygiene, credential patterns, and archive entry safety.
+`test_skills_package.py` exercises the directory and archive rules with offline
+fixtures. The common CI prerequisite check runs both commands.
+
+`validate-skills-hosts.sh` adds the installed `skills-ref`, Codex, and Claude
+Code validators when each is available. The offline validator remains the
+release gate because host installations are not part of the repository
+toolchain.
+
+```sh
+python3 .github/scripts/validate_skills_package.py skills
+python3 .github/scripts/test_skills_package.py
+.github/scripts/validate-skills-hosts.sh skills
+```
+
+The validator accepts `--expected-version VERSION` for either an unpacked
+plugin or a ZIP. Release and prerelease versions use the same semantic-version
+comparison.
+
 The release workflow builds all platform archives and exports the Nix-built
 macOS binary as a signing input. It does not publish a GitHub Release. The
 macOS signing command verifies that input against its workflow run, applies a

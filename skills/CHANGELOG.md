@@ -13,3 +13,6 @@ Versioning independently from the Anytype Toolbox Rust crates.
   Claude Code plugin.
 - Declare the external Anytype, CLI, MCP, and optional workflow prerequisites
   without embedding credentials or checkout-specific setup.
+- Validate package directories and release ZIPs offline, including host
+  manifests, skill metadata and references, version consistency, required
+  files, public-path hygiene, credential patterns, and archive safety.

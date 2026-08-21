@@ -29,5 +29,9 @@ history. Each directory below `skills/` owns the operating guidance and
 supporting references for one Agent Skill. The repository's crate READMEs own
 the `anyr` and `any-mcp` runtime documentation.
 
+Release packages are checked offline for matching manifest and changelog
+versions, valid Agent Skills metadata and references, required files, safe
+archive paths, and accidental private paths or credential material.
+
 Anytype Toolbox is licensed under the Apache License 2.0. See
 [LICENSE](LICENSE).
