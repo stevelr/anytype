@@ -9,7 +9,8 @@ description: Use when reading, searching, creating, or updating Anytype document
 Anytype HTTP and gRPC APIs. Common object, schema, search, collection, Markdown,
 and byte-transfer operations use REST. Rich file discovery, typed body blocks,
 archived-object cleanup, space administration, backup/restore, and some chat
-operations require gRPC. Source and full README: `~/project/anytype/anyr/`.
+operations require gRPC. Source and full README: `anyr/` in the anytype repository
+(https://github.com/stevelr/anytype).
 
 *Tool choice*: Use this skill for explicit CLI workflows, CLI authentication
 or endpoint setup, unavailable MCP tools, and documented CLI-only fallbacks.
@@ -84,7 +85,7 @@ Pick one:
 gRPC credentials for operations marked **CLI + gRPC**:
 `anyr auth set-grpc --config ~/.anytype/config.json` (headless server's
 accountKey/sessionToken), or `--account-key` / `--token` / `--bip39` read from
-stdin. See `~/project/anytype/scripts/init-cli-keys.sh` for full headless
+stdin. See `scripts/init-cli-keys.sh` in the anytype repository for full headless
 bootstrap.
 
 ### Verify before doing anything else
