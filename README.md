@@ -78,6 +78,24 @@ Commands write compact JSON to stdout by default, which keeps pipelines
 predictable. Use `--pretty` for readable JSON or `--table` for terminal output.
 Diagnostics and progress remain on stderr.
 
+## Agent Skills
+
+[Anytype Toolbox Skills](./skills/README.md) is an independently versioned,
+community-maintained bundle for Codex, Claude Code, and other Agent Skills
+hosts. Install the `anyr` skill for direct CLI workflows or `any-mcp` for an AI
+host already connected to `anyr mcp`. The bundle is not affiliated with or
+endorsed by Anytype.
+
+List the available skills before installing:
+
+```sh
+npx skills add stevelr/anytype --list
+```
+
+The skills guide covers individual and combined installs, exact release
+archives, host marketplaces, prerequisites, updates, removal, and package
+verification.
+
 ## Rust libraries and components
 
 CLI users install `anyr`. The other workspace packages provide its libraries

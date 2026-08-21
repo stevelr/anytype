@@ -53,7 +53,9 @@ bash .github/scripts/test-release-tag-policy.sh
 PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_release_scripts.py
 PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_skills_package.py
 PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_skills_release.py
+PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_skills_marketplaces.py
 PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/validate_skills_package.py skills
+PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/validate_skills_marketplaces.py
 bash .github/scripts/test-skills-release-ref.sh
 PYTHONDONTWRITEBYTECODE=1 python3 anyr/tests/test_live_workflow_policy.py
 bash .github/scripts/test-package-nix-dist-archive.sh

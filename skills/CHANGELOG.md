@@ -19,3 +19,5 @@ Versioning independently from the Anytype Toolbox Rust crates.
 - Release the plugin independently from Rust binaries with reproducible ZIP
   and tar.gz archives, checksums, version-specific notes, and a non-latest
   GitHub Release.
+- Add repository catalogs for Codex and Claude Code, with installation,
+  exact-release, update, removal, prerequisite, and security-review guidance.

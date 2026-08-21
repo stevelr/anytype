@@ -1,0 +1,35 @@
+{
+  "name": "anytype-toolbox",
+  "owner": {
+    "name": "Steve Schoettler",
+    "email": "stevelr-git@pm.me"
+  },
+  "metadata": {
+    "description": "Community-maintained Agent Skills for Anytype automation.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "anytype-toolbox-skills",
+      "source": "./skills",
+      "description": "Agent Skills for Anytype automation with anyr and any-mcp.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Steve Schoettler",
+        "email": "stevelr-git@pm.me",
+        "url": "https://github.com/stevelr"
+      },
+      "homepage": "https://docs.anytype-toolbox.org/",
+      "repository": "https://github.com/stevelr/anytype",
+      "license": "Apache-2.0",
+      "keywords": [
+        "anytype",
+        "anyr",
+        "mcp",
+        "automation"
+      ],
+      "category": "productivity",
+      "strict": true
+    }
+  ]
+}

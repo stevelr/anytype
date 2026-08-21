@@ -1,0 +1,20 @@
+{
+  "name": "anytype-toolbox",
+  "interface": {
+    "displayName": "Anytype Toolbox"
+  },
+  "plugins": [
+    {
+      "name": "anytype-toolbox-skills",
+      "source": {
+        "source": "local",
+        "path": "./skills"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

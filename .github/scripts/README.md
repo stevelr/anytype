@@ -43,6 +43,12 @@ It publishes the three generated assets with the selected changelog section as
 notes and marks the release as non-latest so it cannot replace an `anyr`
 release in the repository-wide latest-release slot.
 
+`validate_skills_marketplaces.py` checks the repository's Codex and Claude
+marketplace catalogs without installing them. It confines both entries to the
+`skills/` plugin root and compares their identity, publisher, and version
+metadata with the host manifests. `test_skills_marketplaces.py` covers path
+escape and metadata-drift failures.
+
 The release workflow builds all platform archives and exports the Nix-built
 macOS binary as a signing input. It does not publish a GitHub Release. The
 macOS signing command verifies that input against its workflow run, applies a
