@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## 0.5.2
+
+### Changed
+
+- Let `anyr mcp` start with desktop HTTP or a temporarily unavailable headless
+  gRPC backend. gRPC-only tools now check the backend on demand and return
+  actionable setup, availability, or authentication errors without removing
+  saved credentials.
+- Add an `anytype-setup` Agent Skill for installing `anyr`, selecting desktop
+  or headless operation, authenticating, and recovering unavailable backends.
+
 ## 0.5.1
 
 Highlights:

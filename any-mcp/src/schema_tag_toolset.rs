@@ -292,8 +292,8 @@ pub fn tag_update_tool() -> Result<WorkflowTool<TagOutput>, SchemaContractError>
 /// Returns the complete schema-tag slice for registry composition.
 pub fn schema_tag_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
     Ok(vec![
-        OptionalRegistryTool::mutation(tag_create_tool()?),
-        OptionalRegistryTool::mutation(tag_update_tool()?),
+        OptionalRegistryTool::mutation_http(tag_create_tool()?),
+        OptionalRegistryTool::mutation_http(tag_update_tool()?),
     ])
 }
 
@@ -1028,7 +1028,7 @@ mod tests {
 
     impl OptionalToolsetRegistry for TestRegistry {
         fn metadata(&self) -> OptionalToolsetMetadata {
-            OptionalToolsetMetadata::new("schema", false)
+            OptionalToolsetMetadata::new("schema")
         }
 
         fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -1066,7 +1066,7 @@ mod tests {
     fn runtime(client: AnytypeClient, read_only: bool) -> RuntimeContext {
         let selection = OptionalToolsetSelection::parse(
             Some("schema".to_owned()),
-            &[OptionalToolsetMetadata::new("schema", false)],
+            &[OptionalToolsetMetadata::new("schema")],
         )
         .expect("schema selection");
         RuntimeContext::from_parts_with_profile_and_optional_toolsets(

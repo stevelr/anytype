@@ -245,13 +245,12 @@ not a promise about untested future client releases.
 The commands below are optional discovery smoke tests. They do not replace the
 preview acceptance tests.
 
-Every live smoke requires `ANYTYPE_URL` and `ANYTYPE_KEYSTORE`.
-`ANYTYPE_GRPC_ENDPOINT` and gRPC credentials are optional for compact and
-read-only catalogs, whose retained Phase 1 tools are REST-backed. Standard
-read-write requires gRPC because verified archive success needs its search
-surface. Any configured gRPC credentials require a successful startup ping.
-The dual-probe recipes below require and forward the gRPC endpoint because that
-is the captured environment they reproduce. `ANYTYPE_KEYSTORE_SERVICE` is
+Every live smoke requires `ANYTYPE_KEYSTORE` and an explicit
+`ANY_MCP_CONNECTION_MODE`. Desktop mode uses HTTP only. Headless mode requires
+the paired `ANYTYPE_URL` and `ANYTYPE_GRPC_ENDPOINT` values when either endpoint
+is customized. HTTP workflows start after their HTTP probe even when saved
+gRPC credentials cannot reach the headless service. A gRPC-only workflow makes
+its own bounded admission probe before dispatch. `ANYTYPE_KEYSTORE_SERVICE` is
 optional and defaults to `anyr`; tokens and account keys remain inside the
 selected keystore and are never copied into client configuration.
 
@@ -279,6 +278,7 @@ NPM_CONFIG_CACHE="$inspector_state/npm-cache" \
   npx -y @modelcontextprotocol/inspector@0.22.0 --cli -- env -i \
   ANYTYPE_URL="$ANYTYPE_URL" \
   ANYTYPE_GRPC_ENDPOINT="$ANYTYPE_GRPC_ENDPOINT" \
+  ANY_MCP_CONNECTION_MODE=headless \
   ANYTYPE_KEYSTORE="$ANYTYPE_KEYSTORE" \
   ANYTYPE_KEYSTORE_SERVICE="$ANYTYPE_KEYSTORE_SERVICE" \
   ANY_MCP_PROFILE=standard \
@@ -290,6 +290,7 @@ NPM_CONFIG_CACHE="$inspector_state/npm-cache" \
   npx -y @modelcontextprotocol/inspector@0.22.0 --cli -- env -i \
   ANYTYPE_URL="$ANYTYPE_URL" \
   ANYTYPE_GRPC_ENDPOINT="$ANYTYPE_GRPC_ENDPOINT" \
+  ANY_MCP_CONNECTION_MODE=headless \
   ANYTYPE_KEYSTORE="$ANYTYPE_KEYSTORE" \
   ANYTYPE_KEYSTORE_SERVICE="$ANYTYPE_KEYSTORE_SERVICE" \
   ANY_MCP_PROFILE=standard ANY_MCP_READ_ONLY=1 "$binary" mcp --method tools/list \
@@ -345,7 +346,7 @@ export ANYTYPE_KEYSTORE_SERVICE="${ANYTYPE_KEYSTORE_SERVICE:-anyr}"
 codex exec --ephemeral --ignore-user-config --skip-git-repo-check \
   -C /tmp -s read-only \
   -c "mcp_servers.anytype.command=\"$binary\"" \
-  -c 'mcp_servers.anytype.env={ANY_MCP_READ_ONLY="1"}' \
+  -c 'mcp_servers.anytype.env={ANY_MCP_CONNECTION_MODE="headless",ANY_MCP_READ_ONLY="1"}' \
   -c 'mcp_servers.anytype.env_vars=["ANYTYPE_URL","ANYTYPE_GRPC_ENDPOINT","ANYTYPE_KEYSTORE","ANYTYPE_KEYSTORE_SERVICE"]' \
   --json \
   'Use the anytype MCP server to call server_status exactly once. Do not run shell commands or use any other tool.'
@@ -363,7 +364,7 @@ persistent setup, the supported configuration follows the official
 [mcp_servers.anytype]
 command = "/absolute/path/to/anytype/target/debug/anyr"
 args = ["mcp"]
-env = { ANY_MCP_READ_ONLY = "1" }
+env = { ANY_MCP_CONNECTION_MODE = "headless", ANY_MCP_READ_ONLY = "1" }
 env_vars = [
   "ANYTYPE_URL",
   "ANYTYPE_GRPC_ENDPOINT",
@@ -399,6 +400,7 @@ CLAUDE_CONFIG_DIR="$claude_config" claude mcp add \
   --transport stdio --scope local anytype \
   -e ANYTYPE_URL="$ANYTYPE_URL" \
   -e ANYTYPE_GRPC_ENDPOINT="$ANYTYPE_GRPC_ENDPOINT" \
+  -e ANY_MCP_CONNECTION_MODE=headless \
   -e ANYTYPE_KEYSTORE="$ANYTYPE_KEYSTORE" \
   -e ANYTYPE_KEYSTORE_SERVICE="$ANYTYPE_KEYSTORE_SERVICE" \
   -e ANY_MCP_READ_ONLY=1 -- "$binary" mcp
@@ -425,7 +427,7 @@ claude_mcp_config="$(jq -cn \
   --arg grpc "$ANYTYPE_GRPC_ENDPOINT" \
   --arg keystore "$ANYTYPE_KEYSTORE" \
   --arg keystore_service "$ANYTYPE_KEYSTORE_SERVICE" \
-  '{mcpServers:{anytype:{command:$command,args:["mcp"],env:{ANYTYPE_URL:$url,ANYTYPE_GRPC_ENDPOINT:$grpc,ANYTYPE_KEYSTORE:$keystore,ANYTYPE_KEYSTORE_SERVICE:$keystore_service,ANY_MCP_READ_ONLY:"1"}}}}')"
+  '{mcpServers:{anytype:{command:$command,args:["mcp"],env:{ANYTYPE_URL:$url,ANYTYPE_GRPC_ENDPOINT:$grpc,ANYTYPE_KEYSTORE:$keystore,ANYTYPE_KEYSTORE_SERVICE:$keystore_service,ANY_MCP_CONNECTION_MODE:"headless",ANY_MCP_READ_ONLY:"1"}}}}')"
 claude -p --no-session-persistence --strict-mcp-config \
   --mcp-config "$claude_mcp_config" \
   --allowedTools mcp__anytype__server_status \

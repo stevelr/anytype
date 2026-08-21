@@ -115,7 +115,7 @@ fn runtime_handlers(runtime: &RuntimeContext) -> Result<Arc<ChatMutationHandlers
 
 impl OptionalToolsetRegistry for ChatsRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new(CHATS_TOOLSET_NAME, false)
+        OptionalToolsetMetadata::new(CHATS_TOOLSET_NAME)
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -257,7 +257,7 @@ mod tests {
             Duration::from_secs(2),
             StartupStatus {
                 http_available: true,
-                grpc_available: profile.requires_grpc(read_only),
+                grpc_available: matches!(profile, ApplicationProfile::Standard) && !read_only,
             },
             profile,
             read_only,
@@ -290,7 +290,7 @@ mod tests {
     fn production_inventory_access_transport_and_ownership_are_exact() {
         assert_eq!(
             CHATS_REGISTRY.metadata(),
-            OptionalToolsetMetadata::new(CHATS_TOOLSET_NAME, false)
+            OptionalToolsetMetadata::new(CHATS_TOOLSET_NAME)
         );
         assert_eq!(
             CHATS_REGISTRY.catalog_token_ceiling(),
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(chat_names(&read_only), READ_NAMES);
         assert!(CHATS_REGISTRY.resources().is_empty());
         assert!(CHATS_REGISTRY.resource_templates().is_empty());
-        assert!(!CHATS_REGISTRY.metadata().requires_grpc);
+        assert_eq!(CHATS_REGISTRY.metadata().name, CHATS_TOOLSET_NAME);
     }
 
     #[tokio::test]

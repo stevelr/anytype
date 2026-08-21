@@ -1,7 +1,7 @@
 {
   "tokenizer": "o200k_base",
-  "base_catalog_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
-  "base_catalog_tokens": 9658,
+  "base_catalog_sha256": "7d62afd167e15794944ee8613bb1178a960440070424defa94469dbac354da8b",
+  "base_catalog_tokens": 9796,
   "common_status_ceiling_tokens": 500,
   "common_status_tokens": 260,
   "alpha_selected": ["alpha"],
@@ -10,24 +10,24 @@
     "alpha_read": 118,
     "alpha_write": 125
   },
-  "alpha_composed_total_tokens": 10157,
-  "alpha_read_only_composed_total_tokens": 8743,
+  "alpha_composed_total_tokens": 10295,
+  "alpha_read_only_composed_total_tokens": 8881,
   "alpha_representative_max_result_tokens": 29,
   "beta_selected": ["beta"],
   "beta_ceiling_tokens": 500,
   "beta_tool_tokens": {
     "beta_read": 118
   },
-  "beta_composed_total_tokens": 10032,
+  "beta_composed_total_tokens": 10170,
   "beta_representative_max_result_tokens": 29,
   "gamma_selected": ["gamma"],
   "gamma_ceiling_tokens": 500,
   "gamma_tool_tokens": {
     "gamma_write": 125
   },
-  "gamma_composed_total_tokens": 10039,
-  "gamma_read_only_composed_total_tokens": 8625,
+  "gamma_composed_total_tokens": 10177,
+  "gamma_read_only_composed_total_tokens": 8763,
   "gamma_representative_max_result_tokens": 29,
   "all_selected": ["alpha", "beta", "gamma"],
-  "all_composed_total_tokens": 10400
+  "all_composed_total_tokens": 10538
 }

@@ -53,6 +53,7 @@ grep -q 'report that the connection is unavailable' \
   /tmp/source/skills/skills/any-mcp/SKILL.md
 grep -q 'report the missing startup selection' \
   /tmp/source/skills/skills/any-mcp/SKILL.md
+grep -q 'Desktop mode' /tmp/source/skills/skills/anytype-setup/SKILL.md
 
 skills() {
   npx --yes "skills@$skills_cli_version" "$@"
@@ -68,6 +69,7 @@ printf 'Testing skills CLI %s discovery and selected installs\n' "$skills_cli_ve
 skills add /tmp/source --list > skills-list.txt
 grep -q 'anyr' skills-list.txt
 grep -q 'any-mcp' skills-list.txt
+grep -q 'anytype-setup' skills-list.txt
 
 mkdir project-anyr project-any-mcp project-both
 (
@@ -97,17 +99,19 @@ mkdir project-anyr project-any-mcp project-both
 )
 
 skills add /tmp/source \
-  --skill anyr --skill any-mcp \
+  --skill anyr --skill any-mcp --skill anytype-setup \
   --agent codex --global --yes --copy
 assert_skill /home/user/.agents/skills anyr
 assert_skill /home/user/.agents/skills any-mcp
-skills remove anyr any-mcp --agent codex --global --yes
+assert_skill /home/user/.agents/skills anytype-setup
+skills remove anyr any-mcp anytype-setup --agent codex --global --yes
 test ! -e /home/user/.agents/skills/anyr
 test ! -e /home/user/.agents/skills/any-mcp
+test ! -e /home/user/.agents/skills/anytype-setup
 
 printf 'Testing release-shaped ZIP installation\n'
 python3 /tmp/source/.github/scripts/prepare_skills_release.py prepare \
-  anytype-toolbox-skills-v0.1.0 \
+  anytype-toolbox-skills-v0.1.1 \
   --package /tmp/source/skills \
   --output /tmp/test/release
 server_pid=
@@ -139,10 +143,11 @@ archive_port=$(cat /tmp/test/archive-server-port)
 mkdir archive-project
 (
   cd archive-project
-  skills add "http://127.0.0.1:$archive_port/anytype-toolbox-skills-v0.1.0.zip" \
-    --skill anyr --skill any-mcp --agent codex --yes --copy
+  skills add "http://127.0.0.1:$archive_port/anytype-toolbox-skills-v0.1.1.zip" \
+    --skill anyr --skill any-mcp --skill anytype-setup --agent codex --yes --copy
   assert_skill .agents/skills anyr
   assert_skill .agents/skills any-mcp
+  assert_skill .agents/skills anytype-setup
   test -f .agents/skills/any-mcp/references/workflows.md
   test -z "$(find .agents/skills -xtype l -print -quit)"
   test ! -e .agents/skills/anyr/README.md
@@ -156,19 +161,21 @@ mkdir marketplace-fixture
 cp -a /tmp/source/.agents /tmp/source/.claude-plugin /tmp/source/skills marketplace-fixture/
 
 codex plugin marketplace add /tmp/test/marketplace-fixture --json > codex-marketplace.json
-codex plugin add anytype-toolbox-skills@anytype-toolbox --json > codex-install-0.1.0.json
+codex plugin add anytype-toolbox-skills@anytype-toolbox --json > codex-install-0.1.1.json
 grep -q 'installed, enabled' < <(codex plugin list)
-codex_cache=/home/user/.codex/plugins/cache/anytype-toolbox/anytype-toolbox-skills/0.1.0
+codex_cache=/home/user/.codex/plugins/cache/anytype-toolbox/anytype-toolbox-skills/0.1.1
 assert_skill "$codex_cache/skills" anyr
 assert_skill "$codex_cache/skills" any-mcp
+assert_skill "$codex_cache/skills" anytype-setup
 cmp marketplace-fixture/skills/skills/anyr/SKILL.md "$codex_cache/skills/anyr/SKILL.md"
 
 claude plugin marketplace add /tmp/test/marketplace-fixture
 claude plugin install anytype-toolbox-skills@anytype-toolbox
 grep -q 'Status:.*enabled' < <(claude plugin list)
-claude_cache=/home/user/.claude/plugins/cache/anytype-toolbox/anytype-toolbox-skills/0.1.0
+claude_cache=/home/user/.claude/plugins/cache/anytype-toolbox/anytype-toolbox-skills/0.1.1
 assert_skill "$claude_cache/skills" anyr
 assert_skill "$claude_cache/skills" any-mcp
+assert_skill "$claude_cache/skills" anytype-setup
 cmp marketplace-fixture/skills/skills/any-mcp/SKILL.md "$claude_cache/skills/any-mcp/SKILL.md"
 
 python3 - <<'PY'
@@ -182,34 +189,34 @@ for relative in (
 ):
     path = root / relative
     value = json.loads(path.read_text(encoding="utf-8"))
-    value["version"] = "0.1.1"
+    value["version"] = "0.1.2"
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 marketplace = root / ".claude-plugin/marketplace.json"
 value = json.loads(marketplace.read_text(encoding="utf-8"))
-value["metadata"]["version"] = "0.1.1"
-value["plugins"][0]["version"] = "0.1.1"
+value["metadata"]["version"] = "0.1.2"
+value["plugins"][0]["version"] = "0.1.2"
 marketplace.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 changelog = root / "skills/CHANGELOG.md"
 text = changelog.read_text(encoding="utf-8")
-changelog.write_text(text.replace("## [0.1.0]", "## [0.1.1]", 1), encoding="utf-8")
+changelog.write_text(text.replace("## [0.1.1]", "## [0.1.2]", 1), encoding="utf-8")
 (root / "skills/skills/anyr/SKILL.md").open("a", encoding="utf-8").write(
     "\nmarketplace-upgrade-marker\n"
 )
 PY
 
-codex plugin add anytype-toolbox-skills@anytype-toolbox --json > codex-install-0.1.1.json
-test "$(python3 -c 'import json; print(json.load(open("codex-install-0.1.1.json"))["version"])')" = 0.1.1
+codex plugin add anytype-toolbox-skills@anytype-toolbox --json > codex-install-0.1.2.json
+test "$(python3 -c 'import json; print(json.load(open("codex-install-0.1.2.json"))["version"])')" = 0.1.2
 grep -q 'marketplace-upgrade-marker' \
-  /home/user/.codex/plugins/cache/anytype-toolbox/anytype-toolbox-skills/0.1.1/skills/anyr/SKILL.md
+  /home/user/.codex/plugins/cache/anytype-toolbox/anytype-toolbox-skills/0.1.2/skills/anyr/SKILL.md
 
 claude plugin marketplace update anytype-toolbox
 claude plugin update anytype-toolbox-skills@anytype-toolbox
 claude plugin list > claude-list-after-update.txt
 cat claude-list-after-update.txt
-grep -q 'Version: 0.1.1' claude-list-after-update.txt
-test -f /home/user/.claude/plugins/cache/anytype-toolbox/anytype-toolbox-skills/0.1.1/skills/anyr/SKILL.md
+grep -q 'Version: 0.1.2' claude-list-after-update.txt
+test -f /home/user/.claude/plugins/cache/anytype-toolbox/anytype-toolbox-skills/0.1.2/skills/anyr/SKILL.md
 
 codex plugin remove anytype-toolbox-skills@anytype-toolbox --json >/dev/null
 if grep -q 'installed, enabled' < <(codex plugin list); then

@@ -5,6 +5,18 @@ All notable changes to Anytype Toolbox Skills are documented in this file.
 The format is based on Keep a Changelog, and this package uses Semantic
 Versioning independently from the Anytype Toolbox Rust crates.
 
+## [0.1.1]
+
+### Added
+
+- Add `anytype-setup` for `anyr` installation, explicit desktop or headless
+  connection selection, authentication, status checks, and bounded recovery.
+
+### Changed
+
+- Keep ordinary any-mcp HTTP workflows independent of gRPC preflight and route
+  structured backend setup failures to the connection skill.
+
 ## [0.1.0]
 
 ### Added

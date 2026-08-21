@@ -1,5 +1,5 @@
 {
-  "read_only_catalog_sha256": "3f4fad407847007b7f116da4bb8ee271e46c81c7035b4fcab9725433d3b4776f",
+  "read_only_catalog_sha256": "fd6f9b6ce16269cc28bc23183a858c4cfbc941927d16e19fabb0bd5979bd08c7",
   "read_only_resource_templates": {
     "resourceTemplates": [
       {
@@ -44,7 +44,7 @@
     "view_list",
     "view_object_list"
   ],
-  "read_write_catalog_sha256": "c6dd89f5bf2d6a82ef64db1896dfd984ecee7bd0685c24d6b07d17ad83205ca5",
+  "read_write_catalog_sha256": "3a0203ee4c665ce3893a7cb722f5cbb284e9bcdad5ad2a842928513f66cdce75",
   "read_write_resource_templates": {
     "resourceTemplates": [
       {
@@ -99,7 +99,7 @@
     "resultType": "complete",
     "ttlMs": 3600000
   },
-  "stdio_read_only_catalog_sha256": "8e9496e86995a0c425c530ca6df846d51fcb5bade122d24a8133759a9095e920",
+  "stdio_read_only_catalog_sha256": "b31990ef7dc201bcea008c771b4bfd21031628bb9ac2988334edd0548959a680",
   "stdio_read_only_resource_templates": {
     "cacheScope": "public",
     "resourceTemplates": [
@@ -153,7 +153,7 @@
     "resultType": "complete",
     "ttlMs": 3600000
   },
-  "stdio_read_write_catalog_sha256": "31b6cd9eaf22ff0475ffbcd3275b9ca4635ef39239f73ad40dbeac1a0167e1a9",
+  "stdio_read_write_catalog_sha256": "75976c5ce03246824d5d390c322e4f681ef3f8850c4162e6e6dbfaed9abd03fb",
   "stdio_read_write_resource_templates": {
     "cacheScope": "public",
     "resourceTemplates": [

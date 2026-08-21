@@ -330,6 +330,8 @@ fn resource_error(error: ToolError, message: &'static str) -> ErrorData {
         | ToolErrorCode::Ambiguous
         | ToolErrorCode::Conflict
         | ToolErrorCode::BoundedResult
+        | ToolErrorCode::GrpcNotConfigured
+        | ToolErrorCode::GrpcUnavailable
         | ToolErrorCode::Upstream => ErrorData::internal_error(message, data),
     }
 }

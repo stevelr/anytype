@@ -1,9 +1,9 @@
 {
-  "base_catalog_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
-  "base_catalog_tokens": 9658,
-  "compact_composed_total_tokens": 17770,
-  "compact_read_only_total_tokens": 9215,
-  "files_members_schema_compact_total_tokens": 21862,
+  "base_catalog_sha256": "7d62afd167e15794944ee8613bb1178a960440070424defa94469dbac354da8b",
+  "base_catalog_tokens": 9796,
+  "compact_composed_total_tokens": 17908,
+  "compact_read_only_total_tokens": 9353,
+  "files_members_schema_compact_total_tokens": 22000,
   "per_tool_tokens": {
     "property_create": 1478,
     "property_update": 671,
@@ -67,7 +67,7 @@
   "schema_selected_ceiling_tokens": 10000,
   "schema_selected_contribution_tokens": 8112,
   "selected": ["schema"],
-  "standard_composed_total_tokens": 44247,
-  "standard_read_only_total_tokens": 29726,
+  "standard_composed_total_tokens": 44385,
+  "standard_read_only_total_tokens": 29864,
   "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
 }

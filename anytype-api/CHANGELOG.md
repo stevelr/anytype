@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased]
+## [0.5.2] - 2026-08-22
 
 ### Added
 
@@ -30,6 +30,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Classify gRPC admission failures as configuration, authentication, or
+  availability errors so MCP callers can provide the right recovery path.
 - Move the keystore guide to the documentation site and link it from the crate
   README. Public builders and terminal methods state when they require a gRPC
   backend, and the HTTP/gRPC inventory itemizes the current method-level

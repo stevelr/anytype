@@ -3,10 +3,10 @@
   "smallest_supported_context_tokens": 200000,
   "catalog_context_limit_percent": 5,
   "material_growth_review_percent": 2,
-  "compact_catalog_tokens": 9658,
-  "compact_read_only_catalog_tokens": 8369,
-  "standard_catalog_tokens": 36135,
-  "standard_read_only_catalog_tokens": 28880,
+  "compact_catalog_tokens": 9796,
+  "compact_read_only_catalog_tokens": 8507,
+  "standard_catalog_tokens": 36273,
+  "standard_read_only_catalog_tokens": 29018,
   "object_search_result_tokens": 421,
   "object_get_result_tokens": 316
 }

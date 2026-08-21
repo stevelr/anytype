@@ -18,6 +18,9 @@ import zipfile
 
 SCRIPT_ROOT = pathlib.Path(__file__).resolve().parent
 REPOSITORY_ROOT = SCRIPT_ROOT.parents[1]
+CURRENT_VERSION = json.loads(
+    (REPOSITORY_ROOT / "skills/.codex-plugin/plugin.json").read_text(encoding="utf-8")
+)["version"]
 sys.path.insert(0, str(SCRIPT_ROOT))
 
 import prepare_skills_release as release  # noqa: E402
@@ -35,7 +38,8 @@ class SkillsReleaseTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def prepare(self, tag: str = "anytype-toolbox-skills-v0.1.0", name: str = "dist") -> release.ReleaseOutputs:
+    def prepare(self, tag: str | None = None, name: str = "dist") -> release.ReleaseOutputs:
+        tag = tag or f"anytype-toolbox-skills-v{CURRENT_VERSION}"
         return release.prepare_release(tag, self.package, self.root / name)
 
     def set_package_version(self, version: str) -> None:
@@ -48,7 +52,9 @@ class SkillsReleaseTests(unittest.TestCase):
             path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         changelog = self.package / "CHANGELOG.md"
         changelog.write_text(
-            changelog.read_text(encoding="utf-8").replace("## [0.1.0]", f"## [{version}]"),
+            changelog.read_text(encoding="utf-8").replace(
+                f"## [{CURRENT_VERSION}]", f"## [{version}]"
+            ),
             encoding="utf-8",
         )
 
@@ -83,7 +89,9 @@ class SkillsReleaseTests(unittest.TestCase):
     def test_rejects_changelog_version_mismatch(self) -> None:
         changelog = self.package / "CHANGELOG.md"
         changelog.write_text(
-            changelog.read_text(encoding="utf-8").replace("## [0.1.0]", "## [0.0.9]"),
+            changelog.read_text(encoding="utf-8").replace(
+                f"## [{CURRENT_VERSION}]", "## [0.0.9]"
+            ),
             encoding="utf-8",
         )
         with self.assertRaisesRegex(release.ReleasePreparationError, "first release version does not match"):
@@ -93,16 +101,21 @@ class SkillsReleaseTests(unittest.TestCase):
         changelog = self.package / "CHANGELOG.md"
         changelog.write_text(
             "# Changelog\n\n## [Unreleased]\n\n- Later.\n\n"
-            "## [0.1.0]\n\n### Added\n\n- Selected.\n\n"
+            f"## [{CURRENT_VERSION}]\n\n### Added\n\n- Selected.\n\n"
             "## [0.0.1]\n\n- Earlier.\n",
             encoding="utf-8",
         )
         outputs = self.prepare()
-        self.assertEqual(outputs.notes_path.read_text(encoding="utf-8"), "## [0.1.0]\n\n### Added\n\n- Selected.\n")
+        self.assertEqual(
+            outputs.notes_path.read_text(encoding="utf-8"),
+            f"## [{CURRENT_VERSION}]\n\n### Added\n\n- Selected.\n",
+        )
 
     def test_release_requires_nonempty_matching_changelog_section(self) -> None:
         changelog = self.package / "CHANGELOG.md"
-        changelog.write_text("# Changelog\n\n## [0.1.0]\n", encoding="utf-8")
+        changelog.write_text(
+            f"# Changelog\n\n## [{CURRENT_VERSION}]\n", encoding="utf-8"
+        )
         with self.assertRaisesRegex(release.ReleasePreparationError, "must not be empty"):
             self.prepare()
 
@@ -162,7 +175,9 @@ class SkillsReleaseTests(unittest.TestCase):
         output.mkdir()
         (output / "foreign").write_text("keep", encoding="utf-8")
         with self.assertRaisesRegex(release.ReleasePreparationError, "must be empty"):
-            release.prepare_release("anytype-toolbox-skills-v0.1.0", self.package, output)
+            release.prepare_release(
+                f"anytype-toolbox-skills-v{CURRENT_VERSION}", self.package, output
+            )
         self.assertEqual((output / "foreign").read_text(encoding="utf-8"), "keep")
 
 

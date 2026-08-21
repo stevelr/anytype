@@ -1,9 +1,9 @@
 {
-  "base_catalog_sha256": "4e03af8ea8a70e14b4d75cb4f3a979e3c871f0e784888b79a0ff38b820812342",
-  "base_catalog_tokens": 36135,
+  "base_catalog_sha256": "dcb7589f81bbf8545a1ff617968e035200ec83fbd8cdc591a9e353d9ff04d1f2",
+  "base_catalog_tokens": 36273,
   "common_status_ceiling_tokens": 500,
   "common_status_tokens": 260,
-  "composed_total_tokens": 39064,
+  "composed_total_tokens": 39202,
   "deterministic_random_seed": "0x0A11F17E",
   "files_catalog_ceiling_tokens": 3400,
   "live_new_upload_multipart_body_bytes": 8458,
@@ -23,7 +23,7 @@
     "file_read": 1191,
     "file_upload": 847
   },
-  "read_only_composed_total_tokens": 30962,
+  "read_only_composed_total_tokens": 31100,
   "selected": ["files"],
   "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
 }

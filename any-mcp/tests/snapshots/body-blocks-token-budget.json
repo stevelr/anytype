@@ -1,20 +1,20 @@
 {
-  "base_catalog_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
+  "base_catalog_sha256": "7d62afd167e15794944ee8613bb1178a960440070424defa94469dbac354da8b",
   "compact_composed_ceiling_tokens": 41866,
-  "compact_composed_total_tokens": 38268,
+  "compact_composed_total_tokens": 38406,
   "compact_read_only_ceiling_tokens": 12869,
-  "compact_read_only_total_tokens": 12379,
+  "compact_read_only_total_tokens": 12517,
   "paired_fixtures": {
     "list": {
       "context_tokens": {
-        "compact_read_only_error": 13014,
-        "compact_read_only_success": 132933,
-        "compact_read_write_error": 38903,
-        "compact_read_write_success": 158822,
-        "standard_read_only_error": 33525,
-        "standard_read_only_success": 153444,
-        "standard_read_write_error": 65380,
-        "standard_read_write_success": 185299
+        "compact_read_only_error": 13152,
+        "compact_read_only_success": 133071,
+        "compact_read_write_error": 39041,
+        "compact_read_write_success": 158960,
+        "standard_read_only_error": 33663,
+        "standard_read_only_success": 153582,
+        "standard_read_write_error": 65518,
+        "standard_read_write_success": 185437
       },
       "error": {
         "bytes": 331,
@@ -39,12 +39,12 @@
       "context_tokens": {
         "compact_read_only_error": null,
         "compact_read_only_success": null,
-        "compact_read_write_error": 50344,
-        "compact_read_write_success": 74244,
+        "compact_read_write_error": 50482,
+        "compact_read_write_success": 74382,
         "standard_read_only_error": null,
         "standard_read_only_success": null,
-        "standard_read_write_error": 76821,
-        "standard_read_write_success": 100721
+        "standard_read_write_error": 76959,
+        "standard_read_write_success": 100859
       },
       "error": {
         "bytes": 331,
@@ -86,12 +86,12 @@
       "context_tokens": {
         "compact_read_only_error": null,
         "compact_read_only_success": null,
-        "compact_read_write_error": 118325,
-        "compact_read_write_success": 120876,
+        "compact_read_write_error": 118463,
+        "compact_read_write_success": 121014,
         "standard_read_only_error": null,
         "standard_read_only_success": null,
-        "standard_read_write_error": 144802,
-        "standard_read_write_success": 147353
+        "standard_read_write_error": 144940,
+        "standard_read_write_success": 147491
       },
       "error": {
         "bytes": 331,
@@ -128,7 +128,7 @@
     "rich_page_create": 3922,
     "rich_page_resume": 3960
   },
-  "read_only_catalog_sha256": "dfb9ebfc01b52d93e5486536c531e93f27384ea2e952539033f34fb9c3c673c2",
+  "read_only_catalog_sha256": "efd72281d44cad06c39c71a569cb32cab9e5ac0f30b0e53cc730e464d5ca1c8c",
   "read_only_domain_ceiling_tokens": 4000,
   "read_only_domain_tokens": 3754,
   "read_only_selected_contribution_ceiling_tokens": 4500,
@@ -136,12 +136,12 @@
   "read_write_domain_ceiling_tokens": 31708,
   "read_write_domain_tokens": 28354,
   "selected": ["body-blocks"],
-  "selected_catalog_sha256": "4737bce9fceff8f7ed0ad19b41ccc1488927691536a9baed12c6ec5e5443acc7",
+  "selected_catalog_sha256": "aa454b99e999457b03801fe051d25a6b09546279713e728a077b6d651e7db58d",
   "selected_contribution_ceiling_tokens": 32208,
   "selected_contribution_tokens": 28610,
   "standard_composed_ceiling_tokens": 68343,
-  "standard_composed_total_tokens": 64745,
+  "standard_composed_total_tokens": 64883,
   "standard_read_only_ceiling_tokens": 33380,
-  "standard_read_only_total_tokens": 32890,
+  "standard_read_only_total_tokens": 33028,
   "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
 }

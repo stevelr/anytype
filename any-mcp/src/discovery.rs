@@ -41,7 +41,7 @@ use crate::{
     pagination::{Page, PageLimit},
     protocol::{ToolProfile, WorkflowTool, workflow_tool},
     result::tool_error,
-    runtime::{OperationContext, RuntimeContext},
+    runtime::{GrpcLastObserved, OperationContext, RuntimeContext},
     schema::SchemaContractError,
     space_policy::SpacePolicy,
     validation::{BoundedList, Omittable, ValidationError, optional_non_null_schema},
@@ -244,10 +244,40 @@ pub struct ServerStatusOutput {
     api_version: ApiVersion,
     /// Whether the authenticated HTTP startup probe succeeded.
     http_available: bool,
-    /// Whether configured gRPC credentials and its startup probe succeeded.
-    grpc_available: bool,
+    /// Whether this process enabled a paired headless gRPC configuration.
+    grpc_configured: bool,
+    /// Latest gRPC admission result, without sensitive details.
+    grpc_last_observed: GrpcObservedState,
     /// Startup-selected MCP toolsets available in this application profile.
     enabled_toolsets: EnabledToolsets,
+}
+
+/// Latest gRPC admission result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcObservedState {
+    /// No admission has been attempted.
+    Never,
+    /// The backend accepted the probe.
+    Available,
+    /// The backend did not answer.
+    Unavailable,
+    /// The backend rejected saved credentials.
+    AuthenticationFailed,
+    /// gRPC is not configured.
+    ConfigurationError,
+}
+
+impl From<GrpcLastObserved> for GrpcObservedState {
+    fn from(state: GrpcLastObserved) -> Self {
+        match state {
+            GrpcLastObserved::Never => Self::Never,
+            GrpcLastObserved::Available => Self::Available,
+            GrpcLastObserved::Unavailable => Self::Unavailable,
+            GrpcLastObserved::AuthenticationFailed => Self::AuthenticationFailed,
+            GrpcLastObserved::ConfigurationError => Self::ConfigurationError,
+        }
+    }
 }
 
 /// Startup-selected toolset names returned by `server_status`.
@@ -527,6 +557,8 @@ impl DiscoveryHandlers {
         };
         let runtime = self.runtime.clone();
         let status = runtime.startup_status();
+        let grpc_configured = runtime.grpc_configured();
+        let grpc_last_observed = runtime.grpc_last_observed();
         let profile = runtime.profile();
         let read_only = runtime.is_read_only();
         let endpoint = runtime.client().get_http_endpoint().to_owned();
@@ -544,7 +576,8 @@ impl DiscoveryHandlers {
                     endpoint: redact_endpoint(&endpoint)?,
                     api_version: ApiVersion::new(api_version).map_err(domain_handler_error)?,
                     http_available: status.http_available,
-                    grpc_available: status.grpc_available,
+                    grpc_configured,
+                    grpc_last_observed: grpc_last_observed.into(),
                     enabled_toolsets: enabled_toolsets(profile, read_only)?,
                 })
             },
@@ -1879,10 +1912,14 @@ mod tests {
 
     #[tokio::test]
     async fn status_wire_result_is_redacted_and_uses_startup_snapshot() {
-        let handlers = DiscoveryHandlers::with_new_cursor_store(runtime(
-            "https://alice:secret@example.com:8443/api?token=secret#fragment",
-        ))
-        .unwrap();
+        let runtime = runtime("https://alice:secret@example.com:8443/api?token=secret#fragment");
+        let admission_error =
+            runtime.record_grpc_admission_failure(&anytype::error::AnytypeError::Unauthorized);
+        assert_eq!(
+            admission_error.code(),
+            crate::error::ToolErrorCode::Authentication
+        );
+        let handlers = DiscoveryHandlers::with_new_cursor_store(runtime).unwrap();
         let result = handlers
             .server_status(ServerStatusInput {}, &CancellationToken::new())
             .await;
@@ -1891,7 +1928,9 @@ mod tests {
         assert_eq!(value["endpoint"], "https://example.com:8443/api");
         assert_eq!(value["api_version"], anytype::ANYTYPE_API_VERSION);
         assert_eq!(value["http_available"], true);
-        assert_eq!(value["grpc_available"], false);
+        assert_eq!(value["grpc_configured"], false);
+        assert_eq!(value["grpc_last_observed"], "authentication_failed");
+        assert!(value.get("grpc_available").is_none());
         assert_eq!(value["profile"], "standard");
         assert_eq!(value["read_only"], false);
         assert_eq!(

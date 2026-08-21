@@ -24,7 +24,9 @@ anyr auth status --pretty
 
 Desktop login provisions HTTP access. `auth status` reports HTTP and gRPC
 credentials separately because some file, chat, invitation, backup, and MCP
-operations require gRPC credentials. The [credential guide](./anyr/README.md#generating-and-saving-credentials) covers both.
+operations require gRPC credentials. Most MCP tools work with the desktop HTTP
+API; its [connection guide](https://docs.anytype-toolbox.org/reference/connections/)
+lists the headless-only tools and covers both credential families.
 
 For a running Anytype headless server, initialize and verify both credential
 families together:

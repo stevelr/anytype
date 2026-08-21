@@ -632,9 +632,9 @@ pub fn type_update_tool() -> Result<WorkflowTool<TypeOutput>, SchemaContractErro
 /// Returns the complete schema-type slice for registry composition.
 pub fn schema_type_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
     Ok(vec![
-        OptionalRegistryTool::read(type_get_tool()?),
-        OptionalRegistryTool::mutation(type_create_tool()?),
-        OptionalRegistryTool::mutation(type_update_tool()?),
+        OptionalRegistryTool::read_http(type_get_tool()?),
+        OptionalRegistryTool::mutation_http(type_create_tool()?),
+        OptionalRegistryTool::mutation_grpc(type_update_tool()?),
     ])
 }
 
@@ -1522,7 +1522,7 @@ mod tests {
 
     impl OptionalToolsetRegistry for TestRegistry {
         fn metadata(&self) -> OptionalToolsetMetadata {
-            OptionalToolsetMetadata::new("schema", true)
+            OptionalToolsetMetadata::new("schema")
         }
 
         fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -1575,7 +1575,7 @@ mod tests {
     fn runtime(client: AnytypeClient, read_only: bool) -> RuntimeContext {
         let selection = OptionalToolsetSelection::parse(
             Some("schema".to_owned()),
-            &[OptionalToolsetMetadata::new("schema", true)],
+            &[OptionalToolsetMetadata::new("schema")],
         )
         .expect("schema selection");
         RuntimeContext::from_parts_with_profile_and_optional_toolsets(

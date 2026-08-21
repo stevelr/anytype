@@ -4,9 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased]
+## [0.5.2] - 2026-08-22
 
 ### Changed
+
+- Keep authenticated HTTP MCP workflows available when configured headless
+  gRPC is unavailable. Connection mode now selects desktop HTTP-only or paired
+  headless backends before credential access. gRPC-only tools make a bounded
+  pre-dispatch admission check and return stable configuration, availability,
+  or authentication recovery errors. `server_status` exposes configured and
+  last-observed gRPC state without endpoint or credential details.
 
 - Move the versioned `any-mcp` Agent Skill into the self-contained Anytype
   Toolbox Skills plugin and keep its machine-checked examples linked to the

@@ -27,7 +27,8 @@ calls before upstream I/O.
 Optional registries are linked at build time and selected at startup. Shipped
 registries cover artifacts, typed body blocks, chats, files, members, schema,
 and view writes. Selection cannot change after protocol startup. A registry is
-advertised only when its complete contract and required backend are available.
+advertised when selected and allowed by the profile and read-only policy;
+temporary backend availability does not change the catalog.
 
 The versioned [`any-mcp` skill](../skills/skills/any-mcp/SKILL.md) supplies
 agent-facing tool selection and higher-level personal-knowledge workflows. It
@@ -41,9 +42,17 @@ stderr. The stable transport uses the released `2025-11-25` protocol. An
 explicit experimental selector enables the stateless `2026-07-28` preview.
 
 Startup validates configuration before authentication, then requires a healthy
-HTTP connection. It checks gRPC when configured and whenever the selected
-catalog requires it. Configured but unhealthy gRPC fails startup so a process
-cannot advertise a catalog against the wrong backend.
+HTTP connection. `ANY_MCP_CONNECTION_MODE=desktop` is the default and enables
+HTTP workflows only. `headless` enables the paired headless HTTP and gRPC
+endpoints. Custom headless endpoints require both values on the same host, so
+desktop HTTP cannot be combined accidentally with a headless gRPC server.
+
+The catalog remains available when headless gRPC is stopped or rejects saved
+credentials. A gRPC-only workflow performs one bounded admission ping before
+handler dispatch and returns a structured `grpc_not_configured`,
+`grpc_unavailable`, or `authentication` recovery error. HTTP workflows do not
+probe gRPC. `server_status` reports whether gRPC is configured and its last
+observed redacted state.
 
 Concurrency, request time, startup time, and buffered response sizes have
 validated finite ceilings. Cancellation stops undispatched work. A mutation
@@ -62,9 +71,9 @@ Workflow handlers separate these stages:
 6. Return a structured result or a secret-safe error classification.
 
 List workflows use bounded pagination and opaque continuation state. Document
-workflows limit both upstream payloads and model-visible output. Catalog
-metadata reports which backend and optional registry a workflow needs without
-exposing credentials or endpoint details.
+workflows limit both upstream payloads and model-visible output. The server
+classifies every tool's backend centrally without exposing credentials or
+endpoint details.
 
 ## Artifact data plane
 

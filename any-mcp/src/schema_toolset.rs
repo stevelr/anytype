@@ -121,7 +121,7 @@ fn runtime_handlers(runtime: &RuntimeContext) -> Result<Arc<SchemaHandlers>, Err
 
 impl OptionalToolsetRegistry for SchemaRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new(SCHEMA_TOOLSET_NAME, true)
+        OptionalToolsetMetadata::new(SCHEMA_TOOLSET_NAME)
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -304,7 +304,7 @@ mod tests {
     fn production_inventory_access_projection_and_transport_are_exact() {
         assert_eq!(
             SCHEMA_REGISTRY.metadata(),
-            OptionalToolsetMetadata::new(SCHEMA_TOOLSET_NAME, true)
+            OptionalToolsetMetadata::new(SCHEMA_TOOLSET_NAME)
         );
         assert_eq!(
             SCHEMA_REGISTRY.catalog_token_ceiling(),
@@ -313,7 +313,7 @@ mod tests {
         assert!(
             production_optional_metadata()
                 .iter()
-                .any(|metadata| metadata == &OptionalToolsetMetadata::new("schema", true))
+                .any(|metadata| metadata == &OptionalToolsetMetadata::new("schema"))
         );
 
         let read_write = server(Some("schema"), ApplicationProfile::Compact, false);
@@ -351,7 +351,7 @@ mod tests {
                 false,
                 false,
             ))
-            .is_err()
+            .is_ok()
         );
     }
 

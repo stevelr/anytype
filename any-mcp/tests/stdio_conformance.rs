@@ -494,8 +494,13 @@ fn conformance_command(
 }
 
 #[test]
-fn standard_read_write_http_only_fails_before_protocol_output() {
-    for protocol in [None, Some("experimental-2026-07-28")] {
+fn standard_read_write_starts_without_a_live_grpc_backend() {
+    for (protocol, configured_unavailable_grpc) in [
+        (None, false),
+        (Some("experimental-2026-07-28"), false),
+        (None, true),
+        (Some("experimental-2026-07-28"), true),
+    ] {
         let fixture = HttpFixture::start();
         let fixture_address = fixture.address.clone();
         let mut command = Command::new(env!("CARGO_BIN_EXE_any-mcp-process-test"));
@@ -508,10 +513,19 @@ fn standard_read_write_http_only_fails_before_protocol_output() {
             .env("ANY_MCP_READ_ONLY", "0")
             .env("ANY_MCP_STARTUP_TIMEOUT_SECS", "5")
             .env("RUST_LOG", "any_mcp=info")
-            .env_remove("ANYTYPE_GRPC_ENDPOINT")
             .env_remove("ANYTYPE_KEY_ACCOUNT_ID")
             .env_remove("ANYTYPE_KEY_ACCOUNT_KEY")
             .env_remove("ANYTYPE_KEY_SESSION_TOKEN");
+        if configured_unavailable_grpc {
+            command
+                .env("ANY_MCP_CONNECTION_MODE", "headless")
+                .env("ANYTYPE_GRPC_ENDPOINT", "http://127.0.0.1:1")
+                .env("ANYTYPE_KEY_SESSION_TOKEN", "configured-session-token");
+        } else {
+            command
+                .env("ANY_MCP_CONNECTION_MODE", "desktop")
+                .env_remove("ANYTYPE_GRPC_ENDPOINT");
+        }
         if let Some(protocol) = protocol {
             command.env("ANY_MCP_PROTOCOL", protocol);
         } else {
@@ -522,17 +536,16 @@ fn standard_read_write_http_only_fails_before_protocol_output() {
             .expect("run HTTP-only standard read-write process");
         fixture.finish();
 
-        assert!(!output.status.success());
-        assert!(
-            output.stdout.is_empty(),
-            "startup failure keeps stdout empty"
-        );
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty(), "EOF produces no protocol frame");
         let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8 diagnostics");
         assert!(
-            stderr.contains("selected Anytype MCP catalog requires configured gRPC credentials")
+            stderr.contains("authenticated Anytype runtime ready"),
+            "HTTP startup should succeed without probing gRPC: {stderr}"
         );
         for secret in [
             HTTP_TOKEN,
+            "configured-session-token",
             INPUT_SECRET,
             DOCUMENT_BODY,
             fixture_address.as_str(),

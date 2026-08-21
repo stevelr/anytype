@@ -7,22 +7,22 @@
   },
   "protocol_compositions": {
     "preview_2026_07_28": {
-      "base_catalog_sha256": "6656761b93abda934c5cf649469bc8a7bd70829e5199866ffd2ad85121c28aeb",
-      "base_catalog_tokens": 9668,
-      "compact_composed_total_tokens": 11315,
-      "compact_read_only_total_tokens": 9214,
-      "members_views_write_compact_total_tokens": 12734,
-      "standard_composed_total_tokens": 37792,
-      "standard_read_only_total_tokens": 29725
+      "base_catalog_sha256": "7e612f2b188b147ed63768b9c13b176d186e513cd7017f5ab4ad99b4fb30e977",
+      "base_catalog_tokens": 9806,
+      "compact_composed_total_tokens": 11453,
+      "compact_read_only_total_tokens": 9352,
+      "members_views_write_compact_total_tokens": 12872,
+      "standard_composed_total_tokens": 37930,
+      "standard_read_only_total_tokens": 29863
     },
     "stable_2025_11_25": {
-      "base_catalog_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
-      "base_catalog_tokens": 9658,
-      "compact_composed_total_tokens": 11305,
-      "compact_read_only_total_tokens": 9204,
-      "members_views_write_compact_total_tokens": 12724,
-      "standard_composed_total_tokens": 37782,
-      "standard_read_only_total_tokens": 29715
+      "base_catalog_sha256": "7d62afd167e15794944ee8613bb1178a960440070424defa94469dbac354da8b",
+      "base_catalog_tokens": 9796,
+      "compact_composed_total_tokens": 11443,
+      "compact_read_only_total_tokens": 9342,
+      "members_views_write_compact_total_tokens": 12862,
+      "standard_composed_total_tokens": 37920,
+      "standard_read_only_total_tokens": 29853
     }
   },
   "representative_max_result_bytes": 33650,

@@ -33,6 +33,10 @@ impl std::error::Error for AmbiguityCandidatesError {}
 pub enum ToolErrorCode {
     /// The configured Anytype credentials were rejected or unavailable.
     Authentication,
+    /// This workflow requires the explicitly selected headless gRPC backend.
+    GrpcNotConfigured,
+    /// The configured headless gRPC backend did not answer its admission probe.
+    GrpcUnavailable,
     /// A well-formed tool call failed domain-level input validation.
     Validation,
     /// A name or key resolved to more than one Anytype entity.
@@ -52,6 +56,12 @@ impl ToolErrorCode {
         match self {
             Self::Authentication => {
                 "Anytype authentication failed. Verify the configured credentials and retry."
+            }
+            Self::GrpcNotConfigured => {
+                "This workflow requires headless gRPC. Set ANY_MCP_CONNECTION_MODE=headless and configure gRPC credentials."
+            }
+            Self::GrpcUnavailable => {
+                "The configured headless gRPC backend is unavailable. Follow the connection recovery guidance and retry this workflow."
             }
             Self::Validation => "Input validation failed. Correct the supplied fields and retry.",
             Self::Ambiguous => {
@@ -205,6 +215,18 @@ impl ToolError {
     #[must_use]
     pub const fn authentication() -> Self {
         Self::from_code(ToolErrorCode::Authentication)
+    }
+
+    /// Creates the fixed error returned before a gRPC-only workflow starts.
+    #[must_use]
+    pub const fn grpc_not_configured() -> Self {
+        Self::from_code(ToolErrorCode::GrpcNotConfigured)
+    }
+
+    /// Creates the fixed error returned when invocation-time gRPC admission failed.
+    #[must_use]
+    pub const fn grpc_unavailable() -> Self {
+        Self::from_code(ToolErrorCode::GrpcUnavailable)
     }
 
     /// Creates a validation error with fixed corrective text.

@@ -1,8 +1,8 @@
 {
-  "base_catalog_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
-  "chats_files_members_compact_total_tokens": 19615,
-  "compact_composed_total_tokens": 15523,
-  "compact_read_only_total_tokens": 12436,
+  "base_catalog_sha256": "7d62afd167e15794944ee8613bb1178a960440070424defa94469dbac354da8b",
+  "chats_files_members_compact_total_tokens": 19753,
+  "compact_composed_total_tokens": 15661,
+  "compact_read_only_total_tokens": 12574,
   "per_tool_ceiling_tokens": 2000,
   "per_tool_tokens": {
     "chat_list": 568,
@@ -12,7 +12,7 @@
     "chat_message_list": 1074,
     "chat_message_search": 1292
   },
-  "read_only_catalog_sha256": "f483b9a752010100d70f60f6fba95c81bf244d0a1c9a73c6bfda99976c028c85",
+  "read_only_catalog_sha256": "c4839ed754675ad7e7d5bbce45a54988a607af5dead53d406bee18c4739642a6",
   "read_only_domain_ceiling_tokens": 6500,
   "read_only_domain_tokens": 3811,
   "read_write_domain_ceiling_tokens": 8500,
@@ -79,8 +79,8 @@
     }
   },
   "selected": ["chats"],
-  "selected_catalog_sha256": "92d536a49e60dc4499f1fe39c97559d76d1a439dd411477d0e8f697b1a4dd8a6",
-  "standard_composed_total_tokens": 42000,
-  "standard_read_only_total_tokens": 32947,
+  "selected_catalog_sha256": "b419b055428bcc5dcb3d5cdd60ed9c814063b5439233d3e46d09476802232229",
+  "standard_composed_total_tokens": 42138,
+  "standard_read_only_total_tokens": 33085,
   "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
 }

@@ -1,10 +1,10 @@
 {
   "adversarial_twenty_tag_input_tokens": 19120,
-  "base_catalog_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
-  "base_catalog_tokens": 9658,
-  "compact_composed_total_tokens": 12063,
-  "compact_read_only_total_tokens": 8625,
-  "members_schema_compact_total_tokens": 13482,
+  "base_catalog_sha256": "7d62afd167e15794944ee8613bb1178a960440070424defa94469dbac354da8b",
+  "base_catalog_tokens": 9796,
+  "compact_composed_total_tokens": 12201,
+  "compact_read_only_total_tokens": 8763,
+  "members_schema_compact_total_tokens": 13620,
   "per_tool_tokens": {
     "property_create": 1478,
     "property_update": 671
@@ -15,7 +15,7 @@
   "schema_domain_ceiling_tokens": 9500,
   "schema_selected_ceiling_tokens": 10000,
   "selected": ["schema"],
-  "standard_composed_total_tokens": 38540,
-  "standard_read_only_total_tokens": 29136,
+  "standard_composed_total_tokens": 38678,
+  "standard_read_only_total_tokens": 29274,
   "tokenizer": "tiktoken o200k_base (tiktoken-rs 0.12.0)"
 }

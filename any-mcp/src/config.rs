@@ -8,10 +8,12 @@
 use std::{ffi::OsString, fmt, time::Duration};
 
 use anytype::prelude::{
-    ClientConfig, MAX_DOCUMENT_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseLimits,
+    ANYTYPE_DESKTOP_URL, ANYTYPE_HEADLESS_URL, ClientConfig, MAX_DOCUMENT_RESPONSE_BYTES,
+    MAX_JSON_RESPONSE_BYTES, ResponseLimits,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
+use url::Url;
 
 use crate::{
     artifact_config::{ArtifactConfig, CONFIG_ENV, ConfigSelector},
@@ -34,6 +36,8 @@ const DEFAULT_DOCUMENT_RESPONSE_BYTES: u64 = MAX_DOCUMENT_RESPONSE_BYTES;
 const EXPERIMENTAL_PROTOCOL_VALUE: &str = "experimental-2026-07-28";
 const ANYTYPE_RATE_LIMIT_MAX_RETRIES: &str = "ANYTYPE_RATE_LIMIT_MAX_RETRIES";
 const DEFAULT_RATE_LIMIT_MAX_RETRIES: u32 = 5;
+const CONNECTION_MODE_ENV: &str = "ANY_MCP_CONNECTION_MODE";
+const HEADLESS_GRPC_ENDPOINT: &str = "http://127.0.0.1:31010";
 
 /// Stdio protocol selected for one `any-mcp` process.
 ///
@@ -47,6 +51,26 @@ pub enum ProtocolMode {
     Stable,
     /// Experimental stateless MCP 2026-07-28 preview.
     Experimental20260728,
+}
+
+/// Backend pairing selected for one MCP process.
+///
+/// Desktop mode is HTTP-only. Headless mode deliberately selects the paired
+/// headless HTTP and gRPC defaults, so saved gRPC credentials cannot silently
+/// join a desktop HTTP session to a headless gRPC session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConnectionMode {
+    /// Use the desktop HTTP endpoint and do not enable gRPC workflows.
+    #[default]
+    Desktop,
+    /// Use the paired headless HTTP and gRPC endpoints.
+    Headless,
+}
+
+impl ConnectionMode {
+    pub(crate) const fn grpc_enabled(self) -> bool {
+        matches!(self, Self::Headless)
+    }
 }
 
 /// Startup-selected application catalog profile.
@@ -72,17 +96,6 @@ impl ApplicationProfile {
             Self::Standard => "standard",
         }
     }
-
-    /// Returns whether this profile/access selection requires authenticated
-    /// gRPC availability before its complete catalog can be advertised.
-    ///
-    /// Standard read-write includes `object_archive`, whose independent
-    /// archived-presence proof uses Anytype's gRPC search surface. All other
-    /// Phase 1 catalogs are complete over authenticated HTTP alone.
-    #[must_use]
-    pub const fn requires_grpc(self, read_only: bool) -> bool {
-        matches!(self, Self::Standard) && !read_only
-    }
 }
 
 /// Validated configuration for one `any-mcp` process.
@@ -90,6 +103,8 @@ impl ApplicationProfile {
 pub struct RuntimeConfig {
     /// Stdio protocol mode selected at process startup.
     pub protocol_mode: ProtocolMode,
+    /// Backend pairing selected before credentials or network I/O.
+    pub connection_mode: ConnectionMode,
     /// Startup-selected stable application catalog profile.
     pub profile: ApplicationProfile,
     /// Whether the production catalog omits and rejects mutating workflows.
@@ -122,7 +137,7 @@ impl RuntimeConfig {
     /// `ANYTYPE_KEYSTORE`, and `ANYTYPE_KEYSTORE_SERVICE`. Operational limits
     /// use `ANY_MCP_PROTOCOL`, `ANY_MCP_PROFILE`, `ANY_MCP_READ_ONLY`,
     /// `ANY_MCP_MAX_CONCURRENCY`, `ANY_MCP_REQUEST_TIMEOUT_SECS`,
-    /// `ANY_MCP_STARTUP_TIMEOUT_SECS`, `ANY_MCP_JSON_RESPONSE_BYTES`, and
+    /// `ANY_MCP_CONNECTION_MODE`, `ANY_MCP_STARTUP_TIMEOUT_SECS`, `ANY_MCP_JSON_RESPONSE_BYTES`, and
     /// `ANY_MCP_DOCUMENT_RESPONSE_BYTES`, and `ANY_MCP_TOOLSETS`. A nonempty
     /// optional selection also admits the effective
     /// `ANYTYPE_RATE_LIMIT_MAX_RETRIES` policy before client construction.
@@ -216,8 +231,23 @@ impl RuntimeConfig {
     #[must_use]
     pub fn client_config(&self) -> ClientConfig {
         let mut config = ClientConfig {
-            base_url: self.anytype_url.clone(),
-            grpc_endpoint: self.grpc_endpoint.clone(),
+            base_url: match self.connection_mode {
+                ConnectionMode::Desktop => self
+                    .anytype_url
+                    .clone()
+                    .or_else(|| Some(ANYTYPE_DESKTOP_URL.to_owned())),
+                ConnectionMode::Headless => self
+                    .anytype_url
+                    .clone()
+                    .or_else(|| Some(ANYTYPE_HEADLESS_URL.to_owned())),
+            },
+            grpc_endpoint: match self.connection_mode {
+                ConnectionMode::Desktop => None,
+                ConnectionMode::Headless => self
+                    .grpc_endpoint
+                    .clone()
+                    .or_else(|| Some(HEADLESS_GRPC_ENDPOINT.to_owned())),
+            },
             keystore: self.keystore.clone(),
             keystore_service: Some(self.keystore_service.clone()),
             app_name: env!("CARGO_PKG_NAME").to_string(),
@@ -278,6 +308,14 @@ impl RuntimeConfig {
         };
 
         let protocol_mode = parse_protocol_mode(lookup("ANY_MCP_PROTOCOL")?)?;
+        let connection_mode = parse_connection_mode(lookup(CONNECTION_MODE_ENV)?)?;
+        let anytype_url = non_empty(lookup("ANYTYPE_URL")?);
+        let grpc_endpoint = non_empty(lookup("ANYTYPE_GRPC_ENDPOINT")?);
+        validate_connection_endpoints(
+            connection_mode,
+            anytype_url.as_deref(),
+            grpc_endpoint.as_deref(),
+        )?;
         let profile = parse_profile(lookup("ANY_MCP_PROFILE")?)?;
         let read_only = parse_read_only(lookup("ANY_MCP_READ_ONLY")?)?;
         let max_concurrency = parse_bounded(
@@ -319,6 +357,7 @@ impl RuntimeConfig {
 
         Ok(Self {
             protocol_mode,
+            connection_mode,
             profile,
             read_only,
             optional_toolsets,
@@ -328,8 +367,8 @@ impl RuntimeConfig {
             json_response_bytes,
             document_response_bytes,
             artifact: ArtifactConfig::default(),
-            anytype_url: non_empty(lookup("ANYTYPE_URL")?),
-            grpc_endpoint: non_empty(lookup("ANYTYPE_GRPC_ENDPOINT")?),
+            anytype_url,
+            grpc_endpoint,
             keystore: non_empty(lookup("ANYTYPE_KEYSTORE")?),
             keystore_service: non_empty(lookup("ANYTYPE_KEYSTORE_SERVICE")?)
                 .unwrap_or_else(|| DEFAULT_KEYSTORE_SERVICE.to_string()),
@@ -346,6 +385,70 @@ fn parse_protocol_mode(value: Option<String>) -> Result<ProtocolMode, ConfigErro
             "ANY_MCP_PROTOCOL",
             "must be exactly stable or experimental-2026-07-28",
         )),
+    }
+}
+
+fn parse_connection_mode(value: Option<String>) -> Result<ConnectionMode, ConfigError> {
+    match value.as_deref() {
+        None | Some("desktop") => Ok(ConnectionMode::Desktop),
+        Some("headless") => Ok(ConnectionMode::Headless),
+        Some(_) => Err(ConfigError::invalid(
+            CONNECTION_MODE_ENV,
+            "must be exactly desktop or headless",
+        )),
+    }
+}
+
+fn validate_connection_endpoints(
+    mode: ConnectionMode,
+    http: Option<&str>,
+    grpc: Option<&str>,
+) -> Result<(), ConfigError> {
+    match mode {
+        ConnectionMode::Desktop if grpc.is_some() => Err(ConfigError::invalid(
+            "ANYTYPE_GRPC_ENDPOINT",
+            "requires ANY_MCP_CONNECTION_MODE=headless",
+        )),
+        ConnectionMode::Headless if http.is_some() != grpc.is_some() => Err(ConfigError::invalid(
+            CONNECTION_MODE_ENV,
+            "headless custom endpoints require both ANYTYPE_URL and ANYTYPE_GRPC_ENDPOINT",
+        )),
+        ConnectionMode::Headless if http.is_some() => {
+            let (Some(http), Some(grpc)) = (http, grpc) else {
+                return Err(ConfigError::invalid(
+                    CONNECTION_MODE_ENV,
+                    "invalid endpoint pairing",
+                ));
+            };
+            let http = Url::parse(http)
+                .map_err(|_| ConfigError::invalid("ANYTYPE_URL", "must be an absolute URL"))?;
+            let grpc = Url::parse(grpc).map_err(|_| {
+                ConfigError::invalid("ANYTYPE_GRPC_ENDPOINT", "must be an absolute URL")
+            })?;
+            if !matches!(http.scheme(), "http" | "https")
+                || !matches!(grpc.scheme(), "http" | "https")
+                || http.host_str().is_none()
+                || grpc.host_str().is_none()
+                || http.host_str() != grpc.host_str()
+                || http.username() != ""
+                || http.password().is_some()
+                || grpc.username() != ""
+                || grpc.password().is_some()
+                || http.query().is_some()
+                || grpc.query().is_some()
+                || http.fragment().is_some()
+                || grpc.fragment().is_some()
+                || http.path() != "/"
+                || grpc.path() != "/"
+            {
+                return Err(ConfigError::invalid(
+                    CONNECTION_MODE_ENV,
+                    "headless HTTP and gRPC endpoints must use HTTP(S) on the same host without paths, user information, queries, or fragments",
+                ));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -472,6 +575,7 @@ mod tests {
 
         assert_eq!(config.max_concurrency, 8);
         assert_eq!(config.protocol_mode, ProtocolMode::Stable);
+        assert_eq!(config.connection_mode, ConnectionMode::Desktop);
         assert_eq!(config.profile, ApplicationProfile::Compact);
         assert!(!config.read_only);
         assert!(config.optional_toolsets.is_empty());
@@ -510,8 +614,9 @@ mod tests {
     #[test]
     fn maps_supported_anytype_environment_settings() {
         let config = config(&[
+            (CONNECTION_MODE_ENV, "headless"),
             ("ANYTYPE_URL", "http://127.0.0.1:31012"),
-            ("ANYTYPE_GRPC_ENDPOINT", "127.0.0.1:31013"),
+            ("ANYTYPE_GRPC_ENDPOINT", "http://127.0.0.1:31013"),
             ("ANYTYPE_KEYSTORE", "env"),
             ("ANYTYPE_KEYSTORE_SERVICE", "custom-service"),
             ("ANY_MCP_PROFILE", "compact"),
@@ -527,13 +632,17 @@ mod tests {
         let client = config.client_config();
 
         assert_eq!(client.base_url.as_deref(), Some("http://127.0.0.1:31012"));
-        assert_eq!(client.grpc_endpoint.as_deref(), Some("127.0.0.1:31013"));
+        assert_eq!(
+            client.grpc_endpoint.as_deref(),
+            Some("http://127.0.0.1:31013")
+        );
         assert_eq!(client.keystore.as_deref(), Some("env"));
         assert_eq!(client.keystore_service.as_deref(), Some("custom-service"));
         assert_eq!(config.max_concurrency, 16);
         assert_eq!(config.profile, ApplicationProfile::Compact);
         assert!(config.read_only);
         assert_eq!(config.protocol_mode, ProtocolMode::Experimental20260728);
+        assert_eq!(config.connection_mode, ConnectionMode::Headless);
         assert_eq!(config.request_timeout, Duration::from_secs(45));
         assert_eq!(client.response_limits.json_bytes, 1_048_576);
         assert_eq!(client.response_limits.document_bytes, 2_097_152);
@@ -628,6 +737,74 @@ mod tests {
     }
 
     #[test]
+    fn connection_mode_is_explicit_and_headless_selects_paired_defaults() {
+        let desktop = config(&[]).expect("desktop default");
+        assert_eq!(desktop.connection_mode, ConnectionMode::Desktop);
+        assert_eq!(
+            desktop.client_config().base_url.as_deref(),
+            Some(ANYTYPE_DESKTOP_URL)
+        );
+        assert!(desktop.client_config().grpc_endpoint.is_none());
+
+        let headless = config(&[(CONNECTION_MODE_ENV, "headless")]).expect("headless mode");
+        let client = headless.client_config();
+        assert_eq!(client.base_url.as_deref(), Some(ANYTYPE_HEADLESS_URL));
+        assert_eq!(
+            client.grpc_endpoint.as_deref(),
+            Some(HEADLESS_GRPC_ENDPOINT)
+        );
+
+        for invalid in ["", "Desktop", " headless", "headless "] {
+            let error = config(&[(CONNECTION_MODE_ENV, invalid)]).expect_err("invalid mode");
+            assert!(error.to_string().contains(CONNECTION_MODE_ENV));
+        }
+    }
+
+    #[test]
+    fn connection_mode_rejects_unpaired_or_mixed_endpoints() {
+        assert!(config(&[("ANYTYPE_GRPC_ENDPOINT", "http://127.0.0.1:31010")]).is_err());
+        assert!(
+            config(&[
+                (CONNECTION_MODE_ENV, "headless"),
+                ("ANYTYPE_URL", "http://127.0.0.1:31012"),
+            ])
+            .is_err()
+        );
+        assert!(
+            config(&[
+                (CONNECTION_MODE_ENV, "headless"),
+                ("ANYTYPE_URL", "http://127.0.0.1:31012"),
+                ("ANYTYPE_GRPC_ENDPOINT", "http://127.0.0.2:31010"),
+            ])
+            .is_err()
+        );
+        assert!(
+            config(&[
+                (CONNECTION_MODE_ENV, "headless"),
+                ("ANYTYPE_URL", "http://example.test:31012"),
+                ("ANYTYPE_GRPC_ENDPOINT", "http://example.test:31010"),
+            ])
+            .is_ok(),
+            "paired services on one host use different ports"
+        );
+        for ambiguous in [
+            "ftp://example.test:31010",
+            "http://user@example.test:31010",
+            "http://example.test:31010/path",
+            "http://example.test:31010?token=secret",
+            "http://example.test:31010#fragment",
+        ] {
+            let error = config(&[
+                (CONNECTION_MODE_ENV, "headless"),
+                ("ANYTYPE_URL", "http://example.test:31012"),
+                ("ANYTYPE_GRPC_ENDPOINT", ambiguous),
+            ])
+            .expect_err("ambiguous paired endpoint");
+            assert!(!error.to_string().contains(ambiguous));
+        }
+    }
+
+    #[test]
     fn application_profile_parser_is_exact_and_secret_safe() {
         assert_eq!(config(&[]).unwrap().profile, ApplicationProfile::Compact);
         assert_eq!(
@@ -651,14 +828,6 @@ mod tests {
     }
 
     #[test]
-    fn only_standard_read_write_requires_grpc() {
-        assert!(!ApplicationProfile::Compact.requires_grpc(false));
-        assert!(!ApplicationProfile::Compact.requires_grpc(true));
-        assert!(ApplicationProfile::Standard.requires_grpc(false));
-        assert!(!ApplicationProfile::Standard.requires_grpc(true));
-    }
-
-    #[test]
     fn non_unicode_profile_failure_names_only_the_variable() {
         let error = RuntimeConfig::from_lookup(|name| {
             if name == "ANY_MCP_PROFILE" {
@@ -677,8 +846,8 @@ mod tests {
     #[test]
     fn optional_selector_is_exact_canonical_and_landed_only() {
         let metadata = [
-            OptionalToolsetMetadata::new("zeta", false),
-            OptionalToolsetMetadata::new("alpha", false),
+            OptionalToolsetMetadata::new("zeta"),
+            OptionalToolsetMetadata::new("alpha"),
         ];
         let selected =
             config_with_optional(&[(OPTIONAL_TOOLSETS_ENV, "zeta,alpha")], &metadata).unwrap();
@@ -697,7 +866,7 @@ mod tests {
 
     #[test]
     fn optional_selector_diagnostics_are_fixed_and_secret_safe() {
-        let metadata = [OptionalToolsetMetadata::new("alpha", false)];
+        let metadata = [OptionalToolsetMetadata::new("alpha")];
         for (value, expected) in [
             ("secret_like", "invalid optional toolset selector"),
             ("alpha,alpha", "duplicate optional toolset selector"),
@@ -724,7 +893,7 @@ mod tests {
 
     #[test]
     fn optional_retry_policy_is_admitted_before_client_construction() {
-        let metadata = [OptionalToolsetMetadata::new("alpha", false)];
+        let metadata = [OptionalToolsetMetadata::new("alpha")];
         for admitted in 1..=5 {
             let value = admitted.to_string();
             let config = config_with_optional(
@@ -762,7 +931,7 @@ mod tests {
     fn optional_selector_is_read_once_and_retry_rejection_precedes_other_config() {
         let selector_reads = Cell::new(0usize);
         let profile_reads = Cell::new(0usize);
-        let metadata = [OptionalToolsetMetadata::new("alpha", false)];
+        let metadata = [OptionalToolsetMetadata::new("alpha")];
         let error = RuntimeConfig::from_lookup_with_optional_metadata(
             |name| match name {
                 OPTIONAL_TOOLSETS_ENV => {

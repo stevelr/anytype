@@ -167,13 +167,13 @@ pub fn members_registry() -> &'static dyn OptionalToolsetRegistry {
 
 impl OptionalToolsetRegistry for MembersRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new("members", false)
+        OptionalToolsetMetadata::new("members")
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
         Ok(vec![
-            OptionalRegistryTool::read(member_get_tool()?),
-            OptionalRegistryTool::read(member_list_tool()?),
+            OptionalRegistryTool::read_http(member_get_tool()?),
+            OptionalRegistryTool::read_http(member_list_tool()?),
         ])
     }
 
@@ -561,11 +561,7 @@ mod tests {
     #[test]
     fn production_registry_is_http_only_and_complete() {
         let metadata = production_optional_metadata();
-        assert!(
-            metadata
-                .iter()
-                .any(|entry| entry.name == "members" && !entry.requires_grpc)
-        );
+        assert!(metadata.iter().any(|entry| entry.name == "members"));
         let tools = MEMBERS_REGISTRY.tools().unwrap();
         assert_eq!(tools.len(), 2);
         assert_eq!(MEMBERS_REGISTRY.scripted_scenario_ids(), ["members_direct"]);

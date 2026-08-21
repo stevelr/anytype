@@ -17,9 +17,46 @@ registries the workflow needs. `members` is useful for member inspection but
 is not required by these recipes. Mutation tools are absent when
 `ANY_MCP_READ_ONLY=1`.
 
-Call `server_status` first. Call `optional_toolset_status` when any optional
-tool is needed. If startup or authentication is unhealthy, stop and report the
-redacted error; never ask for credentials in a prompt.
+For an ordinary HTTP workflow, call its advertised HTTP tool directly; a gRPC
+preflight is unnecessary. Call `server_status` when connection information is
+needed and `optional_toolset_status` only when the requested optional toolset
+matters. A selected toolset or profile can require gRPC, while the HTTP tools
+do not inherit that requirement.
+
+If a tool returns a structured missing, unavailable, or authentication backend
+error, stop and route once to `anytype-setup`. Preserve credentials and report
+the redacted category if setup cannot restore the selected connection. Local
+recovery can verify the existing service and repeat the applicable setup step;
+remote recovery requires the endpoint owner because an agent must not restart
+or reconfigure a remote service. Do not mix desktop HTTP with headless gRPC.
+Start an existing headless account normally; account creation or forced
+initialization needs explicit operator authorization.
+
+The host also selects exactly one MCP connection mode:
+
+- `ANY_MCP_CONNECTION_MODE=desktop` uses HTTP and never admits gRPC-backed
+  tools. It rejects a gRPC endpoint selector but leaves stored credentials
+  untouched.
+- `ANY_MCP_CONNECTION_MODE=headless` pairs the headless HTTP and gRPC
+  endpoints. Customized connections provide both endpoints on the same host.
+
+The catalog remains stable when gRPC is stopped or unauthenticated. The server
+performs one bounded admission check only when a gRPC-backed tool is invoked.
+It reports `grpc_not_configured`, `grpc_unavailable`, or `authentication`
+without exposing endpoint or credential details. `server_status` reports the
+last observation and does not probe either backend.
+
+These tools require the headless gRPC backend:
+
+| Catalog | Tools |
+| --- | --- |
+| Core | `object_archive` |
+| `body-blocks` | `body_block_create`, `body_block_delete`, `body_block_list`, `body_block_move`, `body_block_update`, `rich_page_create`, `rich_page_resume` |
+| `schema` | `type_update` |
+| `views-write` | `collection_member_list`, `collection_member_add`, `collection_member_remove` |
+
+All other advertised tools use HTTP. `type_update` is conservatively gated as
+a whole because its recommended-property path uses gRPC.
 
 ## Core tools
 
@@ -80,5 +117,6 @@ not return it.
 
 An idempotency key is process-local duplicate control, not a global database
 key. Keep it stable across an identical retry and change it when any normalized
-input changes. If the outcome is uncertain, search/read before issuing another
-write.
+input changes. A timeout or cancellation leaves the mutation outcome
+indeterminate: search or read first, then retry only when that state proves
+the identical write did not take effect.

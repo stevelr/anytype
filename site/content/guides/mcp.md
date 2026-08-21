@@ -25,8 +25,10 @@ The second command prints the executable path on POSIX shells. MCP clients
 usually require an absolute command path. On Windows, locate `anyr.exe` and use
 an absolute path accepted by the client's JSON or TOML parser.
 
-The compact catalog works with HTTP credentials. The standard read-write
-catalog and some optional toolsets require [gRPC credentials](/reference/connections/).
+Most tools use HTTP. A fixed subset requires the headless gRPC backend, but
+missing credentials or a stopped gRPC service does not prevent the MCP server
+from starting or block unrelated HTTP tools. See
+[Connections and gRPC](/reference/connections/) for the exact boundary.
 
 ## Register a stdio client
 
@@ -39,6 +41,7 @@ Use this JSON shape in clients that accept an `mcpServers` object:
       "command": "/absolute/path/to/anyr",
       "args": ["mcp"],
       "env": {
+        "ANY_MCP_CONNECTION_MODE": "desktop",
         "ANY_MCP_PROFILE": "compact",
         "ANY_MCP_READ_ONLY": "1"
       }
@@ -53,7 +56,7 @@ Codex uses the equivalent TOML entry:
 [mcp_servers.anytype]
 command = "/absolute/path/to/anyr"
 args = ["mcp"]
-env = { ANY_MCP_PROFILE = "compact", ANY_MCP_READ_ONLY = "1" }
+env = { ANY_MCP_CONNECTION_MODE = "desktop", ANY_MCP_PROFILE = "compact", ANY_MCP_READ_ONLY = "1" }
 env_vars = [
   "ANYTYPE_URL",
   "ANYTYPE_GRPC_ENDPOINT",
@@ -108,6 +111,7 @@ in front of it for remote access.
 
 | Variable | Values and default |
 | --- | --- |
+| `ANY_MCP_CONNECTION_MODE` | `desktop` (default) or `headless`; selects one coherent endpoint pair |
 | `ANY_MCP_PROFILE` | `compact` (default) or `standard` |
 | `ANY_MCP_READ_ONLY` | `0` (default) or `1`; read-only omits mutation tools |
 | `ANY_MCP_PROTOCOL` | `stable` (default) or `experimental-2026-07-28` |
@@ -120,9 +124,9 @@ in front of it for remote access.
 
 The linked optional toolsets are `artifacts`, `body-blocks`, `chats`, `files`,
 `members`, `schema`, and `views-write`. Selection is exact and
-comma-separated. Optional toolsets may require gRPC or additional policy. The
-server rejects unavailable selections during startup rather than advertising
-an incomplete catalog.
+comma-separated. The catalog remains advertised when gRPC is unavailable.
+Each gRPC-backed invocation receives one bounded admission check before its
+handler runs; unrelated HTTP calls never perform that check.
 
 ## Configuration file
 
@@ -174,18 +178,27 @@ does not bind a public staging listener or fetch caller-supplied URLs.
 
 ## Check a running server
 
-Call `server_status` after the client connects. It reports HTTP and gRPC
-availability, the selected profile, read-only mode, and optional catalogs
-without returning credentials. When artifacts are enabled, call
+Call `server_status` after the client connects. It reports whether gRPC is
+configured, the last observed gRPC state, the selected profile, read-only mode,
+and optional catalogs without probing a backend or returning credentials.
+`never` means that no gRPC-backed tool has needed an admission check in this
+process. When artifacts are enabled, call
 `artifact_status` to check effective root and staging authority.
 
 Startup failures are written to stderr before protocol output. Check these in
 order:
 
-1. `anyr auth status --pretty` reports the required transport as healthy.
-2. The MCP client inherited the intended endpoint and keystore selectors.
-3. `anyr mcp check --config FILE` accepts the selected policy.
-4. The profile and optional toolset names use the exact values above.
+1. `ANY_MCP_CONNECTION_MODE` selects the intended desktop or headless backend.
+2. `anyr auth status --pretty` reports the required transport as healthy.
+3. The MCP client inherited the intended endpoint and keystore selectors.
+4. `anyr mcp check --config FILE` accepts the selected policy.
+5. The profile and optional toolset names use the exact values above.
+
+Restart or reconnect the MCP process after changing connection selectors or
+credentials. A gRPC-backed tool reports one stable, redacted category when it
+cannot run: `grpc_not_configured`, `grpc_unavailable`, or `authentication`.
+Do not clear saved credentials merely because a configured headless service is
+temporarily stopped.
 
 The crate's [stdio conformance record](https://github.com/stevelr/anytype/blob/main/any-mcp/docs/STDIO_CONFORMANCE.md)
 lists the stable and preview protocol revisions tested with supported clients.

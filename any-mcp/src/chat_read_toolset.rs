@@ -458,15 +458,15 @@ pub fn chat_read_registry() -> &'static dyn OptionalToolsetRegistry {
 
 impl OptionalToolsetRegistry for ChatReadRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new("chats", false)
+        OptionalToolsetMetadata::new("chats")
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
         Ok(vec![
-            OptionalRegistryTool::read(chat_list_tool()?),
-            OptionalRegistryTool::read(chat_message_get_tool()?),
-            OptionalRegistryTool::read(chat_message_list_tool()?),
-            OptionalRegistryTool::read(chat_message_search_tool()?),
+            OptionalRegistryTool::read_http(chat_list_tool()?),
+            OptionalRegistryTool::read_http(chat_message_get_tool()?),
+            OptionalRegistryTool::read_http(chat_message_list_tool()?),
+            OptionalRegistryTool::read_http(chat_message_search_tool()?),
         ])
     }
 
@@ -1676,7 +1676,7 @@ mod tests {
         assert!(
             production_optional_metadata()
                 .iter()
-                .any(|metadata| { metadata == &OptionalToolsetMetadata::new("chats", false) })
+                .any(|metadata| { metadata == &OptionalToolsetMetadata::new("chats") })
         );
     }
 
@@ -2750,7 +2750,7 @@ mod tests {
     ) -> RuntimeContext {
         let selection = OptionalToolsetSelection::parse(
             selected.then(|| "chats".to_owned()),
-            &[OptionalToolsetMetadata::new("chats", false)],
+            &[OptionalToolsetMetadata::new("chats")],
         )
         .expect("chat selection");
         RuntimeContext::from_parts_with_profile_and_optional_toolsets(

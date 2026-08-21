@@ -57,18 +57,13 @@ pub type OptionalRegistryFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send +
 pub struct OptionalToolsetMetadata {
     /// Exact selector and registry name.
     pub name: &'static str,
-    /// Whether this registry adds an authenticated gRPC startup requirement.
-    pub requires_grpc: bool,
 }
 
 impl OptionalToolsetMetadata {
     /// Defines static registry metadata.
     #[must_use]
-    pub const fn new(name: &'static str, requires_grpc: bool) -> Self {
-        Self {
-            name,
-            requires_grpc,
-        }
+    pub const fn new(name: &'static str) -> Self {
+        Self { name }
     }
 }
 
@@ -170,12 +165,6 @@ impl OptionalToolsetSelection {
         self.entries.iter().map(|entry| entry.name)
     }
 
-    /// Returns whether the selected transport union requires gRPC.
-    #[must_use]
-    pub fn requires_grpc(&self) -> bool {
-        self.entries.iter().any(|entry| entry.requires_grpc)
-    }
-
     /// Returns whether the exact linked name is selected.
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
@@ -246,24 +235,56 @@ fn valid_toolset_name(value: &str) -> bool {
 pub struct OptionalRegistryTool {
     tool: Tool,
     mutation: bool,
+    backend: BackendRequirement,
+}
+
+/// Backend required before an advertised workflow can be dispatched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackendRequirement {
+    /// The authenticated HTTP backend is sufficient.
+    Http,
+    /// The paired headless gRPC backend must pass invocation-time admission.
+    Grpc,
 }
 
 impl OptionalRegistryTool {
-    /// Registers one read-only optional tool.
+    /// Registers one HTTP-backed read-only optional tool.
     #[must_use]
-    pub fn read<O>(tool: WorkflowTool<O>) -> Self {
+    pub fn read_http<O>(tool: WorkflowTool<O>) -> Self {
         Self {
             tool: tool.into_tool(),
             mutation: false,
+            backend: BackendRequirement::Http,
         }
     }
 
-    /// Registers one optional mutation removed from read-only catalogs.
+    /// Registers one HTTP-backed optional mutation removed from read-only catalogs.
     #[must_use]
-    pub fn mutation<O>(tool: WorkflowTool<O>) -> Self {
+    pub fn mutation_http<O>(tool: WorkflowTool<O>) -> Self {
         Self {
             tool: tool.into_tool(),
             mutation: true,
+            backend: BackendRequirement::Http,
+        }
+    }
+
+    /// Registers one gRPC-backed read-only optional tool.
+    #[must_use]
+    pub fn read_grpc<O>(tool: WorkflowTool<O>) -> Self {
+        Self {
+            tool: tool.into_tool(),
+            mutation: false,
+            backend: BackendRequirement::Grpc,
+        }
+    }
+
+    /// Registers one gRPC-backed optional mutation removed from read-only catalogs.
+    #[must_use]
+    pub fn mutation_grpc<O>(tool: WorkflowTool<O>) -> Self {
+        Self {
+            tool: tool.into_tool(),
+            mutation: true,
+            backend: BackendRequirement::Grpc,
         }
     }
 }
@@ -411,6 +432,7 @@ pub(crate) struct OptionalCatalog {
     pub(crate) resource_templates: Vec<ResourceTemplate>,
     selected_registries: Vec<&'static dyn OptionalToolsetRegistry>,
     dispatch: HashMap<String, &'static dyn OptionalToolsetRegistry>,
+    backend_requirements: HashMap<String, BackendRequirement>,
     read_only_mutations: HashSet<String>,
     status: OptionalToolsetStatusOutput,
 }
@@ -429,6 +451,10 @@ impl OptionalCatalog {
         name: &str,
     ) -> Option<&'static dyn OptionalToolsetRegistry> {
         self.dispatch.get(name).copied()
+    }
+
+    pub(crate) fn backend_requirement(&self, name: &str) -> Option<BackendRequirement> {
+        self.backend_requirements.get(name).copied()
     }
 
     pub(crate) fn is_read_only_mutation(&self, name: &str) -> bool {
@@ -504,6 +530,7 @@ pub(crate) fn compose_optional_catalog(
     let mut resources = Vec::new();
     let mut resource_templates = Vec::new();
     let mut dispatch = HashMap::new();
+    let mut backend_requirements = HashMap::new();
     let mut read_only_mutations = HashSet::new();
     let mut active_names = Vec::new();
 
@@ -533,6 +560,9 @@ pub(crate) fn compose_optional_catalog(
             if name.is_empty()
                 || !occupied_tools.insert(name.clone())
                 || dispatch.insert(name.clone(), *registry).is_some()
+                || backend_requirements
+                    .insert(name.clone(), contribution.backend)
+                    .is_some()
             {
                 return Err(OptionalCatalogError);
             }
@@ -584,6 +614,7 @@ pub(crate) fn compose_optional_catalog(
         resource_templates,
         selected_registries,
         dispatch,
+        backend_requirements,
         read_only_mutations,
         status: OptionalToolsetStatusOutput {
             configured_toolsets,
@@ -616,9 +647,9 @@ mod tests {
 
     fn metadata() -> [OptionalToolsetMetadata; 3] {
         [
-            OptionalToolsetMetadata::new("alpha", false),
-            OptionalToolsetMetadata::new("beta-2", true),
-            OptionalToolsetMetadata::new("zeta", false),
+            OptionalToolsetMetadata::new("alpha"),
+            OptionalToolsetMetadata::new("beta-2"),
+            OptionalToolsetMetadata::new("zeta"),
         ]
     }
 
@@ -636,7 +667,6 @@ mod tests {
             selection.names().collect::<Vec<_>>(),
             ["alpha", "beta-2", "zeta"]
         );
-        assert!(selection.requires_grpc());
     }
 
     #[test]

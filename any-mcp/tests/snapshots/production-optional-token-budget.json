@@ -3,32 +3,32 @@
   "common_status_tokens": 260,
   "compositions": {
     "compact_read_only": {
-      "base_sha256": "a48ad91bbadf5998424432022add295fa273ac6584dc87032925c1ec303e452c",
-      "base_tokens": 8369,
+      "base_sha256": "a2dcb05c7e4d25be59ff8733f0af376367af11b625129425e8a80fcd78d41397",
+      "base_tokens": 8507,
       "selected_contribution_tokens": 12746,
-      "selected_sha256": "f5e796c1d4d231a33f22285a393c3a7131ff47d5ebed007e322720a28987b8f3",
-      "selected_tokens": 21115
+      "selected_sha256": "f300b826f446a40c45626decd3dc009bb3131ac4023bc4f5dbf0fd614bb9a1fc",
+      "selected_tokens": 21253
     },
     "compact_read_write": {
-      "base_sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
-      "base_tokens": 9658,
+      "base_sha256": "7d62afd167e15794944ee8613bb1178a960440070424defa94469dbac354da8b",
+      "base_tokens": 9796,
       "selected_contribution_tokens": 56300,
-      "selected_sha256": "7a02c8d3d5ea8772633d943cea7df98b6572587a2f72d010a6a2597bcc46ccae",
-      "selected_tokens": 65958
+      "selected_sha256": "b20c88b401495f49c690022aa9d02cf29e65177c23a9ba6372cfa6cf14c4bb27",
+      "selected_tokens": 66096
     },
     "standard_read_only": {
-      "base_sha256": "c1bef45de82bc2614a4981f1da260d01e29008d4ca1f7e41470803733f12a7e3",
-      "base_tokens": 28880,
+      "base_sha256": "fca797a7d3951a1cc01bbe7acf2321d7e02d4ef80f9e8ec025c5ed5a026974bd",
+      "base_tokens": 29018,
       "selected_contribution_tokens": 12746,
-      "selected_sha256": "f4783901a0262cd6eca232d4a5049aea794631b1e7aaef72ac69bacf3393ee2c",
-      "selected_tokens": 41626
+      "selected_sha256": "e6921aa2a55ee6c9631a795269744d09d9f2a9c5568204a46c05dcac66925e51",
+      "selected_tokens": 41764
     },
     "standard_read_write": {
-      "base_sha256": "4e03af8ea8a70e14b4d75cb4f3a979e3c871f0e784888b79a0ff38b820812342",
-      "base_tokens": 36135,
+      "base_sha256": "dcb7589f81bbf8545a1ff617968e035200ec83fbd8cdc591a9e353d9ff04d1f2",
+      "base_tokens": 36273,
       "selected_contribution_tokens": 56300,
-      "selected_sha256": "0e3dff503c77c69a5c390ec4b30589dd6ccbbf7bf446c8144e14c2f77eabda49",
-      "selected_tokens": 92435
+      "selected_sha256": "ff53be2d4f9d837201f6f0bea0719f8267c00971ba49cdab9bff68e778f135ba",
+      "selected_tokens": 92573
     }
   },
   "registry_budgets": {

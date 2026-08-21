@@ -383,8 +383,8 @@ pub fn property_update_tool() -> Result<WorkflowTool<PropertyUpdateOutput>, Sche
 /// Returns the complete property slice for terminal registry composition.
 pub fn schema_property_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
     Ok(vec![
-        OptionalRegistryTool::mutation(property_create_tool()?),
-        OptionalRegistryTool::mutation(property_update_tool()?),
+        OptionalRegistryTool::mutation_http(property_create_tool()?),
+        OptionalRegistryTool::mutation_http(property_update_tool()?),
     ])
 }
 
@@ -1111,7 +1111,7 @@ mod tests {
 
     impl OptionalToolsetRegistry for TestRegistry {
         fn metadata(&self) -> OptionalToolsetMetadata {
-            OptionalToolsetMetadata::new("schema", true)
+            OptionalToolsetMetadata::new("schema")
         }
 
         fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -1145,7 +1145,7 @@ mod tests {
     fn runtime(client: AnytypeClient, read_only: bool) -> RuntimeContext {
         let selection = OptionalToolsetSelection::parse(
             Some("schema".to_owned()),
-            &[OptionalToolsetMetadata::new("schema", true)],
+            &[OptionalToolsetMetadata::new("schema")],
         )
         .expect("schema selection");
         RuntimeContext::from_parts_with_profile_and_optional_toolsets(

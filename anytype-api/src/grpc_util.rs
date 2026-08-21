@@ -47,6 +47,11 @@ pub(crate) fn grpc_status_for(
     outcome: GrpcTimeoutOutcome,
     elapsed: std::time::Duration,
 ) -> AnytypeError {
+    match status.code() {
+        tonic::Code::Unauthenticated => return AnytypeError::Unauthorized,
+        tonic::Code::PermissionDenied => return AnytypeError::Forbidden,
+        _ => {}
+    }
     if let Some(source) = GrpcDeadlineError::from_status(&status, class, outcome, elapsed) {
         return AnytypeError::Grpc {
             source: AnytypeGrpcError::Deadline { source },
@@ -167,3 +172,27 @@ impl_grpc_error!(
     block_div::list_set_style::response::Error,
     block_link::list_set_appearance::response::Error,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grpc_status_preserves_authentication_classification_without_payloads() {
+        let unauthenticated = grpc_status(tonic::Status::unauthenticated("SECRET_TOKEN"));
+        let permission_denied = grpc_status(tonic::Status::permission_denied("SECRET_SCOPE"));
+
+        assert!(matches!(&unauthenticated, AnytypeError::Unauthorized));
+        assert!(matches!(&permission_denied, AnytypeError::Forbidden));
+        assert_eq!(
+            unauthenticated.grpc_admission_failure(),
+            crate::error::GrpcAdmissionFailure::Authentication
+        );
+        assert_eq!(
+            permission_denied.grpc_admission_failure(),
+            crate::error::GrpcAdmissionFailure::Authentication
+        );
+        assert!(!format!("{unauthenticated:?}").contains("SECRET_TOKEN"));
+        assert!(!format!("{permission_denied:?}").contains("SECRET_SCOPE"));
+    }
+}

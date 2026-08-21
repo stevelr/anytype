@@ -4285,6 +4285,36 @@
                 "type": "string"
               }
             ]
+          },
+          "GrpcObservedState": {
+            "description": "Latest gRPC admission result.",
+            "oneOf": [
+              {
+                "const": "never",
+                "description": "No admission has been attempted.",
+                "type": "string"
+              },
+              {
+                "const": "available",
+                "description": "The backend accepted the probe.",
+                "type": "string"
+              },
+              {
+                "const": "unavailable",
+                "description": "The backend did not answer.",
+                "type": "string"
+              },
+              {
+                "const": "authentication_failed",
+                "description": "The backend rejected saved credentials.",
+                "type": "string"
+              },
+              {
+                "const": "configuration_error",
+                "description": "gRPC is not configured.",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4302,9 +4332,13 @@
             "$ref": "#/$defs/BoundedText2048",
             "description": "HTTP endpoint with user information, query, and fragment removed."
           },
-          "grpc_available": {
-            "description": "Whether configured gRPC credentials and its startup probe succeeded.",
+          "grpc_configured": {
+            "description": "Whether this process enabled a paired headless gRPC configuration.",
             "type": "boolean"
+          },
+          "grpc_last_observed": {
+            "$ref": "#/$defs/GrpcObservedState",
+            "description": "Latest gRPC admission result, without sensitive details."
           },
           "http_available": {
             "description": "Whether the authenticated HTTP startup probe succeeded.",
@@ -4325,7 +4359,8 @@
           "endpoint",
           "api_version",
           "http_available",
-          "grpc_available",
+          "grpc_configured",
+          "grpc_last_observed",
           "enabled_toolsets"
         ],
         "type": "object"

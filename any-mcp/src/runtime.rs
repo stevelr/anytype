@@ -37,6 +37,7 @@ use crate::{
     },
     artifact_validators::ValidatorRunner,
     config::{ApplicationProfile, ProtocolMode, RuntimeConfig},
+    error::ToolError,
     optional_toolsets::OptionalToolsetSelection,
     server::AnyMcpServer,
     space_policy::{PolicyClient, SpaceAuthority, SpacePolicy},
@@ -393,8 +394,37 @@ fn runtime_artifact_policy_digest(
 pub struct StartupStatus {
     /// Whether the mandatory authenticated HTTP ping succeeded.
     pub http_available: bool,
-    /// Whether configured gRPC credentials were present and its ping succeeded.
+    /// Test-fixture seed for a pre-observed gRPC-capable runtime.
+    ///
+    /// Production startup always leaves this false because it performs no
+    /// gRPC probe; configured state and observations are stored separately.
     pub grpc_available: bool,
+}
+
+/// Last redacted observation made by a gRPC admission attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GrpcLastObserved {
+    /// No gRPC-backed invocation has attempted admission in this process.
+    Never,
+    /// The configured headless gRPC backend accepted an admission probe.
+    Available,
+    /// The configured headless gRPC backend could not be reached.
+    Unavailable,
+    /// The configured headless gRPC backend rejected saved credentials.
+    AuthenticationFailed,
+    /// The selected mode or saved credentials could not configure gRPC.
+    ConfigurationError,
+}
+
+impl GrpcLastObserved {
+    #[cfg(any(test, feature = "acceptance-harness"))]
+    const fn from_startup_status(status: StartupStatus) -> Self {
+        if status.grpc_available {
+            Self::Available
+        } else {
+            Self::Never
+        }
+    }
 }
 
 /// Shared state for all MCP workflow handlers in one process.
@@ -411,6 +441,9 @@ pub struct RuntimeContext {
     next_correlation_id: Arc<AtomicU64>,
     request_timeout: Duration,
     startup_status: StartupStatus,
+    grpc_configured: bool,
+    grpc_last_observed: Arc<Mutex<GrpcLastObserved>>,
+    fixture_grpc_admitted: bool,
     profile: ApplicationProfile,
     read_only: bool,
     optional_toolsets: OptionalToolsetSelection,
@@ -436,6 +469,9 @@ struct RuntimeParts {
     max_concurrency: usize,
     request_timeout: Duration,
     startup_status: StartupStatus,
+    grpc_configured: bool,
+    grpc_last_observed: GrpcLastObserved,
+    fixture_grpc_admitted: bool,
     profile: ApplicationProfile,
     read_only: bool,
     optional_toolsets: OptionalToolsetSelection,
@@ -790,11 +826,10 @@ impl RuntimeContext {
     }
 
     /// Builds the long-lived client, loads existing credentials, and performs
-    /// the mandatory startup health checks exactly once.
+    /// the mandatory HTTP startup health check exactly once.
     ///
-    /// HTTP credentials and ping success are required. gRPC is checked when
-    /// gRPC credentials are configured, and is additionally required when the
-    /// selected profile/access catalog cannot fulfill its contracts over HTTP.
+    /// HTTP credentials and ping success are required. gRPC credentials and
+    /// liveness are evaluated only when a gRPC-backed tool is invoked.
     ///
     /// # Errors
     ///
@@ -831,16 +866,12 @@ impl RuntimeContext {
             .auth_status()
             .map_err(|_| StartupError::CredentialLookup)?;
 
-        let startup_status = verify_startup_probes(
-            auth.http.is_authenticated(),
-            auth.grpc.is_authenticated(),
-            config.profile.requires_grpc(config.read_only)
-                || config.optional_toolsets.requires_grpc(),
-            config.startup_timeout,
-            || client.ping_http(),
-            || client.ping_grpc(),
-        )
-        .await?;
+        let startup_status =
+            verify_startup_http(auth.http.is_authenticated(), config.startup_timeout, || {
+                client.ping_http()
+            })
+            .await?;
+        let grpc_configured = config.connection_mode.grpc_enabled() && auth.grpc.is_authenticated();
 
         let authority = SpaceAuthority::initialize(&client, &config.artifact.spaces)
             .await
@@ -858,6 +889,9 @@ impl RuntimeContext {
                 max_concurrency: config.max_concurrency,
                 request_timeout: config.request_timeout,
                 startup_status,
+                grpc_configured,
+                grpc_last_observed: GrpcLastObserved::Never,
+                fixture_grpc_admitted: false,
                 profile: config.profile,
                 read_only: config.read_only,
                 optional_toolsets: config.optional_toolsets.clone(),
@@ -976,6 +1010,91 @@ impl RuntimeContext {
     #[must_use]
     pub const fn startup_status(&self) -> StartupStatus {
         self.startup_status
+    }
+
+    /// Returns whether this process has a coherent headless configuration and
+    /// saved gRPC credentials.
+    #[must_use]
+    pub(crate) const fn grpc_configured(&self) -> bool {
+        self.grpc_configured
+    }
+
+    /// Returns the most recent gRPC admission observation without probing.
+    #[must_use]
+    pub(crate) fn grpc_last_observed(&self) -> GrpcLastObserved {
+        match self.grpc_last_observed.lock() {
+            Ok(state) => *state,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    fn record_grpc_observation(&self, state: GrpcLastObserved) {
+        match self.grpc_last_observed.lock() {
+            Ok(mut observed) => *observed = state,
+            Err(poisoned) => *poisoned.into_inner() = state,
+        }
+    }
+
+    /// Records one typed, secret-safe admission failure and returns its MCP error.
+    pub(crate) fn record_grpc_admission_failure(&self, error: &AnytypeError) -> ToolError {
+        let state = match error.grpc_admission_failure() {
+            anytype::error::GrpcAdmissionFailure::Configuration => {
+                GrpcLastObserved::ConfigurationError
+            }
+            anytype::error::GrpcAdmissionFailure::Authentication => {
+                GrpcLastObserved::AuthenticationFailed
+            }
+            anytype::error::GrpcAdmissionFailure::Unavailable => GrpcLastObserved::Unavailable,
+        };
+        self.record_grpc_observation(state);
+        match state {
+            GrpcLastObserved::AuthenticationFailed => ToolError::authentication(),
+            GrpcLastObserved::Unavailable => ToolError::grpc_unavailable(),
+            GrpcLastObserved::ConfigurationError
+            | GrpcLastObserved::Never
+            | GrpcLastObserved::Available => ToolError::grpc_not_configured(),
+        }
+    }
+
+    async fn run_grpc_admission_probe<F>(
+        &self,
+        deadline: tokio::time::Instant,
+        probe: F,
+    ) -> Result<(), ToolError>
+    where
+        F: Future<Output = Result<(), AnytypeError>>,
+    {
+        match tokio::time::timeout_at(deadline, anytype::scope_grpc_deadline(deadline, probe)).await
+        {
+            Ok(Ok(())) => {
+                self.record_grpc_observation(GrpcLastObserved::Available);
+                Ok(())
+            }
+            Ok(Err(error)) => Err(self.record_grpc_admission_failure(&error)),
+            Err(_) => {
+                self.record_grpc_observation(GrpcLastObserved::Unavailable);
+                Err(ToolError::grpc_unavailable())
+            }
+        }
+    }
+
+    /// Performs the bounded admission probe required before a gRPC workflow.
+    pub(crate) async fn admit_grpc(&self) -> Result<(), ToolError> {
+        if !self.grpc_configured {
+            self.record_grpc_observation(GrpcLastObserved::ConfigurationError);
+            return Err(ToolError::grpc_not_configured());
+        }
+        if self.fixture_grpc_admitted {
+            self.record_grpc_observation(GrpcLastObserved::Available);
+            return Ok(());
+        }
+        let deadline = self
+            .active_invocation_capability()
+            .map_or_else(tokio::time::Instant::now, |capability| {
+                capability.deadline()
+            });
+        self.run_grpc_admission_probe(deadline, self.client.ping_grpc())
+            .await
     }
 
     /// Returns whether this process must omit and reject mutating workflows.
@@ -1467,6 +1586,9 @@ impl RuntimeContext {
                 max_concurrency,
                 request_timeout,
                 startup_status,
+                grpc_configured: startup_status.grpc_available,
+                grpc_last_observed: GrpcLastObserved::from_startup_status(startup_status),
+                fixture_grpc_admitted: startup_status.grpc_available,
                 profile: ApplicationProfile::Standard,
                 read_only: false,
                 optional_toolsets: OptionalToolsetSelection::default(),
@@ -1529,6 +1651,9 @@ impl RuntimeContext {
                 max_concurrency,
                 request_timeout,
                 startup_status,
+                grpc_configured: startup_status.grpc_available,
+                grpc_last_observed: GrpcLastObserved::from_startup_status(startup_status),
+                fixture_grpc_admitted: startup_status.grpc_available,
                 profile,
                 read_only,
                 optional_toolsets,
@@ -1595,6 +1720,9 @@ impl RuntimeContext {
                 max_concurrency: 2,
                 request_timeout: Duration::from_secs(30),
                 startup_status,
+                grpc_configured: startup_status.grpc_available,
+                grpc_last_observed: GrpcLastObserved::from_startup_status(startup_status),
+                fixture_grpc_admitted: startup_status.grpc_available,
                 profile: ApplicationProfile::Standard,
                 read_only,
                 optional_toolsets,
@@ -1634,6 +1762,9 @@ impl RuntimeContext {
             next_correlation_id: Arc::new(AtomicU64::new(1)),
             request_timeout: parts.request_timeout,
             startup_status: parts.startup_status,
+            grpc_configured: parts.grpc_configured,
+            grpc_last_observed: Arc::new(Mutex::new(parts.grpc_last_observed)),
+            fixture_grpc_admitted: parts.fixture_grpc_admitted,
             profile: parts.profile,
             read_only: parts.read_only,
             optional_toolsets: parts.optional_toolsets,
@@ -1693,19 +1824,14 @@ where
     result
 }
 
-async fn verify_startup_probes<FH, FG, HH, HG, EH, EG>(
+async fn verify_startup_http<FH, HH, EH>(
     http_configured: bool,
-    grpc_configured: bool,
-    grpc_required: bool,
     timeout: Duration,
     http_probe: FH,
-    grpc_probe: FG,
 ) -> Result<StartupStatus, StartupError>
 where
     FH: FnOnce() -> HH,
-    FG: FnOnce() -> HG,
     HH: Future<Output = Result<(), EH>>,
-    HG: Future<Output = Result<(), EG>>,
 {
     if !http_configured {
         return Err(StartupError::MissingHttpCredentials);
@@ -1717,25 +1843,9 @@ where
             StartupCheckError::Unavailable => StartupError::HttpUnavailable,
         })?;
 
-    if grpc_required && !grpc_configured {
-        return Err(StartupError::MissingRequiredGrpcCredentials);
-    }
-
-    let grpc_available = if grpc_configured {
-        startup_check(timeout, grpc_probe())
-            .await
-            .map_err(|error| match error {
-                StartupCheckError::Timeout => StartupError::GrpcTimeout,
-                StartupCheckError::Unavailable => StartupError::GrpcUnavailable,
-            })?;
-        true
-    } else {
-        false
-    };
-
     Ok(StartupStatus {
         http_available: true,
-        grpc_available,
+        grpc_available: false,
     })
 }
 
@@ -2029,16 +2139,10 @@ pub enum StartupError {
     CredentialLookup,
     /// No HTTP token was present in the configured keystore.
     MissingHttpCredentials,
-    /// The selected catalog requires gRPC, but no gRPC credentials were present.
-    MissingRequiredGrpcCredentials,
     /// The authenticated HTTP ping failed.
     HttpUnavailable,
     /// The authenticated HTTP ping exceeded its deadline.
     HttpTimeout,
-    /// Configured gRPC credentials failed their ping.
-    GrpcUnavailable,
-    /// The authenticated gRPC ping exceeded its deadline.
-    GrpcTimeout,
     /// Configured Anytype space authority could not be frozen safely.
     SpacePolicy,
     /// Configured artifact roots could not be activated safely.
@@ -2065,13 +2169,8 @@ impl fmt::Display for StartupError {
             Self::MissingHttpCredentials => formatter.write_str(
                 "Anytype HTTP credentials are missing; configure the existing anyr keystore or env keystore",
             ),
-            Self::MissingRequiredGrpcCredentials => formatter.write_str(
-                "selected Anytype MCP catalog requires configured gRPC credentials",
-            ),
             Self::HttpUnavailable => formatter.write_str("authenticated Anytype HTTP ping failed"),
             Self::HttpTimeout => formatter.write_str("authenticated Anytype HTTP ping timed out"),
-            Self::GrpcUnavailable => formatter.write_str("authenticated Anytype gRPC ping failed"),
-            Self::GrpcTimeout => formatter.write_str("authenticated Anytype gRPC ping timed out"),
             Self::SpacePolicy => {
                 formatter.write_str("unable to initialize configured Anytype space policy")
             }
@@ -2608,6 +2707,14 @@ mod tests {
     }
 
     fn runtime(max_concurrency: usize, timeout: Duration) -> RuntimeContext {
+        runtime_with_grpc(max_concurrency, timeout, true)
+    }
+
+    fn runtime_with_grpc(
+        max_concurrency: usize,
+        timeout: Duration,
+        grpc_configured: bool,
+    ) -> RuntimeContext {
         let config = ClientConfig {
             base_url: Some("http://127.0.0.1:1".to_string()),
             keystore: Some("env".to_string()),
@@ -2622,7 +2729,7 @@ mod tests {
             timeout,
             StartupStatus {
                 http_available: true,
-                grpc_available: true,
+                grpc_available: grpc_configured,
             },
         )
     }
@@ -2640,160 +2747,118 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_requires_http_without_running_probes() {
+    async fn startup_requires_http_without_running_a_probe() {
         let http_calls = AtomicUsize::new(0);
-        let grpc_calls = AtomicUsize::new(0);
-        let result = verify_startup_probes(
-            false,
-            true,
-            false,
-            Duration::from_secs(1),
-            || async {
-                http_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(())
-            },
-            || async {
-                grpc_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(())
-            },
-        )
+        let result = verify_startup_http(false, Duration::from_secs(1), || async {
+            http_calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, ()>(())
+        })
         .await;
 
         assert_eq!(result, Err(StartupError::MissingHttpCredentials));
         assert_eq!(http_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(grpc_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn startup_runs_http_and_only_configured_grpc_probe_once() {
+    async fn startup_runs_only_the_http_probe_once() {
         let http_calls = AtomicUsize::new(0);
-        let grpc_calls = AtomicUsize::new(0);
-        let http_only = verify_startup_probes(
-            true,
-            false,
-            false,
-            Duration::from_secs(1),
-            || async {
-                http_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(())
-            },
-            || async {
-                grpc_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(())
-            },
-        )
+        let status = verify_startup_http(true, Duration::from_secs(1), || async {
+            http_calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, ()>(())
+        })
         .await
-        .expect("HTTP-only startup");
+        .expect("HTTP startup");
         assert_eq!(
-            http_only,
+            status,
             StartupStatus {
                 http_available: true,
                 grpc_available: false,
             }
         );
         assert_eq!(http_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(grpc_calls.load(Ordering::SeqCst), 0);
+    }
 
-        let both = verify_startup_probes(
-            true,
-            true,
-            false,
-            Duration::from_secs(1),
-            || async {
-                http_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(())
-            },
-            || async {
-                grpc_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(())
-            },
-        )
-        .await
-        .expect("HTTP and gRPC startup");
+    #[tokio::test]
+    async fn startup_fails_when_http_is_unavailable() {
+        let result =
+            verify_startup_http(true, Duration::from_secs(1), || async { Err::<(), _>(()) }).await;
+        assert_eq!(result, Err(StartupError::HttpUnavailable));
+    }
+
+    #[tokio::test]
+    async fn grpc_admission_records_configuration_error_without_a_probe() {
+        let runtime = runtime_with_grpc(1, Duration::from_secs(1), false);
+        assert_eq!(runtime.grpc_last_observed(), GrpcLastObserved::Never);
+
+        assert!(runtime.admit_grpc().await.is_err());
         assert_eq!(
-            both,
-            StartupStatus {
-                http_available: true,
-                grpc_available: true,
-            }
+            runtime.grpc_last_observed(),
+            GrpcLastObserved::ConfigurationError
         );
-        assert_eq!(http_calls.load(Ordering::SeqCst), 2);
-        assert_eq!(grpc_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn startup_rejects_http_only_when_selected_catalog_requires_grpc() {
-        let http_calls = AtomicUsize::new(0);
-        let grpc_calls = AtomicUsize::new(0);
-        let result = verify_startup_probes(
-            true,
-            false,
-            true,
-            Duration::from_secs(1),
-            || async {
-                http_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(())
-            },
-            || async {
-                grpc_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(())
-            },
-        )
-        .await;
+    async fn grpc_admission_timeout_records_unavailable_before_outer_deadline() {
+        let runtime = runtime_with_grpc(1, Duration::from_secs(1), true);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+        let error = runtime
+            .run_grpc_admission_probe(deadline, std::future::pending())
+            .await
+            .expect_err("stalled admission must fail with a capability error");
 
-        assert_eq!(result, Err(StartupError::MissingRequiredGrpcCredentials));
-        assert_eq!(http_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(grpc_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(error.code(), crate::error::ToolErrorCode::GrpcUnavailable);
+        assert_eq!(runtime.grpc_last_observed(), GrpcLastObserved::Unavailable);
     }
 
     #[tokio::test]
-    async fn startup_rejects_neither_transport_without_running_probes() {
-        let http_calls = AtomicUsize::new(0);
-        let grpc_calls = AtomicUsize::new(0);
-        let result = verify_startup_probes(
-            false,
-            false,
-            true,
-            Duration::from_secs(1),
-            || async {
-                http_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(())
-            },
-            || async {
-                grpc_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(())
-            },
-        )
-        .await;
+    async fn grpc_admission_timeout_wins_the_outer_invocation_deadline_race() {
+        let runtime = runtime_with_grpc(1, Duration::from_millis(20), true);
+        let cancellation = CancellationToken::new();
+        let capability = runtime
+            .admit_invocation("object_archive", &cancellation)
+            .await
+            .expect("invocation admission");
+        let deadline = capability.deadline();
+        let operation_runtime = runtime.clone();
+        let result = runtime
+            .run_invocation(
+                capability,
+                &cancellation,
+                Box::pin(async move {
+                    operation_runtime
+                        .run_grpc_admission_probe(deadline, std::future::pending())
+                        .await
+                }),
+            )
+            .await
+            .expect("admission timeout must remain a tool result")
+            .expect_err("stalled admission must fail");
 
-        assert_eq!(result, Err(StartupError::MissingHttpCredentials));
-        assert_eq!(http_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(grpc_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(result.code(), crate::error::ToolErrorCode::GrpcUnavailable);
+        assert_eq!(runtime.grpc_last_observed(), GrpcLastObserved::Unavailable);
     }
 
-    #[tokio::test]
-    async fn startup_fails_when_a_mandatory_configured_probe_fails() {
-        let http_failure = verify_startup_probes(
-            true,
-            false,
-            false,
-            Duration::from_secs(1),
-            || async { Err::<(), _>(()) },
-            || async { Ok::<_, ()>(()) },
-        )
-        .await;
-        assert_eq!(http_failure, Err(StartupError::HttpUnavailable));
+    #[test]
+    fn grpc_admission_maps_typed_failures_and_records_status() {
+        let runtime = runtime_with_grpc(1, Duration::from_secs(1), true);
+        let authentication = runtime.record_grpc_admission_failure(&AnytypeError::Unauthorized);
+        assert_eq!(
+            authentication.code(),
+            crate::error::ToolErrorCode::Authentication
+        );
+        assert_eq!(
+            runtime.grpc_last_observed(),
+            GrpcLastObserved::AuthenticationFailed
+        );
 
-        let grpc_failure = verify_startup_probes(
-            true,
-            true,
-            false,
-            Duration::from_secs(1),
-            || async { Ok::<_, ()>(()) },
-            || async { Err::<(), _>(()) },
-        )
-        .await;
-        assert_eq!(grpc_failure, Err(StartupError::GrpcUnavailable));
+        let unavailable = runtime.record_grpc_admission_failure(&AnytypeError::Other {
+            message: "secret upstream detail".to_owned(),
+        });
+        assert_eq!(
+            unavailable.code(),
+            crate::error::ToolErrorCode::GrpcUnavailable
+        );
+        assert_eq!(runtime.grpc_last_observed(), GrpcLastObserved::Unavailable);
     }
 
     #[tokio::test]

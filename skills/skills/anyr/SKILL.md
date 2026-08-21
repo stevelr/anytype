@@ -1,6 +1,6 @@
 ---
 name: anyr
-description: Use when reading, searching, creating, or updating Anytype documents (objects, spaces, types, properties, files, chats) from the command line with the anyr CLI - includes auth token setup for desktop and headless servers, keystore configuration, and JSON output patterns for scripting
+description: Use when reading, searching, creating, or updating Anytype documents (objects, spaces, types, properties, files, chats) from the command line with the configured anyr CLI, including JSON output patterns for scripting
 ---
 
 # Anytype CLI (anyr)
@@ -12,10 +12,11 @@ archived-object cleanup, space administration, backup/restore, and some chat
 operations require gRPC. The complete CLI documentation is available in the
 [Anytype Toolbox repository](https://github.com/stevelr/anytype/tree/main/anyr).
 
-*Tool choice*: Use this skill for explicit CLI workflows, CLI authentication
-or endpoint setup, unavailable MCP tools, and documented CLI-only fallbacks.
-When connected any-mcp tools advertise the required capability, use the
-any-mcp skill instead.
+*Tool choice*: Use this skill for explicit CLI workflows, unavailable MCP
+tools, and documented CLI-only fallbacks. Use `anytype-setup` to install
+`anyr`, authenticate, select or change endpoints, or recover a backend. When
+connected any-mcp tools advertise the required capability, use the any-mcp
+skill instead.
 
 ## Prerequisites
 
@@ -35,77 +36,14 @@ encrypted file-keystore example.
 - Type keys, property keys, and tag names are per-space. Discover them with
   `anyr type list SPACE`, `anyr property list SPACE`, `anyr tag list ...`.
 
-## Setup and auth
+## Connection prerequisite
 
-### Endpoints
-
-- `ANYTYPE_URL` selects the HTTP endpoint. The default is
-  `http://127.0.0.1:31012` when the keystore contains gRPC credentials and
-  `http://127.0.0.1:31009` otherwise.
-- `ANYTYPE_GRPC_ENDPOINT` selects the Anytype CLI server gRPC endpoint. The
-  default is `http://127.0.0.1:31010`; every operation marked **CLI + gRPC**
-  below uses it.
-
-**Tokens are endpoint-specific**: a token minted for the desktop URL does not
-work against the headless server, and vice versa.
-
-### Keystore
-
-Tokens are stored in a keystore selected by `ANYTYPE_KEYSTORE`
-(default: OS keyring: `keyutils` on linux, `keyring` on macos, `windows` on
-windows). For agent/headless use prefer one of:
-
-```sh
-# file (sqlite) keystore: persistent, no OS approval pop-ups
-export ANYTYPE_KEYSTORE=file                 # default path
-export ANYTYPE_KEYSTORE=file:path=$HOME/.config/anytype/apikeys.db
-# optional at-rest encryption:
-#   file:cipher=aegis256:hexkey=$(openssl rand -hex 32)
-
-# env keystore: nothing persisted; token comes from the environment
-export ANYTYPE_KEYSTORE=env
-export ANYTYPE_KEY_HTTP_TOKEN="$TOKEN"       # http auth token
-# gRPC (only if needed): ANYTYPE_KEY_ACCOUNT_KEY or ANYTYPE_KEY_SESSION_TOKEN
-```
-
-`ANYTYPE_KEYSTORE_SERVICE` namespaces entries per app; set it to `anyr` so
-other tools (any-edit, the anytype crate) can share the same tokens:
-
-```sh
-export ANYTYPE_KEYSTORE_SERVICE=anyr
-```
-
-### Getting a token into the keystore
-
-Pick one:
-
-1. **Desktop, interactive** (needs a human at the app):
-   `anyr auth login`. The app shows a 4-digit code; type it at the prompt.
-2. **Headless server** (anytype-cli): generate a key, then store it:
-   ```sh
-   anytype auth apikey create anyr        # prints a token
-   echo "$TOKEN" | anyr auth set-http     # reads token from stdin
-   ```
-3. **Pre-provisioned token, no persistence**: use the `env` keystore above;
-   no `auth set-http` step needed.
-
-gRPC credentials for operations marked **CLI + gRPC**:
-`anyr auth set-grpc --config ~/.anytype/config.json` (headless server's
-accountKey/sessionToken), or `--account-key` / `--token` / `--bip39` read from
-stdin. The [connection guide](https://docs.anytype-toolbox.org/reference/connections/)
-covers desktop and headless credential setup.
-
-### Verify before doing anything else
-
-```sh
-anyr auth status | jq .ping
-# want: {"grpc": "Ping check ok", "http": "Ping check ok"}
-# HTTP alone is enough only for commands not marked CLI + gRPC below
-```
-
-If ping fails: server down (restart it, wait ~30 s before use) or token
-invalid/for the wrong endpoint. Repeated 500s from a headless server may mean
-a corrupt server database. Stop and ask the operator rather than improvising.
+For installation, authentication, endpoint selection, keystore configuration,
+or recovery, use `anytype-setup`. Do not probe both transports before every
+command. Run an existing configured HTTP command directly; invoke setup only
+after a relevant connection or authentication failure. Before a command marked
+**CLI + gRPC**, ensure the selected connection is headless. Preserve saved
+credentials when a configured backend is temporarily unavailable.
 
 ## Reading
 

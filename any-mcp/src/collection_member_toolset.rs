@@ -106,7 +106,7 @@ pub fn views_write_registry() -> &'static dyn OptionalToolsetRegistry {
 
 impl OptionalToolsetRegistry for ViewsWriteRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)
+        OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME)
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -276,7 +276,7 @@ impl std::fmt::Debug for ViewsWriteAcceptanceRegistry {
 #[cfg(feature = "acceptance-harness")]
 impl crate::optional_toolsets::OptionalToolsetRegistry for ViewsWriteAcceptanceRegistry {
     fn metadata(&self) -> crate::optional_toolsets::OptionalToolsetMetadata {
-        crate::optional_toolsets::OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)
+        crate::optional_toolsets::OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME)
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -402,7 +402,7 @@ impl ViewsWriteAcceptanceDirect {
             runtime::StartupStatus,
         };
 
-        let metadata = [OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)];
+        let metadata = [OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME)];
         let selection =
             OptionalToolsetSelection::parse(Some(VIEWS_WRITE_TOOLSET_NAME.to_owned()), &metadata)?;
         let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
@@ -558,7 +558,7 @@ pub async fn serve_acceptance_stdio_from_env() -> Result<(), Box<dyn std::error:
         ),
         _ => return Err("acceptance harness mode is invalid".into()),
     };
-    let metadata = [OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)];
+    let metadata = [OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME)];
     let mut config = RuntimeConfig::from_env_with_optional_metadata(&metadata)?;
     if !config.optional_toolsets.is_empty() {
         return Err("acceptance harness does not accept a registry selector".into());
@@ -901,7 +901,7 @@ pub fn collection_member_list_tool()
 
 /// Returns the read slice for later composition into `views-write`.
 pub fn collection_member_list_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
-    Ok(vec![OptionalRegistryTool::read(
+    Ok(vec![OptionalRegistryTool::read_grpc(
         collection_member_list_tool()?,
     )])
 }
@@ -909,9 +909,9 @@ pub fn collection_member_list_tools() -> Result<Vec<OptionalRegistryTool>, Schem
 /// Returns all three collection-membership tools for terminal registry composition.
 pub fn collection_member_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
     Ok(vec![
-        OptionalRegistryTool::read(collection_member_list_tool()?),
-        OptionalRegistryTool::mutation(collection_member_add_tool()?),
-        OptionalRegistryTool::mutation(collection_member_remove_tool()?),
+        OptionalRegistryTool::read_grpc(collection_member_list_tool()?),
+        OptionalRegistryTool::mutation_grpc(collection_member_add_tool()?),
+        OptionalRegistryTool::mutation_grpc(collection_member_remove_tool()?),
     ])
 }
 
@@ -2379,7 +2379,7 @@ mod tests {
 
     impl OptionalToolsetRegistry for TestRegistry {
         fn metadata(&self) -> OptionalToolsetMetadata {
-            OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)
+            OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME)
         }
 
         fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -2431,7 +2431,7 @@ mod tests {
         })
         .expect("no-I/O client");
         client.set_api_key(HttpCredentials::new("unused-no-io-token"));
-        let available = [OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)];
+        let available = [OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME)];
         let selection = OptionalToolsetSelection::parse(
             selected.then(|| VIEWS_WRITE_TOOLSET_NAME.to_owned()),
             &available,
@@ -2560,7 +2560,7 @@ mod tests {
     fn live_runtime(client: AnytypeClient, read_only: bool) -> RuntimeContext {
         let selection = OptionalToolsetSelection::parse(
             Some(VIEWS_WRITE_TOOLSET_NAME.to_owned()),
-            &[OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME, true)],
+            &[OptionalToolsetMetadata::new(VIEWS_WRITE_TOOLSET_NAME)],
         )
         .expect("views-write selection");
         RuntimeContext::from_parts_with_profile_and_optional_toolsets(
@@ -3228,10 +3228,9 @@ mod tests {
     }
 
     #[test]
-    fn production_registry_is_exact_grpc_gated_and_read_only_projected() {
+    fn production_registry_is_exact_and_read_only_projected() {
         let metadata = VIEWS_WRITE_REGISTRY.metadata();
         assert_eq!(metadata.name, VIEWS_WRITE_TOOLSET_NAME);
-        assert!(metadata.requires_grpc);
         assert!(
             production_optional_metadata()
                 .iter()

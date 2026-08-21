@@ -3219,13 +3219,13 @@ fn rich_resume_tool() -> Result<WorkflowTool<RichPageCreateOutput>, SchemaContra
 
 fn body_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
     Ok(vec![
-        OptionalRegistryTool::read(list_tool()?),
-        OptionalRegistryTool::mutation(create_tool()?),
-        OptionalRegistryTool::mutation(update_tool()?),
-        OptionalRegistryTool::mutation(delete_tool()?),
-        OptionalRegistryTool::mutation(move_tool()?),
-        OptionalRegistryTool::mutation(rich_create_tool()?),
-        OptionalRegistryTool::mutation(rich_resume_tool()?),
+        OptionalRegistryTool::read_grpc(list_tool()?),
+        OptionalRegistryTool::mutation_grpc(create_tool()?),
+        OptionalRegistryTool::mutation_grpc(update_tool()?),
+        OptionalRegistryTool::mutation_grpc(delete_tool()?),
+        OptionalRegistryTool::mutation_grpc(move_tool()?),
+        OptionalRegistryTool::mutation_grpc(rich_create_tool()?),
+        OptionalRegistryTool::mutation_grpc(rich_resume_tool()?),
     ])
 }
 
@@ -3524,7 +3524,7 @@ pub static BODY_BLOCKS_REGISTRY: &dyn OptionalToolsetRegistry = &BODY_REGISTRY_I
 
 impl OptionalToolsetRegistry for BodyRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new(BODY_BLOCKS_TOOLSET_NAME, true)
+        OptionalToolsetMetadata::new(BODY_BLOCKS_TOOLSET_NAME)
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -3622,7 +3622,7 @@ impl BodyAcceptanceDirect {
             runtime::StartupStatus,
         };
 
-        let metadata = [OptionalToolsetMetadata::new(BODY_BLOCKS_TOOLSET_NAME, true)];
+        let metadata = [OptionalToolsetMetadata::new(BODY_BLOCKS_TOOLSET_NAME)];
         let selection =
             OptionalToolsetSelection::parse(Some(BODY_BLOCKS_TOOLSET_NAME.to_owned()), &metadata)?;
         let runtime = RuntimeContext::from_parts_with_profile_and_optional_toolsets(
@@ -8161,9 +8161,10 @@ fn tool_category(error: &ToolError) -> RichFailureCategory {
         crate::error::ToolErrorCode::NotFound => RichFailureCategory::NotFound,
         crate::error::ToolErrorCode::Conflict => RichFailureCategory::Conflict,
         crate::error::ToolErrorCode::BoundedResult => RichFailureCategory::BoundedResult,
-        crate::error::ToolErrorCode::Ambiguous | crate::error::ToolErrorCode::Upstream => {
-            RichFailureCategory::Upstream
-        }
+        crate::error::ToolErrorCode::Ambiguous
+        | crate::error::ToolErrorCode::GrpcNotConfigured
+        | crate::error::ToolErrorCode::GrpcUnavailable
+        | crate::error::ToolErrorCode::Upstream => RichFailureCategory::Upstream,
     }
 }
 
@@ -12355,7 +12356,7 @@ mod tests {
         rich_resume_tool().expect("rich resume schema");
         assert_eq!(
             BODY_BLOCKS_REGISTRY.metadata(),
-            OptionalToolsetMetadata::new(BODY_BLOCKS_TOOLSET_NAME, true)
+            OptionalToolsetMetadata::new(BODY_BLOCKS_TOOLSET_NAME)
         );
         assert_eq!(
             BODY_BLOCKS_REGISTRY.catalog_token_ceiling(),

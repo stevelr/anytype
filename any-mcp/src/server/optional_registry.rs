@@ -246,17 +246,17 @@ struct AlphaRegistry;
 
 impl OptionalToolsetRegistry for AlphaRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new("alpha", false)
+        OptionalToolsetMetadata::new("alpha")
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
         Ok(vec![
-            OptionalRegistryTool::read(workflow_tool::<EmptyInput, CompleteOutput>(
+            OptionalRegistryTool::read_http(workflow_tool::<EmptyInput, CompleteOutput>(
                 ALPHA_READ,
                 "Read the bounded test-only alpha state.",
                 ToolProfile::Read,
             )?),
-            OptionalRegistryTool::mutation(workflow_tool::<EmptyInput, CompleteOutput>(
+            OptionalRegistryTool::mutation_http(workflow_tool::<EmptyInput, CompleteOutput>(
                 ALPHA_WRITE,
                 "Update the bounded test-only alpha state.",
                 ToolProfile::Update,
@@ -348,11 +348,11 @@ struct BetaRegistry;
 
 impl OptionalToolsetRegistry for BetaRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new("beta", true)
+        OptionalToolsetMetadata::new("beta")
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
-        Ok(vec![OptionalRegistryTool::read(workflow_tool::<
+        Ok(vec![OptionalRegistryTool::read_http(workflow_tool::<
             EmptyInput,
             CompleteOutput,
         >(
@@ -401,11 +401,11 @@ struct GammaRegistry;
 
 impl OptionalToolsetRegistry for GammaRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new("gamma", false)
+        OptionalToolsetMetadata::new("gamma")
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
-        Ok(vec![OptionalRegistryTool::mutation(workflow_tool::<
+        Ok(vec![OptionalRegistryTool::mutation_http(workflow_tool::<
             EmptyInput,
             CompleteOutput,
         >(
@@ -1939,21 +1939,18 @@ async fn production_optional_selection_preserves_phase_one_snapshots_and_status(
 }
 
 #[test]
-fn production_optional_transport_union_is_exact() {
+fn production_optional_registry_names_are_exact() {
     let metadata = production_optional_metadata();
     assert_eq!(
-        metadata
-            .iter()
-            .map(|entry| (entry.name, entry.requires_grpc))
-            .collect::<Vec<_>>(),
+        metadata.iter().map(|entry| entry.name).collect::<Vec<_>>(),
         [
-            ("artifacts", false),
-            ("body-blocks", true),
-            ("chats", false),
-            ("members", false),
-            ("files", false),
-            ("schema", true),
-            ("views-write", true),
+            "artifacts",
+            "body-blocks",
+            "chats",
+            "members",
+            "files",
+            "schema",
+            "views-write",
         ]
     );
     assert!(
@@ -1963,7 +1960,7 @@ fn production_optional_transport_union_is_exact() {
             true,
             false,
         )
-        .is_err()
+        .is_ok()
     );
     assert!(
         production_server(
@@ -1976,7 +1973,7 @@ fn production_optional_transport_union_is_exact() {
     );
     for name in ["body-blocks", "schema", "views-write"] {
         assert!(
-            production_server(Some(name), ApplicationProfile::Compact, true, false,).is_err(),
+            production_server(Some(name), ApplicationProfile::Compact, true, false,).is_ok(),
             "{name}"
         );
     }
@@ -2030,13 +2027,13 @@ fn production_catalogs_match_reviewed_aggregate_token_budget() {
 }
 
 #[test]
-fn optional_transport_requirements_union_with_phase_one() {
+fn optional_catalog_construction_does_not_probe_backends() {
     assert!(
         AnyMcpServer::new_with_optional_registries(
             runtime("beta", ApplicationProfile::Compact, true, false),
             &LINKED,
         )
-        .is_err()
+        .is_ok()
     );
     assert!(
         AnyMcpServer::new_with_optional_registries(
@@ -2059,7 +2056,7 @@ struct CollisionRegistry {
 
 impl OptionalToolsetRegistry for CollisionRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new(self.name, false)
+        OptionalToolsetMetadata::new(self.name)
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -2070,7 +2067,7 @@ impl OptionalToolsetRegistry for CollisionRegistry {
                     "Test-only collision contract.",
                     ToolProfile::Read,
                 )
-                .map(|tool| vec![OptionalRegistryTool::read(tool)])
+                .map(|tool| vec![OptionalRegistryTool::read_http(tool)])
             })
             .unwrap_or_else(|| Ok(Vec::new()))
     }

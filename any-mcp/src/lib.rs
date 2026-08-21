@@ -299,7 +299,7 @@ async fn run_server(
             }
             tracing::info!(
                 http_available = runtime.startup_status().http_available,
-                grpc_available = runtime.startup_status().grpc_available,
+                grpc_configured = runtime.grpc_configured(),
                 "authenticated Anytype runtime ready"
             );
             let signal_runtime = runtime.clone();
@@ -332,7 +332,7 @@ async fn run_server(
             }
             tracing::info!(
                 http_available = runtime.startup_status().http_available,
-                grpc_available = runtime.startup_status().grpc_available,
+                grpc_configured = runtime.grpc_configured(),
                 "authenticated Anytype runtime ready"
             );
             http::serve_http(runtime, protocol_mode, *http_config, auth).await?;

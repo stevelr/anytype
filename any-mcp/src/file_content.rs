@@ -1858,14 +1858,14 @@ pub(crate) static FILE_CONTENT_REGISTRY: FileContentRegistry = FileContentRegist
 
 impl OptionalToolsetRegistry for FileContentRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new("files", false)
+        OptionalToolsetMetadata::new("files")
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
         Ok(vec![
-            OptionalRegistryTool::read(file_metadata_tool()?),
-            OptionalRegistryTool::read(file_read_tool()?),
-            OptionalRegistryTool::mutation(file_upload_tool()?),
+            OptionalRegistryTool::read_http(file_metadata_tool()?),
+            OptionalRegistryTool::read_http(file_read_tool()?),
+            OptionalRegistryTool::mutation_http(file_upload_tool()?),
         ])
     }
 
@@ -2608,6 +2608,8 @@ fn controlled_resource_error(error: ControlledOperationError<FileOperationError>
             ToolErrorCode::Authentication
             | ToolErrorCode::Ambiguous
             | ToolErrorCode::BoundedResult
+            | ToolErrorCode::GrpcNotConfigured
+            | ToolErrorCode::GrpcUnavailable
             | ToolErrorCode::Upstream => ErrorData::internal_error(RESOURCE_UPSTREAM, None),
         },
         ControlledOperationError::Operation(FileOperationError::Upstream(error)) => {
@@ -3370,7 +3372,7 @@ mod tests {
     fn production_registry_inventory_and_read_only_projection_are_exact() {
         assert_eq!(
             FILE_CONTENT_REGISTRY.metadata(),
-            OptionalToolsetMetadata::new("files", false)
+            OptionalToolsetMetadata::new("files")
         );
         assert!(FILE_CONTENT_REGISTRY.resources().is_empty());
         assert_eq!(
@@ -3381,7 +3383,7 @@ mod tests {
         assert!(
             production_optional_metadata()
                 .iter()
-                .any(|metadata| metadata.name == "files" && !metadata.requires_grpc)
+                .any(|metadata| metadata.name == "files")
         );
 
         let client = catalog_client();

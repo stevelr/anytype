@@ -5,7 +5,7 @@
 
 //! Static Phase 1 MCP catalog, routing, and protocol configuration.
 
-use std::{fmt, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use rmcp::{
     RoleServer, ServerHandler,
@@ -38,7 +38,7 @@ use crate::{
     object_read::{ObjectGetInput, ObjectReadHandlers, ObjectSearchInput},
     object_update::{ObjectUpdateInput, ObjectUpdateOutput, object_update, object_update_tool},
     optional_toolsets::{
-        OptionalCatalog, OptionalRegistryFuture, OptionalToolsetRegistry,
+        BackendRequirement, OptionalCatalog, OptionalRegistryFuture, OptionalToolsetRegistry,
         OptionalToolsetStatusInput, OptionalToolsetStatusOutput, compose_optional_catalog,
         optional_toolset_status_tool, production_optional_registries,
     },
@@ -105,6 +105,39 @@ const ALL_TOOL_NAMES: [&str; 14] = [
 const COMPACT_TOOL_NAMES: [&str; 4] = [OBJECT_EDIT, OBJECT_GET, OBJECT_SEARCH, SERVER_STATUS];
 const COMPACT_READ_TOOL_NAMES: [&str; 3] = [OBJECT_GET, OBJECT_SEARCH, SERVER_STATUS];
 
+#[cfg(test)]
+const GRPC_TOOL_NAMES: [&str; 12] = [
+    OBJECT_ARCHIVE,
+    "body_block_create",
+    "body_block_delete",
+    "body_block_list",
+    "body_block_move",
+    "body_block_update",
+    "collection_member_add",
+    "collection_member_list",
+    "collection_member_remove",
+    "rich_page_create",
+    "rich_page_resume",
+    "type_update",
+];
+
+const CORE_TOOL_BACKENDS: [(&str, BackendRequirement); 14] = [
+    (OBJECT_ARCHIVE, BackendRequirement::Grpc),
+    (OBJECT_CREATE, BackendRequirement::Http),
+    (OBJECT_EDIT, BackendRequirement::Http),
+    (OBJECT_GET, BackendRequirement::Http),
+    (OBJECT_SEARCH, BackendRequirement::Http),
+    (OBJECT_UPDATE, BackendRequirement::Http),
+    (PROPERTY_LIST, BackendRequirement::Http),
+    (SERVER_STATUS, BackendRequirement::Http),
+    (SPACE_LIST, BackendRequirement::Http),
+    (TAG_LIST, BackendRequirement::Http),
+    (TEMPLATE_LIST, BackendRequirement::Http),
+    (TYPE_LIST, BackendRequirement::Http),
+    (VIEW_LIST, BackendRequirement::Http),
+    (VIEW_OBJECT_LIST, BackendRequirement::Http),
+];
+
 fn invocation_failure_result(failure: InvocationFailure) -> CallToolResult {
     let _controlled_kind = failure.kind;
     if failure.dispatched {
@@ -132,6 +165,7 @@ impl Drop for DispatchAbortGuard {
 
 struct ServerState {
     tools: Vec<Tool>,
+    backend_requirements: HashMap<String, BackendRequirement>,
     access: MutationAccess,
     discovery: DiscoveryHandlers,
     object_read: ObjectReadHandlers,
@@ -207,11 +241,7 @@ impl AnyMcpServer {
         validate_production_space_policy: bool,
     ) -> Result<Self, ServerBuildError> {
         let availability = runtime.startup_status();
-        if !availability.http_available
-            || ((runtime.profile().requires_grpc(runtime.is_read_only())
-                || runtime.optional_toolsets().requires_grpc())
-                && !availability.grpc_available)
-        {
+        if !availability.http_available {
             return Err(ServerBuildError);
         }
         let cursors = Arc::new(CursorStore::new().map_err(ServerBuildError::cursor)?);
@@ -310,6 +340,35 @@ impl AnyMcpServer {
         } else {
             None
         };
+        let mut backend_requirements = CORE_TOOL_BACKENDS
+            .into_iter()
+            .filter(|(name, _)| tools.iter().any(|tool| tool.name.as_ref() == *name))
+            .map(|(name, backend)| (name.to_owned(), backend))
+            .collect::<HashMap<_, _>>();
+        for tool in &optional_catalog.tools {
+            let name = tool.name.to_string();
+            let Some(backend) = optional_catalog.backend_requirement(&name) else {
+                return Err(ServerBuildError);
+            };
+            if backend_requirements.insert(name, backend).is_some() {
+                return Err(ServerBuildError);
+            }
+        }
+        if let Some(contract) = &optional_status_contract {
+            let name = contract.as_tool().name.to_string();
+            if backend_requirements
+                .insert(name, BackendRequirement::Http)
+                .is_some()
+            {
+                return Err(ServerBuildError);
+            }
+        }
+        if tools
+            .iter()
+            .any(|tool| !backend_requirements.contains_key(tool.name.as_ref()))
+        {
+            return Err(ServerBuildError);
+        }
         resource_instances.extend(optional_catalog.resources.iter().cloned());
         resource_instances.sort_by(|left, right| left.uri.cmp(&right.uri));
         resource_templates.extend(optional_catalog.resource_templates.iter().cloned());
@@ -339,6 +398,7 @@ impl AnyMcpServer {
             runtime: runtime.clone(),
             state: Arc::new(ServerState {
                 tools,
+                backend_requirements,
                 access,
                 discovery,
                 object_read,
@@ -382,6 +442,10 @@ impl AnyMcpServer {
         (self.state.access == MutationAccess::ReadOnly).then(|| tool_error(&ToolError::read_only()))
     }
 
+    fn backend_requirement(&self, name: &str) -> Option<BackendRequirement> {
+        self.state.backend_requirements.get(name).copied()
+    }
+
     #[cfg_attr(
         not(any(test, feature = "acceptance-harness")),
         expect(dead_code, reason = "stable-version dispatch seam is used by tests")
@@ -420,14 +484,36 @@ impl AnyMcpServer {
                                 return Ok(invocation_failure_result(failure));
                             }
                         };
-                        let operation = server.dispatch_tool_for_protocol_inner(
-                            request,
-                            &protocol_version,
-                            &cancellation,
-                        );
+                        let advertised = server
+                            .state
+                            .tools
+                            .iter()
+                            .any(|tool| tool.name.as_ref() == tool_name);
+                        let common_request_valid =
+                            request.input_responses.is_none() && request.request_state.is_none();
+                        let grpc_required = advertised
+                            && common_request_valid
+                            && server.backend_requirement(&tool_name)
+                                == Some(BackendRequirement::Grpc);
+                        let operation_server = server.clone();
+                        let operation_cancellation = cancellation.clone();
+                        let operation = async move {
+                            if grpc_required
+                                && let Err(error) = operation_server.runtime.admit_grpc().await
+                            {
+                                return Ok(tool_error(&error));
+                            }
+                            operation_server
+                                .dispatch_tool_for_protocol_inner(
+                                    request,
+                                    &protocol_version,
+                                    &operation_cancellation,
+                                )
+                                .await
+                        };
                         match server
                             .runtime
-                            .run_invocation(capability, &cancellation, operation)
+                            .run_invocation(capability, &cancellation, Box::pin(operation))
                             .await
                         {
                             Ok(result) => result,
@@ -1043,7 +1129,7 @@ mod optional_registry;
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, time::Duration};
+    use std::{collections::BTreeSet, fs, path::Path, time::Duration};
 
     use anytype::prelude::{AnytypeClient, ClientConfig, HttpCredentials};
     use rmcp::ServiceExt;
@@ -1064,7 +1150,7 @@ mod tests {
     use crate::{
         optional_toolsets::{OptionalToolsetSelection, production_optional_metadata},
         resources::OBJECT_RESOURCE_TEMPLATE,
-        runtime::{StartupStatus, serve_transport},
+        runtime::{GrpcLastObserved, StartupStatus, serve_transport},
     };
 
     const SPACE_ID: &str =
@@ -1164,7 +1250,7 @@ mod tests {
             read_only,
             StartupStatus {
                 http_available: true,
-                grpc_available: profile.requires_grpc(read_only),
+                grpc_available: matches!(profile, ApplicationProfile::Standard) && !read_only,
             },
         )
     }
@@ -1274,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn server_build_admission_matches_profile_access_transport_requirements() {
+    fn server_build_requires_http_but_keeps_catalog_when_grpc_is_unavailable() {
         for protocol_profile in [ApplicationProfile::Compact, ApplicationProfile::Standard] {
             for read_only in [false, true] {
                 for grpc_available in [false, true] {
@@ -1287,10 +1373,8 @@ mod tests {
                             grpc_available,
                         },
                     );
-                    let expected = !protocol_profile.requires_grpc(read_only) || grpc_available;
-                    assert_eq!(
+                    assert!(
                         AnyMcpServer::new(runtime).is_ok(),
-                        expected,
                         "profile={protocol_profile:?} read_only={read_only} grpc={grpc_available}"
                     );
                 }
@@ -1307,6 +1391,73 @@ mod tests {
                 assert!(AnyMcpServer::new(missing_http).is_err());
             }
         }
+    }
+
+    #[test]
+    fn production_catalog_has_exact_grpc_backend_classification() {
+        let server = AnyMcpServer::new(runtime_with_all_optional_toolsets(
+            ApplicationProfile::Standard,
+            false,
+        ))
+        .expect("all-selected production catalog");
+        let names = tool_names(&server);
+        let unique = names.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "catalog tool names must be unique"
+        );
+
+        let classified = names
+            .iter()
+            .copied()
+            .filter(|name| server.backend_requirement(name) == Some(BackendRequirement::Grpc))
+            .collect::<BTreeSet<_>>();
+        let expected = GRPC_TOOL_NAMES.into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(classified, expected);
+    }
+
+    #[tokio::test]
+    async fn central_admission_bypasses_http_and_gates_grpc_before_handler_dispatch() {
+        let runtime = runtime_at_with_availability(
+            "http://127.0.0.1:1".to_owned(),
+            ApplicationProfile::Standard,
+            false,
+            StartupStatus {
+                http_available: true,
+                grpc_available: false,
+            },
+        );
+        let server = AnyMcpServer::new(runtime.clone()).expect("HTTP-only standard catalog");
+
+        let status = server
+            .dispatch_tool(
+                CallToolRequestParams::new(SERVER_STATUS),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("HTTP status route");
+        assert_eq!(status.is_error, Some(false));
+        assert_eq!(runtime.grpc_last_observed(), GrpcLastObserved::Never);
+
+        let archive = server
+            .dispatch_tool(
+                CallToolRequestParams::new(OBJECT_ARCHIVE),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("gRPC admission result");
+        assert_eq!(archive.is_error, Some(true));
+        assert_eq!(
+            archive
+                .structured_content
+                .expect("structured admission error")["code"],
+            "grpc_not_configured"
+        );
+        assert_eq!(
+            runtime.grpc_last_observed(),
+            GrpcLastObserved::ConfigurationError
+        );
     }
 
     fn compact_canonical_json(value: Value) -> String {

@@ -4089,19 +4089,19 @@ pub(crate) static ARTIFACT_REGISTRY: ArtifactRegistry = ArtifactRegistry;
 
 impl OptionalToolsetRegistry for ArtifactRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new(ARTIFACTS_TOOLSET_NAME, false)
+        OptionalToolsetMetadata::new(ARTIFACTS_TOOLSET_NAME)
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
         Ok(vec![
-            OptionalRegistryTool::read(status_tool()?),
-            OptionalRegistryTool::mutation(stage_allocate_tool()?),
-            OptionalRegistryTool::mutation(stage_release_tool()?),
-            OptionalRegistryTool::mutation(document_export_tool()?),
-            OptionalRegistryTool::mutation(document_import_create_tool()?),
-            OptionalRegistryTool::mutation(document_import_update_tool()?),
-            OptionalRegistryTool::mutation(export_tool()?),
-            OptionalRegistryTool::mutation(import_tool()?),
+            OptionalRegistryTool::read_http(status_tool()?),
+            OptionalRegistryTool::mutation_http(stage_allocate_tool()?),
+            OptionalRegistryTool::mutation_http(stage_release_tool()?),
+            OptionalRegistryTool::mutation_http(document_export_tool()?),
+            OptionalRegistryTool::mutation_http(document_import_create_tool()?),
+            OptionalRegistryTool::mutation_http(document_import_update_tool()?),
+            OptionalRegistryTool::mutation_http(export_tool()?),
+            OptionalRegistryTool::mutation_http(import_tool()?),
         ])
     }
 

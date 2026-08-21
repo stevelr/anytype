@@ -1,11 +1,13 @@
 # Anytype Toolbox Skills
 
-Anytype Toolbox Skills packages two Agent Skills for Codex and Claude Code:
+Anytype Toolbox Skills packages three Agent Skills for Codex and Claude Code:
 
 - `anyr` guides command-line work with Anytype objects, spaces, schema, files,
   chats, Markdown, and backups.
 - `any-mcp` guides bounded workflows through an MCP connection backed by
   `anyr mcp`.
+- `anytype-setup` installs `anyr` and establishes or recovers a desktop or
+  headless Anytype connection.
 
 This is an independent community project and is not affiliated with or
 endorsed by Anytype.
@@ -13,10 +15,13 @@ endorsed by Anytype.
 ## Prerequisites
 
 Install `anyr`, connect it to a running Anytype desktop or headless service,
-and configure endpoint-specific credentials. The `any-mcp` skill also requires
-an MCP host with a configured `anyr mcp` connection. Some fallback recipes use
-the `anyr` executable directly; the `save-links` recipe additionally uses
-Trafilatura for web-page extraction.
+and configure endpoint-specific credentials. The desktop app is sufficient
+for HTTP-backed workflows; install the Anytype headless CLI only for the
+documented gRPC-backed tools. Use `anytype-setup` for this one-time connection
+work and for bounded recovery. The `any-mcp` skill also requires an MCP host
+with a configured `anyr mcp` connection. Some fallback recipes use the `anyr`
+executable directly; the `save-links` recipe additionally uses Trafilatura for
+web-page extraction.
 
 The package contains instructions and metadata. It does not contain Anytype
 credentials or start an MCP server when installed.
@@ -25,8 +30,10 @@ Choose `anyr` when the agent can run the `anyr` executable and you want direct,
 scriptable CLI operations. Choose `any-mcp` when the host already has an MCP
 connection to `anyr mcp`; that skill uses the bounded MCP workflows and may
 refer to `anyr` for documented fallback operations. Both require a running and
-authenticated Anytype desktop or headless service. Neither skill installs or
-configures those runtime prerequisites.
+authenticated Anytype desktop or headless service. Choose `anytype-setup` to
+install or authenticate `anyr`, optionally install the headless CLI, choose a
+desktop or headless profile, or recover a structured connection error without
+clearing credentials.
 
 ## Review before installation
 
@@ -38,7 +45,7 @@ and tar.gz archives. Do not put Anytype credentials in a skill directory.
 
 ## Install with the skills CLI
 
-The interactive command discovers both skills from the monorepo and prompts
+The interactive command discovers all three skills from the monorepo and prompts
 for a host, scope, and installation method:
 
 ```sh
@@ -51,7 +58,8 @@ List or select skills explicitly:
 npx skills add stevelr/anytype --list
 npx skills add stevelr/anytype --skill anyr
 npx skills add stevelr/anytype --skill any-mcp
-npx skills add stevelr/anytype --skill anyr --skill any-mcp
+npx skills add stevelr/anytype --skill anytype-setup
+npx skills add stevelr/anytype --skill anyr --skill any-mcp --skill anytype-setup
 ```
 
 For a non-interactive global Codex install, name the host and accept the
@@ -59,22 +67,23 @@ selection explicitly:
 
 ```sh
 npx skills add stevelr/anytype \
-  --skill anyr --skill any-mcp \
+  --skill anyr --skill any-mcp --skill anytype-setup \
   --agent codex --global --yes
 ```
 
-To install the exact `0.1.0` release rather than the repository's current
+To install the exact `0.1.1` release rather than the repository's current
 default branch, use its immutable ZIP asset URL:
 
 ```sh
 npx skills add \
-  https://github.com/stevelr/anytype/releases/download/anytype-toolbox-skills-v0.1.0/anytype-toolbox-skills-v0.1.0.zip \
-  --skill anyr --skill any-mcp
+  https://github.com/stevelr/anytype/releases/download/anytype-toolbox-skills-v0.1.1/anytype-toolbox-skills-v0.1.1.zip \
+  --skill anyr --skill any-mcp --skill anytype-setup
 ```
 
-Use `npx skills update anyr any-mcp` for repository-based installations and
-`npx skills remove anyr any-mcp` to remove them. An archive install stays on
-the release named in its URL; install a newer versioned URL to upgrade it.
+Use `npx skills update anyr any-mcp anytype-setup` for repository-based
+installations and `npx skills remove anyr any-mcp anytype-setup` to remove
+them. An archive install stays on the release named in its URL; install a newer
+versioned URL to upgrade it.
 
 ## Install as a Codex plugin
 
@@ -83,7 +92,7 @@ then install the bundle:
 
 ```sh
 codex plugin marketplace add stevelr/anytype \
-  --ref anytype-toolbox-skills-v0.1.0
+  --ref anytype-toolbox-skills-v0.1.1
 codex plugin add anytype-toolbox-skills@anytype-toolbox
 ```
 
@@ -106,7 +115,7 @@ Claude Code can add the repository catalog and install the same plugin tree:
 
 ```sh
 claude plugin marketplace add \
-  stevelr/anytype@anytype-toolbox-skills-v0.1.0
+  stevelr/anytype@anytype-toolbox-skills-v0.1.1
 claude plugin install anytype-toolbox-skills@anytype-toolbox
 ```
 

@@ -234,8 +234,8 @@ pub fn chat_message_add_tool() -> Result<WorkflowTool<ChatMessageAddOutput>, Sch
 
 /// Returns the mutation slice for terminal chats-registry composition.
 pub fn chat_add_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
-    Ok(vec![OptionalRegistryTool::mutation(
-        chat_message_add_tool()?
+    Ok(vec![OptionalRegistryTool::mutation_http(
+        chat_message_add_tool()?,
     )])
 }
 
@@ -1422,7 +1422,7 @@ mod tests {
 
     impl OptionalToolsetRegistry for AddRegistry {
         fn metadata(&self) -> OptionalToolsetMetadata {
-            OptionalToolsetMetadata::new("chats", false)
+            OptionalToolsetMetadata::new("chats")
         }
 
         fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -1460,7 +1460,7 @@ mod tests {
     fn runtime(client: AnytypeClient, read_only: bool) -> RuntimeContext {
         let selection = OptionalToolsetSelection::parse(
             Some("chats".to_owned()),
-            &[OptionalToolsetMetadata::new("chats", false)],
+            &[OptionalToolsetMetadata::new("chats")],
         )
         .unwrap();
         RuntimeContext::from_parts_with_profile_and_optional_toolsets(

@@ -9,13 +9,13 @@
   },
   "catalogs": {
     "compact_base": {
-      "sha256": "3725f487cfdd35f53fcc3fd0bfd89fdc99d65d146571dd2b0d0c0d7ce800e4eb",
-      "tokens": 9658,
+      "sha256": "7d62afd167e15794944ee8613bb1178a960440070424defa94469dbac354da8b",
+      "tokens": 9796,
       "tools": ["object_edit", "object_get", "object_search", "server_status"]
     },
     "compact_selected": {
-      "sha256": "17558ddcee7b587705e34de08b72b55629a77bdc71cded40d8e8e2d916476f58",
-      "tokens": 13725,
+      "sha256": "21f1614e542d1ac959e4e7b0a194d19eae3836b4adc1d9715a55aba564dff544",
+      "tokens": 13863,
       "tools": [
         "chat_list",
         "chat_message_get",
@@ -29,8 +29,8 @@
       ]
     },
     "compact_selected_read_only": {
-      "sha256": "f483b9a752010100d70f60f6fba95c81bf244d0a1c9a73c6bfda99976c028c85",
-      "tokens": 12436,
+      "sha256": "c4839ed754675ad7e7d5bbce45a54988a607af5dead53d406bee18c4739642a6",
+      "tokens": 12574,
       "tools": [
         "chat_list",
         "chat_message_get",
@@ -43,8 +43,8 @@
       ]
     },
     "standard_base": {
-      "sha256": "4e03af8ea8a70e14b4d75cb4f3a979e3c871f0e784888b79a0ff38b820812342",
-      "tokens": 36135,
+      "sha256": "dcb7589f81bbf8545a1ff617968e035200ec83fbd8cdc591a9e353d9ff04d1f2",
+      "tokens": 36273,
       "tools": [
         "object_archive",
         "object_create",
@@ -63,8 +63,8 @@
       ]
     },
     "standard_selected": {
-      "sha256": "c2cb6c29832daa99fd1ba541c94dfa4d44899e98ee179aff382d2668821935b9",
-      "tokens": 40202,
+      "sha256": "e05233a88f50b84d5b36e453a14365e44be587bb29fa6fd9935a6803dd0648f4",
+      "tokens": 40340,
       "tools": [
         "chat_list",
         "chat_message_get",
@@ -88,8 +88,8 @@
       ]
     },
     "standard_selected_read_only": {
-      "sha256": "f52fdc6589d3d788cef31891428ab1f2edbc549d66a8e5de885507ae9e5a4adc",
-      "tokens": 32947,
+      "sha256": "51358254fd23d35954628a8861e5da591f6ac46be5aa4c9f6044b1238ba3460a",
+      "tokens": 33085,
       "tools": [
         "chat_list",
         "chat_message_get",

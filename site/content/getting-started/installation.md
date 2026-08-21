@@ -6,8 +6,9 @@ weight = 10
 # Install and connect
 
 `anyr` is the user-facing command for Anytype Toolbox. Install it, connect one
-Anytype environment, and confirm the HTTP and gRPC credential families before
-choosing a workflow.
+Anytype environment, and confirm only the credentials required by the chosen
+workflow. Desktop and most headless workflows use HTTP; gRPC credentials are
+needed only for capabilities identified as headless-only.
 
 You need either a running Anytype desktop app or a separately installed,
 running Anytype headless CLI server. Anytype Toolbox connects to that existing
@@ -46,16 +47,17 @@ anyr auth status --pretty
 
 The desktop login provisions an HTTP token. `auth status` reports HTTP and gRPC
 credentials independently because commands use the transport that provides the
-required capability. File, chat, invitation, backup, and MCP workflows may also
-require gRPC credentials. See the
-[credential guide](https://github.com/stevelr/anytype/blob/main/anyr/README.md)
-for the full configuration reference, and run `anyr auth set-grpc --help` for
-the accepted, explicit credential sources.
+required capability. File, chat, invitation, backup, and a fixed subset of MCP
+operations may also require gRPC credentials; most MCP tools can use the
+desktop HTTP API. See the [connection guide](/reference/connections/) for the
+exact boundary, and run `anyr auth set-grpc --help` for the accepted, explicit
+credential sources.
 
 ## Connect to a headless server
 
-This site assumes the separate Anytype headless CLI is already installed. Start
-that server, then run:
+Install the separate
+[Anytype headless CLI](https://github.com/anyproto/anytype-cli) when you need
+its gRPC-backed capabilities. Start that server, then run:
 
 ```sh
 anyr init-cli

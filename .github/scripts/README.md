@@ -64,9 +64,9 @@ global, release-ZIP, marketplace, fixture-upgrade, and clean removal paths:
 The test requires Linux, Bubblewrap, network access to npm, and the current
 `npx`, `codex`, and `claude` commands. It does not use Anytype credentials or a
 running Anytype service. On 2026-08-21 it passed with skills CLI 1.5.23, Codex
-0.149.0, and Claude Code 2.1.238. Both hosts discovered `anyr` and `any-mcp`
-from the same staged plugin; install, `0.1.0` to `0.1.1` fixture upgrade, and
-removal all passed.
+0.149.0, and Claude Code 2.1.238. Both hosts discovered `anyr`, `any-mcp`, and
+`anytype-setup` from the same staged plugin; install, `0.1.1` to `0.1.2`
+fixture upgrade, and removal all passed.
 
 The trigger metadata was also reviewed against this prompt matrix:
 
@@ -74,14 +74,15 @@ The trigger metadata was also reviewed against this prompt matrix:
 | ------------------------------------------------------ | -------------- |
 | Use `anyr` to list Anytype pages from the command line | `anyr`         |
 | Search Anytype through the configured MCP connection   | `any-mcp`      |
+| Install `anyr` and connect it to the desktop app        | `anytype-setup` |
 | Diagnose a missing MCP tool, then use a CLI fallback   | both           |
 | Refactor an unrelated Rust parser                      | neither        |
 
-The `anyr` prerequisite section names the missing executable, service,
-credentials, endpoint verification command, and operator escalation boundary.
-The `any-mcp` prerequisite section tells the agent to report an absent MCP
-connection or optional toolset instead of inventing a tool or starting a second
-server.
+The `anyr` skill delegates installation, authentication, endpoint changes, and
+backend recovery to `anytype-setup`. The `any-mcp` prerequisite section tells
+the agent to report an absent MCP connection or optional toolset instead of
+inventing a tool or starting a second server. The setup skill distinguishes
+desktop HTTP from paired headless backends and preserves saved credentials.
 
 The release workflow builds all platform archives and exports the Nix-built
 macOS binary as a signing input. It does not publish a GitHub Release. The

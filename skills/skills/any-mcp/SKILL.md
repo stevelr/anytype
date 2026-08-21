@@ -11,30 +11,39 @@ launch a second server during an ordinary Anytype workflow. If the tools are
 absent, report that the connection is unavailable and leave server setup to an
 explicit setup or troubleshooting task.
 
-*Tool choice*: Use advertised anymcp tools for ordinary Anytype workflows. Load the anyr skill only when the workflow reaches a documented CLI-only fallback or requires CLI setup and diagnosis.
+*Tool choice*: Use advertised anymcp tools for ordinary Anytype workflows. Load
+the `anyr` skill only for a documented CLI-only fallback. Load
+`anytype-setup` for connection setup or a structured backend error.
 
 ## Prerequisites
 
 The MCP host must have a configured `anyr mcp` connection backed by a reachable
-Anytype service and valid credentials. The selected profile, read-only mode,
-and optional toolsets determine which tools are advertised. CLI-only fallbacks
-require `anyr` on `PATH`; the `save-links` extraction recipe additionally
-requires Trafilatura.
+Anytype service and valid credentials for the transport used by the requested
+tool. The selected connection mode, profile, read-only mode, and optional
+toolsets determine which tools are advertised. CLI-only fallbacks require
+`anyr` on `PATH`; the `save-links` extraction recipe additionally requires
+Trafilatura.
 
 ## Start safely
 
-1. Call `server_status`. If optional tools matter, call `optional_toolset_status`.
-2. Discover spaces, types, properties, tags, collections, chats, and objects;
+1. Discover spaces, types, properties, tags, collections, chats, and objects;
    do not guess IDs or assume a display name is unique.
-3. Read before mutating. Reuse returned IDs, cursors, body hashes, and
+2. Read before mutating. Reuse returned IDs, cursors, body hashes, and
    `resource_uri` values exactly.
-4. Ask before a destructive or broad mutation unless the user already
+3. Ask before a destructive or broad mutation unless the user already
    authorized it. Treat read-only rejection as a permission boundary.
-5. Give each logical create a caller-stable `idempotency_key`. Reuse the same
+4. Give each logical create a caller-stable `idempotency_key`. Reuse the same
    key only when retrying the identical request.
-6. Omit unused optional fields. Do not send JSON `null`.
-7. After a timeout or cancellation, reread state before retrying a mutation.
-8. Ask for missing user-authored content rather than inventing it.
+5. Omit unused optional fields. Do not send JSON `null`.
+6. After a timeout or cancellation, reread state before retrying a mutation.
+7. Ask for missing user-authored content rather than inventing it.
+
+Do not preflight an ordinary HTTP workflow with gRPC. Call `server_status` to
+inspect a connection when its result matters, and call `optional_toolset_status`
+only when the requested optional capability matters. If a tool returns a
+structured missing, unavailable, or authentication backend error, stop the
+workflow and route once to `anytype-setup`; do not clear credentials, start a
+second service, or repeatedly retry the failed tool.
 
 The standard read-write profile supplies object create/update/archive and
 discovery. Optional startup toolsets add:

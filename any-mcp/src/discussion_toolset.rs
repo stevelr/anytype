@@ -138,11 +138,11 @@ pub fn discussions_registry() -> &'static dyn OptionalToolsetRegistry {
 
 impl OptionalToolsetRegistry for DiscussionsRegistry {
     fn metadata(&self) -> OptionalToolsetMetadata {
-        OptionalToolsetMetadata::new("discussions", true)
+        OptionalToolsetMetadata::new("discussions")
     }
 
     fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
-        Ok(vec![OptionalRegistryTool::read(
+        Ok(vec![OptionalRegistryTool::read_grpc(
             object_discussion_get_tool()?,
         )])
     }

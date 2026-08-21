@@ -311,8 +311,8 @@ pub fn space_update_tool() -> Result<WorkflowTool<SpaceOutput>, SchemaContractEr
 /// Returns the complete schema-space slice for registry composition.
 pub fn schema_space_tools() -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
     Ok(vec![
-        OptionalRegistryTool::mutation(space_create_tool()?),
-        OptionalRegistryTool::mutation(space_update_tool()?),
+        OptionalRegistryTool::mutation_http(space_create_tool()?),
+        OptionalRegistryTool::mutation_http(space_update_tool()?),
     ])
 }
 
@@ -825,7 +825,7 @@ mod tests {
 
     impl OptionalToolsetRegistry for TestRegistry {
         fn metadata(&self) -> OptionalToolsetMetadata {
-            OptionalToolsetMetadata::new("schema", false)
+            OptionalToolsetMetadata::new("schema")
         }
 
         fn tools(&self) -> Result<Vec<OptionalRegistryTool>, SchemaContractError> {
@@ -863,7 +863,7 @@ mod tests {
     fn runtime(client: AnytypeClient, read_only: bool) -> RuntimeContext {
         let selection = OptionalToolsetSelection::parse(
             Some("schema".to_owned()),
-            &[OptionalToolsetMetadata::new("schema", false)],
+            &[OptionalToolsetMetadata::new("schema")],
         )
         .expect("schema selection");
         RuntimeContext::from_parts_with_profile_and_optional_toolsets(

@@ -2,7 +2,7 @@
 //!
 use std::{fmt, path::PathBuf};
 
-use anytype_rpc::error::{AnytypeGrpcError, BackupError, ViewError};
+use anytype_rpc::error::{AnytypeGrpcError, AuthError, BackupError, ViewError};
 use snafu::prelude::*;
 
 use crate::resolve::ResolveCandidate;
@@ -411,6 +411,20 @@ pub enum AnytypeError {
     Other { message: String },
 }
 
+/// Secret-safe classification of a failed gRPC admission probe.
+///
+/// This keeps callers from parsing gRPC diagnostics or depending directly on
+/// `anytype-rpc` merely to select fixed recovery guidance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrpcAdmissionFailure {
+    /// gRPC credentials were absent or could not be loaded safely.
+    Configuration,
+    /// The backend rejected the supplied credentials.
+    Authentication,
+    /// The configured backend could not complete the admission probe.
+    Unavailable,
+}
+
 fn diagnostic_method(method: &str) -> &str {
     if !method.is_empty()
         && method.len() <= 16
@@ -491,6 +505,26 @@ impl fmt::Debug for AnytypeError {
 }
 
 impl AnytypeError {
+    /// Classifies a gRPC admission failure without formatting any raw detail.
+    #[must_use]
+    pub fn grpc_admission_failure(&self) -> GrpcAdmissionFailure {
+        if matches!(
+            self,
+            Self::NoKeyStore | Self::KeyStore { .. } | Self::GrpcUnavailable { .. }
+        ) {
+            GrpcAdmissionFailure::Configuration
+        } else if matches!(
+            self,
+            Self::Auth { .. } | Self::Unauthorized | Self::Forbidden
+        ) {
+            GrpcAdmissionFailure::Authentication
+        } else if let Self::Grpc { source } = self {
+            grpc_error_admission_failure(source)
+        } else {
+            GrpcAdmissionFailure::Unavailable
+        }
+    }
+
     /// Returns structured diagnostic context with all payload-bearing fields
     /// removed and every request target reduced to a bounded path.
     #[must_use]
@@ -698,33 +732,57 @@ impl AnytypeError {
 }
 
 fn grpc_error_is_authentication(error: &AnytypeGrpcError) -> bool {
+    grpc_error_admission_failure(error) == GrpcAdmissionFailure::Authentication
+}
+
+fn grpc_error_admission_failure(error: &AnytypeGrpcError) -> GrpcAdmissionFailure {
     match error {
-        AnytypeGrpcError::Auth { .. } => true,
+        AnytypeGrpcError::Auth { source } => auth_error_admission_failure(source),
+        AnytypeGrpcError::Config { .. } | AnytypeGrpcError::TimeoutConfig { .. } => {
+            GrpcAdmissionFailure::Configuration
+        }
         AnytypeGrpcError::View { source } => match source {
-            ViewError::Auth { .. } => true,
-            ViewError::Rpc { source } => grpc_status_is_authentication(source),
-            ViewError::ApiResponse { .. }
+            ViewError::Auth { source } => auth_error_admission_failure(source),
+            ViewError::Rpc { source } if grpc_status_is_authentication(source) => {
+                GrpcAdmissionFailure::Authentication
+            }
+            ViewError::Rpc { .. }
+            | ViewError::ApiResponse { .. }
             | ViewError::MissingObjectView
             | ViewError::MissingDataviewBlock { .. }
             | ViewError::MissingView { .. }
-            | ViewError::NotSupportedView { .. } => false,
+            | ViewError::NotSupportedView { .. } => GrpcAdmissionFailure::Unavailable,
         },
         AnytypeGrpcError::Backup { source } => match source {
-            BackupError::BackupRpc { source } => grpc_status_is_authentication(source),
-            BackupError::BackupAuth { .. } => true,
-            BackupError::BackupApiResponse { .. }
+            BackupError::BackupRpc { source } if grpc_status_is_authentication(source) => {
+                GrpcAdmissionFailure::Authentication
+            }
+            BackupError::BackupAuth { source } => auth_error_admission_failure(source),
+            BackupError::BackupRpc { .. }
+            | BackupError::BackupApiResponse { .. }
             | BackupError::InvalidOptions { .. }
             | BackupError::SpaceNameLookup { .. }
             | BackupError::MissingExportPath
             | BackupError::BackupIo { .. }
             | BackupError::BackupMove { .. }
-            | BackupError::Deadline { .. } => false,
+            | BackupError::Deadline { .. } => GrpcAdmissionFailure::Unavailable,
         },
-        AnytypeGrpcError::Config { .. }
-        | AnytypeGrpcError::Transport { .. }
-        | AnytypeGrpcError::TimeoutConfig { .. }
+        AnytypeGrpcError::Transport { .. }
         | AnytypeGrpcError::Deadline { .. }
-        | AnytypeGrpcError::ControlBoundary { .. } => false,
+        | AnytypeGrpcError::ControlBoundary { .. } => GrpcAdmissionFailure::Unavailable,
+    }
+}
+
+fn auth_error_admission_failure(error: &AuthError) -> GrpcAdmissionFailure {
+    match error {
+        AuthError::Status { source } if grpc_status_is_authentication(source) => {
+            GrpcAdmissionFailure::Authentication
+        }
+        AuthError::Api { .. } | AuthError::EmptyToken | AuthError::InvalidMetadata { .. } => {
+            GrpcAdmissionFailure::Authentication
+        }
+        AuthError::TimeoutConfig { .. } => GrpcAdmissionFailure::Configuration,
+        AuthError::Status { .. } | AuthError::Deadline { .. } => GrpcAdmissionFailure::Unavailable,
     }
 }
 
@@ -792,9 +850,15 @@ impl From<AnytypeGrpcError> for AnytypeError {
 mod tests {
     use std::time::Duration;
 
-    use anytype_rpc::error::{AnytypeGrpcError, AuthError, BackupError, ConfigError, ViewError};
+    use anytype_rpc::{
+        deadline::{
+            GrpcDeadlineError, GrpcTimeoutClass, GrpcTimeoutConfigError, GrpcTimeoutOutcome,
+            GrpcTimeoutSource,
+        },
+        error::{AnytypeGrpcError, AuthError, BackupError, ConfigError, ViewError},
+    };
 
-    use super::{AnytypeError, KeyStoreError};
+    use super::{AnytypeError, GrpcAdmissionFailure, KeyStoreError};
     use crate::resolve::ResolveCandidate;
 
     const SECRET: &str = "STANDARD_DISPLAY_DOCUMENT_SECRET";
@@ -933,6 +997,80 @@ mod tests {
             non_authentication
                 .iter()
                 .all(|error| !error.is_authentication())
+        );
+    }
+
+    #[test]
+    fn grpc_admission_classification_uses_typed_errors_only() {
+        let configuration = AnytypeError::GrpcUnavailable {
+            message: "SECRET_MISSING_GRPC_CREDENTIALS".to_owned(),
+        };
+        assert_eq!(
+            configuration.grpc_admission_failure(),
+            GrpcAdmissionFailure::Configuration
+        );
+        let transport =
+            tonic::transport::Endpoint::from_shared("not a valid SECRET_GRPC_ENDPOINT".to_owned())
+                .unwrap_err();
+        let unavailable = grpc(AnytypeGrpcError::Transport { source: transport });
+        assert_eq!(
+            unavailable.grpc_admission_failure(),
+            GrpcAdmissionFailure::Unavailable
+        );
+
+        let grpc_config = grpc(AnytypeGrpcError::Config {
+            source: ConfigError::MissingHome,
+        });
+        let auth_timeout_config = grpc(AnytypeGrpcError::Auth {
+            source: AuthError::TimeoutConfig {
+                source: GrpcTimeoutConfigError::InvalidEnvironment,
+            },
+        });
+        for error in [&grpc_config, &auth_timeout_config] {
+            assert_eq!(
+                error.grpc_admission_failure(),
+                GrpcAdmissionFailure::Configuration
+            );
+        }
+
+        let rejected_session = grpc(AnytypeGrpcError::Auth {
+            source: AuthError::Status {
+                source: tonic::Status::unauthenticated("SECRET_SESSION"),
+            },
+        });
+        let rejected_account_key = grpc(AnytypeGrpcError::Auth {
+            source: AuthError::Status {
+                source: tonic::Status::permission_denied("SECRET_ACCOUNT_KEY"),
+            },
+        });
+        for error in [&rejected_session, &rejected_account_key] {
+            assert_eq!(
+                error.grpc_admission_failure(),
+                GrpcAdmissionFailure::Authentication
+            );
+        }
+
+        let deadline = GrpcDeadlineError {
+            class: GrpcTimeoutClass::OrdinaryUnary,
+            outcome: GrpcTimeoutOutcome::ReadAborted,
+            source: GrpcTimeoutSource::Local,
+            elapsed: Duration::from_secs(1),
+        };
+        let unavailable = [
+            grpc(AnytypeGrpcError::Auth {
+                source: AuthError::Status {
+                    source: tonic::Status::internal("SECRET_INTERNAL"),
+                },
+            }),
+            grpc(AnytypeGrpcError::Auth {
+                source: AuthError::Deadline { source: deadline },
+            }),
+            grpc(AnytypeGrpcError::Deadline { source: deadline }),
+        ];
+        assert!(
+            unavailable.iter().all(|error| {
+                error.grpc_admission_failure() == GrpcAdmissionFailure::Unavailable
+            })
         );
     }
 
