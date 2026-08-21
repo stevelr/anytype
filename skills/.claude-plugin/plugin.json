@@ -1,0 +1,14 @@
+{
+  "name": "anytype-toolbox-skills",
+  "version": "0.1.0",
+  "description": "Agent Skills for Anytype automation with anyr and any-mcp.",
+  "author": {
+    "name": "Steve Schoettler",
+    "email": "stevelr-git@pm.me",
+    "url": "https://github.com/stevelr"
+  },
+  "homepage": "https://docs.anytype-toolbox.org/",
+  "repository": "https://github.com/stevelr/anytype",
+  "license": "Apache-2.0",
+  "keywords": ["anytype", "anyr", "mcp", "automation"]
+}

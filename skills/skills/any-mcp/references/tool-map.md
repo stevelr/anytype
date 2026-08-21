@@ -2,10 +2,9 @@
 
 ## Startup
 
-The server (`anyr mcp`) runs as a persistent Streamable HTTP service the MCP
-host connects to; agents call the advertised tools and never launch a server
-themselves (stdio launch exists only for hosts without the HTTP service).
-For broad PKM work the service typically runs with:
+The MCP host connects to `anyr mcp` over stdio or Streamable HTTP. Agents call
+the advertised tools and leave server lifecycle and configuration to the host
+operator. A broad personal-knowledge workflow can select:
 
 ```text
 ANY_MCP_PROFILE=standard
@@ -13,9 +12,10 @@ ANY_MCP_READ_ONLY=0
 ANY_MCP_TOOLSETS=body-blocks,chats,files,schema,views-write
 ```
 
-Add only the registries the workflow needs. `members` is useful for member
-inspection but is not required by these recipes. Mutation tools are absent
-when `ANY_MCP_READ_ONLY=1`.
+These values are operator choices, not package defaults. Add only the
+registries the workflow needs. `members` is useful for member inspection but
+is not required by these recipes. Mutation tools are absent when
+`ANY_MCP_READ_ONLY=1`.
 
 Call `server_status` first. Call `optional_toolset_status` when any optional
 tool is needed. If startup or authentication is unhealthy, stop and report the

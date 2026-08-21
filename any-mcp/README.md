@@ -29,9 +29,9 @@ registries cover artifacts, typed body blocks, chats, files, members, schema,
 and view writes. Selection cannot change after protocol startup. A registry is
 advertised only when its complete contract and required backend are available.
 
-The versioned [`any-mcp` skill](../skills/any-mcp/SKILL.md) supplies agent-facing
-tool selection and higher-level personal-knowledge workflows. It is separate
-from the server protocol and catalog implementation.
+The versioned [`any-mcp` skill](../skills/skills/any-mcp/SKILL.md) supplies
+agent-facing tool selection and higher-level personal-knowledge workflows. It
+is separate from the server protocol and catalog implementation.
 
 ## Runtime
 

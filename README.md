@@ -53,6 +53,7 @@ formats, shell completions, and every command group.
 | Export a space, collection, type, or tagged selection as Markdown | [Markdown export guide](https://docs.anytype-toolbox.org/guides/export-markdown/) |
 | Create, inspect, compare, and restore backups                     | [`anyr backup`](./anyback/README.md)                                              |
 | Connect an AI client through the Model Context Protocol           | [`anyr mcp`](./any-mcp/README.md)                                                 |
+| Guide an AI agent through Anytype workflows                       | [Anytype Toolbox Skills](./skills/README.md)                                      |
 | Build an Anytype integration in Rust                              | [`anytype` client library](./anytype-api/README.md)                               |
 
 For example:

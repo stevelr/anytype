@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Move the versioned `any-mcp` Agent Skill into the self-contained Anytype
+  Toolbox Skills plugin and keep its machine-checked examples linked to the
+  canonical source.
 - Move MCP setup and runtime configuration to the documentation site. The
   crate README now focuses on the server's architecture, boundaries, and
   development checks and identifies `anyr mcp` as the executable entry point.

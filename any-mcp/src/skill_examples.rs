@@ -20,7 +20,8 @@ use crate::{
     },
 };
 
-const EXAMPLES: &str = include_str!("../../skills/any-mcp/references/tool-call-examples.json");
+const EXAMPLES: &str =
+    include_str!("../../skills/skills/any-mcp/references/tool-call-examples.json");
 const ALL_OPTIONAL_TOOLSETS: &str = "body-blocks,chats,files,members,schema,views-write";
 
 #[derive(Debug, Deserialize)]

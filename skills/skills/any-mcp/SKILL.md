@@ -5,17 +5,21 @@ description: Use when an agent needs to read, search, create, edit, organize, up
 
 # Anytype MCP
 
-The any-mcp server (`anyr mcp`) is reached over its Streamable HTTP
-interface: it runs as a persistent service (systemd unit `any-mcp`,
-loopback-only, bearer-token auth), and the agent's MCP client is already
-configured to connect to it. Call the advertised tools of the connected
-`anymcp` server. Never launch `anyr mcp` yourself and never spawn a stdio
-copy — a second server is unnecessary, and stdio mode is reserved for hosts
-without the HTTP service. If the `anymcp` tools are absent from your tool
-list, report that the server was unreachable when your session started
-instead of trying to start one.
+The any-mcp server is provided by `anyr mcp` over stdio or Streamable HTTP.
+Call the advertised tools of the MCP connection configured by the host. Do not
+launch a second server during an ordinary Anytype workflow. If the tools are
+absent, report that the connection is unavailable and leave server setup to an
+explicit setup or troubleshooting task.
 
 *Tool choice*: Use advertised anymcp tools for ordinary Anytype workflows. Load the anyr skill only when the workflow reaches a documented CLI-only fallback or requires CLI setup and diagnosis.
+
+## Prerequisites
+
+The MCP host must have a configured `anyr mcp` connection backed by a reachable
+Anytype service and valid credentials. The selected profile, read-only mode,
+and optional toolsets determine which tools are advertised. CLI-only fallbacks
+require `anyr` on `PATH`; the `save-links` extraction recipe additionally
+requires Trafilatura.
 
 ## Start safely
 

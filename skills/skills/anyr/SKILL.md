@@ -9,12 +9,20 @@ description: Use when reading, searching, creating, or updating Anytype document
 Anytype HTTP and gRPC APIs. Common object, schema, search, collection, Markdown,
 and byte-transfer operations use REST. Rich file discovery, typed body blocks,
 archived-object cleanup, space administration, backup/restore, and some chat
-operations require gRPC. Source and full README: `~/project/anytype/anyr/`.
+operations require gRPC. The complete CLI documentation is available in the
+[Anytype Toolbox repository](https://github.com/stevelr/anytype/tree/main/anyr).
 
 *Tool choice*: Use this skill for explicit CLI workflows, CLI authentication
 or endpoint setup, unavailable MCP tools, and documented CLI-only fallbacks.
 When connected any-mcp tools advertise the required capability, use the
 any-mcp skill instead.
+
+## Prerequisites
+
+The `anyr` executable must be on `PATH`, and a reachable Anytype desktop or
+headless service must have valid endpoint-specific credentials. The examples
+use `jq` for JSON processing. OpenSSL is optional and appears only in the
+encrypted file-keystore example.
 
 ## Mental model
 
@@ -84,8 +92,8 @@ Pick one:
 gRPC credentials for operations marked **CLI + gRPC**:
 `anyr auth set-grpc --config ~/.anytype/config.json` (headless server's
 accountKey/sessionToken), or `--account-key` / `--token` / `--bip39` read from
-stdin. See `~/project/anytype/scripts/init-cli-keys.sh` for full headless
-bootstrap.
+stdin. The [connection guide](https://docs.anytype-toolbox.org/reference/connections/)
+covers desktop and headless credential setup.
 
 ### Verify before doing anything else
 
@@ -277,6 +285,3 @@ directly.
   scripts that must not touch the wrong space.
 - After starting a server (desktop or headless), wait ~30 s before issuing
   commands; early requests fail spuriously.
-- Test servers may run in a no-network namespace (`source .test-env-nonet` in
-  the anytype repo); delete objects you create so restarts don't trigger mass
-  sync.
