@@ -450,6 +450,7 @@ impl ConformanceProcessExt for ProtocolProcess {
         ) {
             assert_official_modern_request(&request);
         }
+        self.record_request(&id, method);
         self.send(request);
         let response = self.read_frame();
         assert_eq!(response["id"], id, "response id for {method}");
@@ -989,6 +990,12 @@ fn run_modern_stdio_acceptance(read_only: bool) {
     unsupported_meta["io.modelcontextprotocol/protocolVersion"] = json!("1900-01-01");
     let unsupported = process.modern_request(70, "tools/list", json!({"_meta": unsupported_meta}));
     assert_eq!(unsupported["error"]["code"], -32022);
+    assert!(
+        process
+            .redacted_transcript()
+            .contains("-> id=70 tools/list\n<- id=70 jsonrpc-error:-32022"),
+        "modern timeout evidence records the pending request before its response"
+    );
     assert_eq!(unsupported["error"]["data"]["requested"], "1900-01-01");
     assert_eq!(
         unsupported["error"]["data"]["supported"],

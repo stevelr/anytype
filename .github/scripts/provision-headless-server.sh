@@ -165,6 +165,7 @@ fi
 
 # The saved loopback endpoints reach either the connected server directly or
 # the isolated server through the forwarders.
+printf 'export ANY_MCP_CONNECTION_MODE=headless\n' >> "$env_file"
 # shellcheck disable=SC2016 # the reference expands when the file is sourced
 printf 'export ANYTYPE_TEST_URL="$ANYTYPE_URL"\n' >> "$env_file"
 

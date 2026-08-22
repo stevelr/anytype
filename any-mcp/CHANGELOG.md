@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [0.5.2] - 2026-08-22
 
+### Fixed
+
+- Select headless connection mode in CI environments provisioned with paired
+  HTTP and gRPC endpoints, and keep Windows Rust 1.98 Clippy checks clean.
+
 ### Changed
 
 - Keep authenticated HTTP MCP workflows available when configured headless

@@ -274,6 +274,10 @@ fn shared_headless_provisioner_honors_the_cli_override() {
     assert!(provisioner.contains("command -v -- \"$ANYTYPE_CLI_BIN\""));
     assert!(provisioner.contains("network_mode=\"${ANYTYPE_HEADLESS_NETWORK_MODE:-isolated}\""));
     assert!(provisioner.contains("isolated | connected"));
+    assert!(
+        provisioner
+            .contains("printf 'export ANY_MCP_CONNECTION_MODE=headless\\n' >> \"$env_file\"")
+    );
     assert!(!provisioner.contains("command -v anytype"));
 }
 

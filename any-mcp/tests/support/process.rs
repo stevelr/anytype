@@ -217,6 +217,12 @@ impl ProtocolProcess {
         self.send(json!({"jsonrpc": "2.0", "method": method, "params": params}));
     }
 
+    /// Records one outbound request using only bounded protocol metadata.
+    pub fn record_request(&mut self, id: &Value, method: &str) {
+        self.transcript
+            .push(format!("-> id={} {method}", display_id(id)));
+    }
+
     /// Sends a numeric-ID JSON-RPC request and reads its correlated response.
     pub fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
         self.request_with_id(json!(id), method, params)
@@ -224,8 +230,7 @@ impl ProtocolProcess {
 
     /// Sends a JSON-RPC request and reads its correlated response.
     pub fn request_with_id(&mut self, id: Value, method: &str, params: Value) -> Value {
-        self.transcript
-            .push(format!("-> id={} {method}", display_id(&id)));
+        self.record_request(&id, method);
         self.send(json!({
             "jsonrpc": "2.0",
             "id": id.clone(),
