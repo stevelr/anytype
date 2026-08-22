@@ -5,6 +5,7 @@ import os
 import re
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,9 @@ FAILED_TEST_LINE = re.compile(rb"(?m)^test ([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*) \
 TEST_SUMMARY = re.compile(
     rb"test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored; 0 measured; "
     rb"[0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s"
+)
+TEST_LOG_LINE = re.compile(
+    rb"(?m)^(ok|failed|ignored) ([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*)$"
 )
 SKIPPED_ADMISSION = re.compile(
     rb"(?m)^.*skipped.*(?:PrefixNotConfigured|PrefixInvalid|"
@@ -38,10 +42,17 @@ def fail(
     label: str,
     reason: str = "invocation",
     failed_tests: tuple[str, ...] = (),
+    last_completed: str | None = None,
+    completed: int = 0,
 ) -> None:
     tests = f" tests={','.join(failed_tests)}" if failed_tests else ""
+    progress = (
+        f" last_completed={last_completed} completed={completed}"
+        if not failed_tests and last_completed is not None
+        else ""
+    )
     print(
-        f"required live gate {label} failed reason={reason}{tests}",
+        f"required live gate {label} failed reason={reason}{tests}{progress}",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -55,6 +66,79 @@ def failed_test_names(label: str, output: bytes) -> tuple[str, ...]:
     if len(names) > EXPECTED.get(label, 0):
         return ()
     return names
+
+
+def read_test_progress(label: str, descriptor: int) -> tuple[tuple[str, ...], str | None, int]:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink > 1
+    ):
+        raise RunnerError("progress")
+    with os.fdopen(os.dup(descriptor), "rb") as stream:
+        stream.seek(0)
+        output = stream.read(OUTPUT_LIMIT + 1)
+    if len(output) > OUTPUT_LIMIT:
+        raise RunnerError("overflow")
+    results = TEST_LOG_LINE.findall(output)
+    if len(results) > EXPECTED.get(label, 0):
+        raise RunnerError("progress")
+    names = tuple(name.decode("ascii") for _, name in results)
+    failed = tuple(
+        sorted(
+            name.decode("ascii")
+            for result, name in results
+            if result == b"failed"
+        )
+    )
+    return failed, names[-1] if names else None, len(names)
+
+
+def private_test_log(private_dir: Path, label: str) -> tuple[int, Path]:
+    private_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory = os.lstat(private_dir)
+    if (
+        not stat.S_ISDIR(directory.st_mode)
+        or directory.st_uid != os.geteuid()
+        or stat.S_IMODE(directory.st_mode) & 0o077
+    ):
+        raise RunnerError("private_dir")
+    descriptor, value = tempfile.mkstemp(
+        prefix=f"{label}-libtest-", suffix=".log", dir=private_dir
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+    except BaseException:
+        os.close(descriptor)
+        Path(value).unlink(missing_ok=True)
+        raise
+    return descriptor, Path(value)
+
+
+def remove_test_log(descriptor: int, path: Path) -> None:
+    original = os.fstat(descriptor)
+    replaced = False
+    try:
+        try:
+            current = os.lstat(path)
+        except FileNotFoundError:
+            current = None
+            replaced = True
+        if current is not None:
+            replaced = (current.st_dev, current.st_ino) != (
+                original.st_dev,
+                original.st_ino,
+            )
+            if stat.S_ISDIR(current.st_mode):
+                os.rmdir(path)
+            else:
+                os.unlink(path)
+    finally:
+        os.close(descriptor)
+    if replaced:
+        raise RunnerError("progress_replaced")
 
 
 def terminate(process: subprocess.Popen[bytes]) -> None:
@@ -129,26 +213,64 @@ def main() -> None:
     private_dir = Path(private_dir_value)
     if not private_dir.is_absolute():
         fail(label)
+    test_log: Path | None = None
+    test_log_descriptor: int | None = None
+    failure: tuple[str, tuple[str, ...], str | None, int] | None = None
     try:
-        status, output = run_bounded(command, private_dir)
-    except OSError:
-        fail(label, "runner_io")
-    except RunnerError:
-        fail(label, "runner_bound")
-    if status != 0:
-        reason = "child_signal" if status < 0 else "child_exit"
-        fail(label, reason, failed_test_names(label, output))
-    if mode == "test":
-        summaries = SUMMARY_LINE.findall(output)
-        if len(summaries) != 1:
-            fail(label, "summary_count")
-        match = TEST_SUMMARY.fullmatch(summaries[0])
-        if match is None:
-            fail(label, "summary_shape")
-        if int(match.group(1)) != EXPECTED[label]:
-            fail(label, "test_count")
-        if SKIPPED_ADMISSION.search(output) is not None:
-            fail(label, "skipped_admission")
+        if mode == "test":
+            try:
+                test_log_descriptor, test_log = private_test_log(private_dir, label)
+            except OSError:
+                failure = ("runner_io", (), None, 0)
+            except RunnerError:
+                failure = ("runner_bound", (), None, 0)
+            if failure is None:
+                command = [*command, "--logfile", os.fspath(test_log)]
+        if failure is None:
+            try:
+                status, output = run_bounded(command, private_dir)
+            except OSError:
+                failure = ("runner_io", (), None, 0)
+            except RunnerError:
+                failure = ("runner_bound", (), None, 0)
+        if failure is None:
+            try:
+                logged_failed, last_completed, completed = (
+                    read_test_progress(label, test_log_descriptor)
+                    if test_log_descriptor is not None
+                    else ((), None, 0)
+                )
+            except OSError:
+                failure = ("runner_io", (), None, 0)
+            except RunnerError:
+                failure = ("runner_bound", (), None, 0)
+        if failure is None and status != 0:
+            reason = "child_signal" if status < 0 else "child_exit"
+            failed = logged_failed or failed_test_names(label, output)
+            failure = (reason, failed, last_completed, completed)
+        if failure is None and mode == "test":
+            summaries = SUMMARY_LINE.findall(output)
+            if len(summaries) != 1:
+                failure = ("summary_count", (), None, 0)
+            else:
+                match = TEST_SUMMARY.fullmatch(summaries[0])
+                if match is None:
+                    failure = ("summary_shape", (), None, 0)
+                elif match.group(1) != str(EXPECTED[label]).encode("ascii"):
+                    failure = ("test_count", (), None, 0)
+                elif SKIPPED_ADMISSION.search(output) is not None:
+                    failure = ("skipped_admission", (), None, 0)
+    except (Exception, KeyboardInterrupt):
+        failure = ("runner_io", (), None, 0)
+    finally:
+        if test_log is not None and test_log_descriptor is not None:
+            try:
+                remove_test_log(test_log_descriptor, test_log)
+            except (Exception, KeyboardInterrupt):
+                failure = ("runner_io", (), None, 0)
+    if failure is not None:
+        reason, failed, last_completed, completed = failure
+        fail(label, reason, failed, last_completed, completed)
     print(f"required live gate {label} completed")
 
 

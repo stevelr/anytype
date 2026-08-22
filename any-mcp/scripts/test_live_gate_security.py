@@ -102,6 +102,34 @@ class RunnerTests(unittest.TestCase):
             "required live gate discussions failed reason=child_exit tests=module_name::colored_case\n",
         )
 
+    def test_private_libtest_log_reports_failure_without_transcript(self) -> None:
+        result = self.invoke(
+            "test",
+            "discussions",
+            "from pathlib import Path; import stat, sys; path = Path(sys.argv[-1]); assert sys.argv[-2] == '--logfile'; assert stat.S_IMODE(path.stat().st_mode) == 0o600; path.write_text('failed module_name::logged_case\\n'); print('PRIVATE_SECRET'); raise SystemExit(2)",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("PRIVATE_SECRET", result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "required live gate discussions failed reason=child_exit tests=module_name::logged_case\n",
+        )
+
+    def test_private_libtest_log_reports_last_completed_test_after_abort(self) -> None:
+        result = self.invoke(
+            "test",
+            "direct",
+            "from pathlib import Path; import sys; Path(sys.argv[-1]).write_text('ok module_name::first_case\\n'); print('PRIVATE_SECRET'); raise SystemExit(2)",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("PRIVATE_SECRET", result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "required live gate direct failed reason=child_exit last_completed=module_name::first_case completed=1\n",
+        )
+
     def test_only_typed_disposable_skip_reasons_fail_admission(self) -> None:
         harmless = self.invoke(
             "test",
@@ -131,6 +159,20 @@ class RunnerTests(unittest.TestCase):
         ]:
             self.assertEqual(self.invoke("test", "discussions", child).returncode, 1)
 
+    def test_unbounded_numeric_summary_fails_without_traceback_or_artifact(self) -> None:
+        result = self.invoke(
+            "test",
+            "discussions",
+            "print('test result: ok. ' + '9' * 5000 + ' passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s')",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "required live gate discussions failed reason=test_count\n",
+        )
+
     def test_oversized_transcript_is_bounded_and_private(self) -> None:
         result = self.invoke(
             "test",
@@ -143,6 +185,55 @@ class RunnerTests(unittest.TestCase):
             result.stderr,
             "required live gate discussions failed reason=runner_bound\n",
         )
+
+    def test_runner_bound_removes_private_libtest_progress(self) -> None:
+        result = self.invoke(
+            "test",
+            "discussions",
+            "from pathlib import Path; import sys; Path(sys.argv[-1]).write_text('ok module_name::private_progress\\n'); sys.stdout.write('PRIVATE_SECRET' + 'x' * 1048576)",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("PRIVATE_SECRET", result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "required live gate discussions failed reason=runner_bound\n",
+        )
+
+    def test_oversized_libtest_progress_is_bounded_and_removed(self) -> None:
+        result = self.invoke(
+            "test",
+            "discussions",
+            "from pathlib import Path; import sys; Path(sys.argv[-1]).write_bytes(b'PRIVATE_SECRET' + b'x' * 1048576); raise SystemExit(2)",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("PRIVATE_SECRET", result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "required live gate discussions failed reason=runner_bound\n",
+        )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX logfile replacement policy")
+    def test_special_file_replacements_are_not_opened_and_are_removed(self) -> None:
+        replacements = [
+            "path.unlink(); path.symlink_to('/dev/null')",
+            "path.unlink(); os.mkfifo(path)",
+            "path.unlink(); path.mkdir()",
+        ]
+        for replacement in replacements:
+            result = self.invoke(
+                "test",
+                "discussions",
+                f"from pathlib import Path; import os, sys; path = Path(sys.argv[-1]); {replacement}; print('PRIVATE_SECRET'); raise SystemExit(2)",
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertNotIn("PRIVATE_SECRET", result.stderr)
+            self.assertEqual(
+                result.stderr,
+                "required live gate discussions failed reason=runner_io\n",
+            )
 
 
 class ReviewerTests(unittest.TestCase):
