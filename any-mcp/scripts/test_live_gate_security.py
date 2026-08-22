@@ -145,7 +145,9 @@ class RunnerTests(unittest.TestCase):
             "print('plain message');"
             "raise SystemExit(101)"
         )
-        result, diagnostics, directory_mode = self.invoke_with_diagnostics("discussions", child)
+        result, diagnostics, directory_mode = self.invoke_with_diagnostics(
+            "discussions", child
+        )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
         self.assertNotIn("PRIVATE_SECRET", result.stderr)
@@ -181,7 +183,9 @@ class RunnerTests(unittest.TestCase):
         )
         result, diagnostics, _ = self.invoke_with_diagnostics("discussions", child)
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stderr, "required live gate discussions failed reason=child_exit\n")
+        self.assertEqual(
+            result.stderr, "required live gate discussions failed reason=child_exit\n"
+        )
         assert diagnostics is not None
         self.assertLess(len(diagnostics), 70_000)
         self.assertNotIn("PRIVATE_SECRET", diagnostics)
@@ -198,12 +202,26 @@ class RunnerTests(unittest.TestCase):
     def test_relative_diagnostics_dir_is_refused_without_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as private:
             environment = dict(
-                os.environ, ANY_MCP_LIVE_PRIVATE_DIR=private, ANY_MCP_LIVE_DIAGNOSTICS_DIR="relative"
+                os.environ,
+                ANY_MCP_LIVE_PRIVATE_DIR=private,
+                ANY_MCP_LIVE_DIAGNOSTICS_DIR="relative",
             )
             result = subprocess.run(
-                [sys.executable, RUNNER, "test", "discussions", "--", sys.executable, "-c",
-                 "print('PRIVATE_SECRET'); raise SystemExit(2)"],
-                text=True, capture_output=True, env=environment, check=False, cwd=private,
+                [
+                    sys.executable,
+                    RUNNER,
+                    "test",
+                    "discussions",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "print('PRIVATE_SECRET'); raise SystemExit(2)",
+                ],
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+                cwd=private,
             )
             self.assertEqual(result.returncode, 1)
             self.assertNotIn("PRIVATE_SECRET", result.stdout + result.stderr)

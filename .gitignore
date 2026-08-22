@@ -13,7 +13,7 @@ graphify-out
 tmp/
 
 *.cer
-.github/scripts/__pycache__
+__pycache__/
 .agent-notes
 .orchestrator-notes
 .wrangler/

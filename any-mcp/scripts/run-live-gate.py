@@ -111,9 +111,7 @@ def retain_diagnostics(label: str, reason: str, output: bytes) -> None:
     if directory is None:
         return
     target = directory / f"{label}-failure-diagnostics.txt"
-    descriptor = os.open(
-        target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
-    )
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
         sink.write(f"required live gate {label} failed reason={reason}\n")
         sink.write("scrubbed transcript tail (credential-like lines redacted):\n\n")
