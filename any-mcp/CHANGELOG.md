@@ -1349,6 +1349,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   on the preview live wire, and retaining only structural stderr counts so
   unregistered bodies, edit fragments, credentials, and cipher material cannot
   enter failure reports.
+- Align the direct headless discovery gate with the current redacted
+  `server_status` gRPC configuration and observation fields.
 - Map structurally classified nested Anytype gRPC authentication failures to
   the fixed secret-safe MCP `authentication` error, including definitive
   post-dispatch rejection handling, without depending directly on

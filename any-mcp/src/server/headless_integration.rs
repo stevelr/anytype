@@ -1197,7 +1197,9 @@ async fn headless_default_discovery_routes_paginate_and_report_ambiguity() {
                 let server = live_server(ctx.as_ref()).await;
                 let status = success(&server, SERVER_STATUS, json!({})).await;
                 assert_eq!(status["http_available"], true);
-                assert_eq!(status["grpc_available"], true);
+                assert_eq!(status["grpc_configured"], true);
+                assert_eq!(status["grpc_last_observed"], "available");
+                assert!(status.get("grpc_available").is_none());
 
                 let all_spaces = ctx
                     .client
