@@ -88,6 +88,20 @@ class RunnerTests(unittest.TestCase):
             "required live gate discussions failed reason=child_exit tests=module_name::case_name\n",
         )
 
+    def test_colored_failed_test_name_is_reported_without_its_transcript(self) -> None:
+        result = self.invoke(
+            "test",
+            "discussions",
+            "print('test module_name::colored_case ... \\x1b[31mFAILED\\x1b[0m'); print('PRIVATE_SECRET'); raise SystemExit(2)",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("PRIVATE_SECRET", result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "required live gate discussions failed reason=child_exit tests=module_name::colored_case\n",
+        )
+
     def test_only_typed_disposable_skip_reasons_fail_admission(self) -> None:
         harmless = self.invoke(
             "test",

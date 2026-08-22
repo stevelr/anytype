@@ -14,6 +14,7 @@ from pathlib import Path
 
 OUTPUT_LIMIT = 1024 * 1024
 PROCESS_TIMEOUT = 1200
+ANSI_CSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 SUMMARY_LINE = re.compile(rb"(?m)^test result:.*$")
 FAILED_TEST_LINE = re.compile(rb"(?m)^test ([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*) \.\.\. FAILED$")
 TEST_SUMMARY = re.compile(
@@ -47,6 +48,7 @@ def fail(
 
 
 def failed_test_names(label: str, output: bytes) -> tuple[str, ...]:
+    output = ANSI_CSI.sub(b"", output)
     names = tuple(
         sorted({match.decode("ascii") for match in FAILED_TEST_LINE.findall(output)})
     )
