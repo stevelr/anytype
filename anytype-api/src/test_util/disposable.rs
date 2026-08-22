@@ -266,6 +266,24 @@ impl DisposableTestError {
     }
 }
 
+impl DisposableTestError {
+    /// Bounded, control-character-free rendering of the retained primary
+    /// error so a failing gate can explain itself without the raw payload.
+    fn primary_error_excerpt(&self) -> Option<String> {
+        const LIMIT: usize = 300;
+        let text = self.source.as_ref()?.to_string();
+        let mut excerpt = text
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(LIMIT)
+            .collect::<String>();
+        if text.chars().count() > LIMIT {
+            excerpt.push('…');
+        }
+        Some(excerpt)
+    }
+}
+
 impl fmt::Display for DisposableTestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.category.as_str())
@@ -278,6 +296,7 @@ impl fmt::Debug for DisposableTestError {
             .debug_struct("DisposableTestError")
             .field("category", &self.category.as_str())
             .field("primary_error_retained", &self.source.is_some())
+            .field("primary_error", &self.primary_error_excerpt())
             .field("setup_failure", &self.setup_failure())
             .field("readiness_failure", &self.readiness_failure())
             .field("callback_failure", &self.callback_failure())
@@ -1702,6 +1721,10 @@ fn capture_environment() -> Result<EnvironmentProvisioning, DisposableSkip> {
         ("ANYTYPE_RATE_LIMIT_MAX_RETRIES".to_owned(), "5".to_owned()),
         ("ANYTYPE_KEYSTORE".to_owned(), "env".to_owned()),
         ("ANYTYPE_KEYSTORE_SERVICE".to_owned(), service.clone()),
+        // Paired HTTP + gRPC endpoints are only admitted in explicit headless
+        // connection mode; spawned any-mcp children refuse the gRPC endpoint
+        // otherwise.
+        ("ANY_MCP_CONNECTION_MODE".to_owned(), "headless".to_owned()),
         ("ANY_MCP_PROTOCOL".to_owned(), "stable".to_owned()),
         ("ANY_MCP_PROFILE".to_owned(), "standard".to_owned()),
         ("ANY_MCP_READ_ONLY".to_owned(), "0".to_owned()),
