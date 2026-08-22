@@ -139,6 +139,8 @@ class RunnerTests(unittest.TestCase):
             f"print('stream {jwt} context canceled');"
             "print('object bafyreie376qinigjrf2plgbbsust6n6l3vdjdm7oreruqpt6girv4uqtem missing');"
             "print('marker 0607ae6aa45892ecb256f1a9a2b6b830ca6939d22fac4027da5461b9d6db3245');"
+            "print('thread headless_stdio_all_optional_toolsets_compose_in_rw_and_preview_ro_children named');"
+            "print('blob QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NTY3ODk=');"
             "print(\"thread 'module_name::case_name' (4242) panicked at any-mcp/tests/x.rs:12:9:\");"
             "print('assertion failed: spawn refused with PRIVATE_SECRET');"
             "print(\"thread 'other' panicked at src/lib.rs:1:1:\");"
@@ -173,6 +175,12 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("stream <jwt> context canceled", diagnostics)
         self.assertIn("object <cid> missing", diagnostics)
         self.assertIn("marker <hex>", diagnostics)
+        self.assertIn(
+            "thread headless_stdio_all_optional_toolsets_compose_in_rw_and_preview_ro_children named",
+            diagnostics,
+        )
+        self.assertIn("blob <blob>", diagnostics)
+        self.assertNotIn("QUJDREVG", diagnostics)
         self.assertIn("test module_name::case_name ... FAILED", diagnostics)
         self.assertIn("plain message", diagnostics)
 

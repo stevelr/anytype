@@ -43,8 +43,15 @@ MASKS = (
     (re.compile(r"[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"), "<jwt>"),
     (re.compile(r"\bbafy[a-z2-7]{20,}\b"), "<cid>"),
     (re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32,}(?![0-9a-fA-F])"), "<hex>"),
-    (re.compile(r"[A-Za-z0-9+/=_-]{40,}"), "<blob>"),
 )
+# Opaque blobs (base64, base58, opaque ids) are masked; plain identifiers such
+# as long snake_case test names or module paths stay readable.
+BLOB = re.compile(r"[A-Za-z0-9+/=_-]{40,}")
+IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def mask_blob(match: re.Match[str]) -> str:
+    return match.group(0) if IDENTIFIER.match(match.group(0)) else "<blob>"
 
 
 class RunnerError(Exception):
@@ -57,7 +64,7 @@ def scrub_line(line: str) -> str:
         return "<redacted line>"
     for pattern, replacement in MASKS:
         line = pattern.sub(replacement, line)
-    return line
+    return BLOB.sub(mask_blob, line)
 
 
 def scrub_transcript(output: bytes) -> list[str]:

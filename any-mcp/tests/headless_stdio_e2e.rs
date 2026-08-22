@@ -1392,12 +1392,16 @@ struct StderrMetrics {
     fatal: usize,
     other: usize,
     invalid_utf8: bool,
+    /// First fixed-prefix startup failure line, bounded, for diagnostics.
+    startup_failure: Option<String>,
 }
+
+const STARTUP_FAILURE_EXCERPT_LIMIT: usize = 300;
 
 impl StderrMetrics {
     fn summary(&self) -> String {
         format!(
-            "bytes={} lines={} runtime_ready={} operation_success={} operation_non_success={} stack_overflow={} panic={} fatal={} other={} invalid_utf8={}",
+            "bytes={} lines={} runtime_ready={} operation_success={} operation_non_success={} stack_overflow={} panic={} fatal={} other={} invalid_utf8={} startup_failure={:?}",
             self.bytes,
             self.lines,
             self.runtime_ready,
@@ -1407,9 +1411,53 @@ impl StderrMetrics {
             self.panic,
             self.fatal,
             self.other,
-            self.invalid_utf8
+            self.invalid_utf8,
+            self.startup_failure
         )
     }
+}
+
+fn startup_failure_excerpt(line: &[u8]) -> Option<String> {
+    if !(line.starts_with(b"any-mcp: ")
+        || contains_bytes(line, b"any-mcp startup or service failure"))
+    {
+        return None;
+    }
+    let text = String::from_utf8_lossy(line);
+    let mut excerpt = text
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(STARTUP_FAILURE_EXCERPT_LIMIT)
+        .collect::<String>();
+    if text.chars().count() > STARTUP_FAILURE_EXCERPT_LIMIT {
+        excerpt.push('…');
+    }
+    Some(excerpt)
+}
+
+#[test]
+fn stderr_metrics_surface_one_bounded_startup_failure_line() {
+    let ready = stderr_metrics(b"authenticated Anytype runtime ready\n");
+    assert_eq!(ready.runtime_ready, 1);
+    assert_eq!(ready.startup_failure, None);
+
+    let failed = stderr_metrics(
+        b"2026-08-22T10:29:33Z ERROR any_mcp: any-mcp startup or service failure reason=\"first\"\n\
+          any-mcp: runtime setup failed: second\n\
+          unrelated noise\n",
+    );
+    assert_eq!(failed.other, 3);
+    assert_eq!(failed.runtime_ready, 0);
+    assert!(failed.summary().contains("startup_failure=Some("));
+    let excerpt = failed.startup_failure.expect("startup failure excerpt");
+    assert!(excerpt.ends_with("reason=\"first\""), "{excerpt}");
+
+    let long = format!("any-mcp: {}\x1b[0m", "x".repeat(1000));
+    let bounded = stderr_metrics(long.as_bytes());
+    let excerpt = bounded.startup_failure.expect("bounded excerpt");
+    assert_eq!(excerpt.chars().count(), STARTUP_FAILURE_EXCERPT_LIMIT + 1);
+    assert!(excerpt.ends_with('…'));
+    assert!(!excerpt.contains('\x1b'));
 }
 
 fn stderr_metrics(stderr: &[u8]) -> StderrMetrics {
@@ -1439,6 +1487,9 @@ fn stderr_metrics(stderr: &[u8]) -> StderrMetrics {
             }
         } else {
             metrics.other += 1;
+            if metrics.startup_failure.is_none() {
+                metrics.startup_failure = startup_failure_excerpt(line);
+            }
         }
     }
     metrics
