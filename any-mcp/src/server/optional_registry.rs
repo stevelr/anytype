@@ -902,12 +902,11 @@ fn production_token_budget() -> Value {
 }
 
 fn production_budget_json() -> String {
+    // Plain serde pretty output: the `selected` list is too long for the
+    // repository JSON formatter (dprint) to keep on one line, so the snapshot
+    // must match the formatter's multi-line layout exactly.
     let pretty = serde_json::to_string_pretty(&production_token_budget())
-        .expect("serialize production token budget")
-        .replace(
-            "[\n    \"artifacts\",\n    \"body-blocks\",\n    \"chats\",\n    \"files\",\n    \"members\",\n    \"schema\",\n    \"views-write\"\n  ]",
-            "[\"artifacts\", \"body-blocks\", \"chats\", \"files\", \"members\", \"schema\", \"views-write\"]",
-        );
+        .expect("serialize production token budget");
     format!("{pretty}\n")
 }
 
