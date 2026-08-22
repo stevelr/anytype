@@ -3114,6 +3114,14 @@ fn sentinel_assertion(message: &str) -> TestError {
     }
 }
 
+/// Records why a spawned child failed to stop before reducing it to the
+/// fixed sentinel. Shutdown reasons are harness-authored, payload-free
+/// strings (exit status, reader join, contract checks).
+fn stop_failure(message: &str, reason: &str) -> TestError {
+    eprintln!("{message} failure={reason}");
+    sentinel_assertion(message)
+}
+
 fn fresh_no_cache_client() -> Result<AnytypeClient, String> {
     let environment = |name: &str| {
         std::env::var(name).map_err(|_| format!("missing required sentinel selector {name}"))
@@ -6686,7 +6694,7 @@ async fn run_artifact_client_roots_rows(
                 })?
         };
         let process = finish_registered_artifact_child_with_client_roots(&child)
-            .map_err(|_| sentinel_assertion("stop client-roots artifact child"))?;
+            .map_err(|error| stop_failure("stop client-roots artifact child", &error))?;
         if process.client_root_requests != mode.expected_snapshots() {
             return Err(sentinel_assertion(
                 "client-roots stdout snapshot inventory diverged",
@@ -6984,7 +6992,7 @@ async fn run_spawned_validator_flood_cases(
         ));
     }
     finish_registered_artifact_child(&optional_child, None)
-        .map_err(|_| sentinel_assertion("stop optional validator-flood child"))?;
+        .map_err(|error| stop_failure("stop optional validator-flood child", &error))?;
 
     let required = Arc::new(
         ArtifactPolicyFixture::create_with_validator_executable(
@@ -7034,7 +7042,7 @@ async fn run_spawned_validator_flood_cases(
         ));
     }
     finish_registered_artifact_child(&required_child, None)
-        .map_err(|_| sentinel_assertion("stop required validator-flood child"))?;
+        .map_err(|error| stop_failure("stop required validator-flood child", &error))?;
     execution
         .record_executed(AdversarialCaseId::Flood02)
         .map_err(|_| sentinel_assertion("record validator timeout case"))?;
@@ -8839,7 +8847,7 @@ async fn run_exact_cancellation_cases(
             sentinel_assertion("exact cancellation case failed")
         })?;
         finish_registered_artifact_child(&child, None)
-            .map_err(|_| sentinel_assertion("stop exact cancellation child"))?;
+            .map_err(|error| stop_failure("stop exact cancellation child", &error))?;
         execution
             .record_executed(case)
             .map_err(|_| sentinel_assertion("record exact cancellation case"))?;
@@ -9825,7 +9833,7 @@ async fn headless_artifact_lifecycle_and_payload_scenarios() {
                             | ArtifactLifecycleScenario::RestartStaleGeneration
                     ) {
                         let evidence = finish_registered_artifact_child(&child, None)
-                            .map_err(|_| sentinel_assertion("stop artifact lifecycle child"))?;
+                            .map_err(|error| stop_failure("stop artifact lifecycle child", &error))?;
                         if scenario == ArtifactLifecycleScenario::TtlCleanup
                             && (evidence.cleanup_events == 0 || evidence.cleanup_records == 0)
                         {
