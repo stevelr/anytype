@@ -30,10 +30,95 @@ SKIPPED_ADMISSION = re.compile(
 )
 EXPECTED = {"direct": 38, "stdio": 30, "discussions": 1}
 COMMAND_LABELS = {"auth", "reset"}
+# Scrubbed failure diagnostics: opt in with ANY_MCP_LIVE_DIAGNOSTICS_DIR.
+DIAGNOSTICS_LIMIT = 65_536
+PANIC_LIMIT = 16
+PANIC_LINE_LIMIT = 400
+PANIC_LINE = re.compile(r"^thread '[^']*' \(?[0-9]*\)? ?panicked at .*:[0-9]+:[0-9]+:$")
+CREDENTIAL_LINE = re.compile(
+    r"(?i)(authorization|bearer|password|secret|token|api[_-]?key|"
+    r"ANYTYPE_KEY_|account[_-]?key|session)"
+)
+MASKS = (
+    (re.compile(r"[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"), "<jwt>"),
+    (re.compile(r"\bbafy[a-z2-7]{20,}\b"), "<cid>"),
+    (re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32,}(?![0-9a-fA-F])"), "<hex>"),
+    (re.compile(r"[A-Za-z0-9+/=_-]{40,}"), "<blob>"),
+)
 
 
 class RunnerError(Exception):
     """A child failure whose raw details must remain private."""
+
+
+def scrub_line(line: str) -> str:
+    """Reduce one transcript line to a credential-free diagnostic line."""
+    if CREDENTIAL_LINE.search(line):
+        return "<redacted line>"
+    for pattern, replacement in MASKS:
+        line = pattern.sub(replacement, line)
+    return line
+
+
+def scrub_transcript(output: bytes) -> list[str]:
+    output = ANSI_CSI.sub(b"", output)[-DIAGNOSTICS_LIMIT:]
+    text = output.decode("utf-8", errors="replace")
+    return [scrub_line(line.rstrip("\r")) for line in text.split("\n")]
+
+
+def panic_excerpt(lines: list[str]) -> list[str]:
+    """Panic headers with their message line, bounded and already scrubbed."""
+    excerpt: list[str] = []
+    for index, line in enumerate(lines):
+        if len(excerpt) >= PANIC_LIMIT:
+            excerpt.append("<further panics omitted>")
+            break
+        if PANIC_LINE.match(line):
+            message = lines[index + 1] if index + 1 < len(lines) else ""
+            excerpt.append(
+                f"{line[:PANIC_LINE_LIMIT]} {message.strip()[:PANIC_LINE_LIMIT]}".rstrip()
+            )
+    return excerpt
+
+
+def diagnostics_dir() -> Path | None:
+    value = os.environ.get("ANY_MCP_LIVE_DIAGNOSTICS_DIR", "")
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        raise RunnerError("diagnostics_dir")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = os.lstat(path)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise RunnerError("diagnostics_dir")
+    return path
+
+
+def retain_diagnostics(label: str, reason: str, output: bytes) -> None:
+    """Write a scrubbed transcript tail and echo scrubbed panic lines.
+
+    Raw transcripts stay private; only credential-masked text leaves the run.
+    """
+    lines = scrub_transcript(output)
+    for line in panic_excerpt(lines):
+        print(f"required live gate {label} panic: {line}", file=sys.stderr)
+    directory = diagnostics_dir()
+    if directory is None:
+        return
+    target = directory / f"{label}-failure-diagnostics.txt"
+    descriptor = os.open(
+        target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
+        sink.write(f"required live gate {label} failed reason={reason}\n")
+        sink.write("scrubbed transcript tail (credential-like lines redacted):\n\n")
+        sink.write("\n".join(lines))
+        sink.write("\n")
 
 
 def fail(
@@ -242,6 +327,13 @@ def main() -> None:
             reason = "child_signal" if status < 0 else "child_exit"
             failed = logged_failed or failed_test_names(label, output)
             failure = (reason, failed, last_completed, completed)
+            try:
+                retain_diagnostics(label, reason, output)
+            except (OSError, RunnerError):
+                print(
+                    f"required live gate {label} diagnostics unavailable",
+                    file=sys.stderr,
+                )
         if failure is None and mode == "test":
             summaries = SUMMARY_LINE.findall(output)
             if len(summaries) != 1:

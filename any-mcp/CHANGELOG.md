@@ -13,6 +13,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Report failed live-test identifiers when Cargo emits ANSI-colored output,
   and retain safe test progress for abnormal exits while keeping the protected
   child transcript private.
+- Surface scrubbed live-gate failure diagnostics: panic headers and messages
+  are echoed to the job log and a bounded, credential-masked transcript tail
+  is retained as a short-lived artifact. Raw transcripts stay private; lines
+  that look like credentials are dropped and JWTs, long hex, CIDs, and opaque
+  blobs are masked before anything leaves the runner.
 
 ### Changed
 

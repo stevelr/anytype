@@ -5,6 +5,7 @@ import importlib.util
 import contextlib
 import io
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -101,6 +102,117 @@ class RunnerTests(unittest.TestCase):
             result.stderr,
             "required live gate discussions failed reason=child_exit tests=module_name::colored_case\n",
         )
+
+    def invoke_with_diagnostics(
+        self, label: str, child: str
+    ) -> tuple[subprocess.CompletedProcess[str], str | None, int | None]:
+        with tempfile.TemporaryDirectory() as private:
+            diagnostics = Path(private) / "diagnostics"
+            environment = dict(
+                os.environ,
+                ANY_MCP_LIVE_PRIVATE_DIR=private,
+                ANY_MCP_LIVE_DIAGNOSTICS_DIR=str(diagnostics),
+            )
+            result = subprocess.run(
+                [sys.executable, RUNNER, "test", label, "--", sys.executable, "-c", child],
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            entries = sorted(diagnostics.iterdir()) if diagnostics.exists() else []
+            self.assertLessEqual(len(entries), 1)
+            if entries:
+                mode = os.stat(entries[0]).st_mode
+                self.assertTrue(stat.S_ISREG(mode))
+                self.assertEqual(stat.S_IMODE(mode), 0o600)
+                self.assertEqual(entries[0].name, f"{label}-failure-diagnostics.txt")
+                return result, entries[0].read_text(), stat.S_IMODE(diagnostics.stat().st_mode)
+            return result, None, None
+
+    def test_failure_diagnostics_echo_scrubbed_panics_and_retain_scrubbed_tail(self) -> None:
+        jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzZWVkIjoiYXdTbWNFYUkifQ.NBkENfTreAGZugc8GgrtB2TRV"
+        child = (
+            "print('test module_name::case_name ... FAILED');"
+            "print('PRIVATE_SECRET');"
+            "print('Authorization: Bearer abcdef');"
+            f"print('stream {jwt} context canceled');"
+            "print('object bafyreie376qinigjrf2plgbbsust6n6l3vdjdm7oreruqpt6girv4uqtem missing');"
+            "print('marker 0607ae6aa45892ecb256f1a9a2b6b830ca6939d22fac4027da5461b9d6db3245');"
+            "print(\"thread 'module_name::case_name' (4242) panicked at any-mcp/tests/x.rs:12:9:\");"
+            "print('assertion failed: spawn refused with PRIVATE_SECRET');"
+            "print(\"thread 'other' panicked at src/lib.rs:1:1:\");"
+            "print('plain message');"
+            "raise SystemExit(101)"
+        )
+        result, diagnostics, directory_mode = self.invoke_with_diagnostics("discussions", child)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("PRIVATE_SECRET", result.stderr)
+        self.assertNotIn("abcdef", result.stderr)
+        self.assertEqual(
+            result.stderr.splitlines(),
+            [
+                "required live gate discussions panic: thread 'module_name::case_name' (4242) panicked at any-mcp/tests/x.rs:12:9: <redacted line>",
+                "required live gate discussions panic: thread 'other' panicked at src/lib.rs:1:1: plain message",
+                "required live gate discussions failed reason=child_exit tests=module_name::case_name",
+            ],
+        )
+        self.assertIsNotNone(diagnostics)
+        assert diagnostics is not None
+        self.assertEqual(directory_mode, 0o700)
+        self.assertIn("required live gate discussions failed reason=child_exit", diagnostics)
+        self.assertNotIn("PRIVATE_SECRET", diagnostics)
+        self.assertNotIn("Bearer", diagnostics)
+        self.assertNotIn("abcdef", diagnostics)
+        self.assertNotIn(jwt, diagnostics)
+        self.assertNotIn("bafyreie376", diagnostics)
+        self.assertNotIn("0607ae6aa458", diagnostics)
+        self.assertIn("stream <jwt> context canceled", diagnostics)
+        self.assertIn("object <cid> missing", diagnostics)
+        self.assertIn("marker <hex>", diagnostics)
+        self.assertIn("test module_name::case_name ... FAILED", diagnostics)
+        self.assertIn("plain message", diagnostics)
+
+    def test_failure_diagnostics_are_bounded_to_the_transcript_tail(self) -> None:
+        child = (
+            "import sys; sys.stdout.write('PRIVATE_SECRET\\n' + ('x' * 100 + '\\n') * 2000 + 'tail marker\\n');"
+            "raise SystemExit(2)"
+        )
+        result, diagnostics, _ = self.invoke_with_diagnostics("discussions", child)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "required live gate discussions failed reason=child_exit\n")
+        assert diagnostics is not None
+        self.assertLess(len(diagnostics), 70_000)
+        self.assertNotIn("PRIVATE_SECRET", diagnostics)
+        self.assertIn("tail marker", diagnostics)
+
+    def test_successful_run_writes_no_diagnostics(self) -> None:
+        result, diagnostics, _ = self.invoke_with_diagnostics(
+            "discussions",
+            "print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s')",
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIsNone(diagnostics)
+
+    def test_relative_diagnostics_dir_is_refused_without_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as private:
+            environment = dict(
+                os.environ, ANY_MCP_LIVE_PRIVATE_DIR=private, ANY_MCP_LIVE_DIAGNOSTICS_DIR="relative"
+            )
+            result = subprocess.run(
+                [sys.executable, RUNNER, "test", "discussions", "--", sys.executable, "-c",
+                 "print('PRIVATE_SECRET'); raise SystemExit(2)"],
+                text=True, capture_output=True, env=environment, check=False, cwd=private,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("PRIVATE_SECRET", result.stdout + result.stderr)
+            self.assertEqual(
+                result.stderr,
+                "required live gate discussions diagnostics unavailable\n"
+                "required live gate discussions failed reason=child_exit\n",
+            )
+            self.assertEqual(list(Path(private).iterdir()), [])
 
     def test_private_libtest_log_reports_failure_without_transcript(self) -> None:
         result = self.invoke(

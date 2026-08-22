@@ -416,7 +416,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     assert_eq!(
-        digest, "84104d2d0571d13ed103ab7828268507e0e2f939af8ed57724bdbd40ba9ca8ed",
+        digest, "483582070bf6343b7d38530a4cf60397e527f8524de0e70fd57773e1932035b3",
         "workflow policy is an exact reviewed representation; audit before updating this digest"
     );
     let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
@@ -501,6 +501,17 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         2
     );
     assert_eq!(occurrences(workflow, "--test live_gate_manifest"), 1);
+    assert_eq!(
+        occurrences(workflow, "Retain scrubbed live-gate failure diagnostics"),
+        2
+    );
+    assert_eq!(
+        occurrences(
+            workflow,
+            "${{ env.ANY_MCP_LIVE_DIAGNOSTICS_DIR }}/*-failure-diagnostics.txt"
+        ),
+        2
+    );
 
     let action_lines = workflow
         .lines()
@@ -509,7 +520,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
             line.starts_with("- uses:") || line.starts_with("uses:")
         })
         .collect::<Vec<_>>();
-    assert_eq!(action_lines.len(), 13);
+    assert_eq!(action_lines.len(), 15);
     for line in action_lines {
         let reference = line
             .split_once('@')
@@ -555,7 +566,7 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
             workflow,
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
         ),
-        2
+        4
     );
 }
 
@@ -578,6 +589,27 @@ fn live_helpers_pin_counts_and_source_bound_fresh_evidence() {
     assert!(runner.contains("os.chmod(transcript.fileno(), 0o600)"));
     assert!(!runner.contains("tee"));
     assert!(!runner.contains("print(output"));
+    // Failure diagnostics leave the runner only after scrubbing: the opt-in
+    // directory must be absolute and private, the file is created exclusively
+    // with owner-only permissions, and credential-like lines never survive.
+    for required in [
+        "ANY_MCP_LIVE_DIAGNOSTICS_DIR",
+        "DIAGNOSTICS_LIMIT = 65_536",
+        "os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600",
+        "if CREDENTIAL_LINE.search(line):",
+        "return \"<redacted line>\"",
+        "lines = scrub_transcript(output)",
+    ] {
+        assert!(
+            runner.contains(required),
+            "missing runner guard {required:?}"
+        );
+    }
+    assert!(!runner.contains("sink.write(output"));
+    assert!(
+        helper_tests
+            .contains("test_failure_diagnostics_echo_scrubbed_panics_and_retain_scrubbed_tail")
+    );
 
     for required in [
         "O_NOFOLLOW",
