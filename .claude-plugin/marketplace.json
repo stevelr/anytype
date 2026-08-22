@@ -22,12 +22,7 @@
       "homepage": "https://docs.anytype-toolbox.org/",
       "repository": "https://github.com/stevelr/anytype",
       "license": "Apache-2.0",
-      "keywords": [
-        "anytype",
-        "anyr",
-        "mcp",
-        "automation"
-      ],
+      "keywords": ["anytype", "anyr", "mcp", "automation"],
       "category": "productivity",
       "strict": true
     }

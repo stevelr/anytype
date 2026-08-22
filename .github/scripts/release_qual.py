@@ -79,16 +79,14 @@ def outcome(runs: list[dict]) -> tuple[bool, list[str]]:
 
 
 def gh(*arguments: str) -> str:
-    completed = subprocess.run(
-        ["gh", *arguments], check=True, capture_output=True, text=True
-    )
+    completed = subprocess.run(["gh", *arguments], check=True, capture_output=True, text=True)
     return completed.stdout
 
 
 def dispatch(repo: str, ref: str, workflow: str, inputs: dict[str, str]) -> dict:
-    dispatched_at = (
-        dt.datetime.now(dt.UTC) - dt.timedelta(seconds=5)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    dispatched_at = (dt.datetime.now(dt.UTC) - dt.timedelta(seconds=5)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
     arguments = ["workflow", "run", workflow, "--repo", repo, "--ref", ref]
     for key, value in inputs.items():
         arguments += ["-f", f"{key}={value}"]

@@ -964,18 +964,12 @@ class TestAnyrCommands(unittest.TestCase):
             object_id = created.get("id")
             self.assertIsInstance(object_id, str, "page create missing id")
 
-            absent = run_anyr_json(
-                "object", "discussion", "get", space_id, object_id
-            )
+            absent = run_anyr_json("object", "discussion", "get", space_id, object_id)
             self.assertEqual(absent.get("state"), "absent")
-            attached = run_anyr_json(
-                "object", "discussion", "attach", space_id, object_id
-            )
+            attached = run_anyr_json("object", "discussion", "attach", space_id, object_id)
             discussion_id = attached.get("discussion_id")
             self.assertIsInstance(discussion_id, str, "discussion attach missing id")
-            repeated = run_anyr_json(
-                "object", "discussion", "get", space_id, object_id
-            )
+            repeated = run_anyr_json("object", "discussion", "get", space_id, object_id)
             self.assertEqual(repeated.get("discussion_id"), discussion_id)
 
             initial = run_anyr_json("body", "list", space_id, object_id)

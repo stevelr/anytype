@@ -70,13 +70,13 @@ fixture upgrade, and removal all passed.
 
 The trigger metadata was also reviewed against this prompt matrix:
 
-| Prompt shape                                           | Expected skill |
-| ------------------------------------------------------ | -------------- |
-| Use `anyr` to list Anytype pages from the command line | `anyr`         |
-| Search Anytype through the configured MCP connection   | `any-mcp`      |
-| Install `anyr` and connect it to the desktop app        | `anytype-setup` |
-| Diagnose a missing MCP tool, then use a CLI fallback   | both           |
-| Refactor an unrelated Rust parser                      | neither        |
+| Prompt shape                                           | Expected skill  |
+| ------------------------------------------------------ | --------------- |
+| Use `anyr` to list Anytype pages from the command line | `anyr`          |
+| Search Anytype through the configured MCP connection   | `any-mcp`       |
+| Install `anyr` and connect it to the desktop app       | `anytype-setup` |
+| Diagnose a missing MCP tool, then use a CLI fallback   | both            |
+| Refactor an unrelated Rust parser                      | neither         |
 
 The `anyr` skill delegates installation, authentication, endpoint changes, and
 backend recovery to `anytype-setup`. The `any-mcp` prerequisite section tells

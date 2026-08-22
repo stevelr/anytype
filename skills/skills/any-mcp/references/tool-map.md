@@ -48,12 +48,12 @@ last observation and does not probe either backend.
 
 These tools require the headless gRPC backend:
 
-| Catalog | Tools |
-| --- | --- |
-| Core | `object_archive` |
+| Catalog       | Tools                                                                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Core          | `object_archive`                                                                                                                            |
 | `body-blocks` | `body_block_create`, `body_block_delete`, `body_block_list`, `body_block_move`, `body_block_update`, `rich_page_create`, `rich_page_resume` |
-| `schema` | `type_update` |
-| `views-write` | `collection_member_list`, `collection_member_add`, `collection_member_remove` |
+| `schema`      | `type_update`                                                                                                                               |
+| `views-write` | `collection_member_list`, `collection_member_add`, `collection_member_remove`                                                               |
 
 All other advertised tools use HTTP. `type_update` is conservatively gated as
 a whole because its recommended-property path uses gRPC.

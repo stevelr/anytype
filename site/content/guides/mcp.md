@@ -109,18 +109,18 @@ in front of it for remote access.
 
 ## Catalog and runtime settings
 
-| Variable | Values and default |
-| --- | --- |
-| `ANY_MCP_CONNECTION_MODE` | `desktop` (default) or `headless`; selects one coherent endpoint pair |
-| `ANY_MCP_PROFILE` | `compact` (default) or `standard` |
-| `ANY_MCP_READ_ONLY` | `0` (default) or `1`; read-only omits mutation tools |
-| `ANY_MCP_PROTOCOL` | `stable` (default) or `experimental-2026-07-28` |
-| `ANY_MCP_TOOLSETS` | Comma-separated optional toolsets; absent by default |
-| `ANY_MCP_MAX_CONCURRENCY` | `1..=64`; default `8` |
-| `ANY_MCP_REQUEST_TIMEOUT_SECS` | `1..=300`; default `30` |
-| `ANY_MCP_STARTUP_TIMEOUT_SECS` | `1..=120`; default `15` |
-| `ANY_MCP_JSON_RESPONSE_BYTES` | Ordinary JSON response limit; default 8 MiB |
-| `ANY_MCP_DOCUMENT_RESPONSE_BYTES` | Document response limit; default 64 MiB |
+| Variable                          | Values and default                                                    |
+| --------------------------------- | --------------------------------------------------------------------- |
+| `ANY_MCP_CONNECTION_MODE`         | `desktop` (default) or `headless`; selects one coherent endpoint pair |
+| `ANY_MCP_PROFILE`                 | `compact` (default) or `standard`                                     |
+| `ANY_MCP_READ_ONLY`               | `0` (default) or `1`; read-only omits mutation tools                  |
+| `ANY_MCP_PROTOCOL`                | `stable` (default) or `experimental-2026-07-28`                       |
+| `ANY_MCP_TOOLSETS`                | Comma-separated optional toolsets; absent by default                  |
+| `ANY_MCP_MAX_CONCURRENCY`         | `1..=64`; default `8`                                                 |
+| `ANY_MCP_REQUEST_TIMEOUT_SECS`    | `1..=300`; default `30`                                               |
+| `ANY_MCP_STARTUP_TIMEOUT_SECS`    | `1..=120`; default `15`                                               |
+| `ANY_MCP_JSON_RESPONSE_BYTES`     | Ordinary JSON response limit; default 8 MiB                           |
+| `ANY_MCP_DOCUMENT_RESPONSE_BYTES` | Document response limit; default 64 MiB                               |
 
 The linked optional toolsets are `artifacts`, `body-blocks`, `chats`, `files`,
 `members`, `schema`, and `views-write`. Selection is exact and

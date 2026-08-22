@@ -22,9 +22,7 @@ TEST_SUMMARY = re.compile(
     rb"test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored; 0 measured; "
     rb"[0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s"
 )
-TEST_LOG_LINE = re.compile(
-    rb"(?m)^(ok|failed|ignored) ([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*)$"
-)
+TEST_LOG_LINE = re.compile(rb"(?m)^(ok|failed|ignored) ([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*)$")
 SKIPPED_ADMISSION = re.compile(
     rb"(?m)^.*skipped.*(?:PrefixNotConfigured|PrefixInvalid|"
     rb"PlatformIsolationUnavailable|ProcessIsolationUnavailable|"
@@ -87,11 +85,7 @@ def read_test_progress(label: str, descriptor: int) -> tuple[tuple[str, ...], st
         raise RunnerError("progress")
     names = tuple(name.decode("ascii") for _, name in results)
     failed = tuple(
-        sorted(
-            name.decode("ascii")
-            for result, name in results
-            if result == b"failed"
-        )
+        sorted(name.decode("ascii") for result, name in results if result == b"failed")
     )
     return failed, names[-1] if names else None, len(names)
 

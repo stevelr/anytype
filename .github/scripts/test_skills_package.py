@@ -55,7 +55,10 @@ def manifest(version: str, codex: bool) -> dict:
 def make_package(root: pathlib.Path, version: str = "1.2.3") -> pathlib.Path:
     write(root / ".codex-plugin/plugin.json", json.dumps(manifest(version, True)))
     write(root / ".claude-plugin/plugin.json", json.dumps(manifest(version, False)))
-    write(root / "CHANGELOG.md", f"# Changelog\n\n## [{version}]\n\n### Added\n\n- Initial package.\n")
+    write(
+        root / "CHANGELOG.md",
+        f"# Changelog\n\n## [{version}]\n\n### Added\n\n- Initial package.\n",
+    )
     write(root / "LICENSE", "Apache License 2.0\n")
     write(root / "README.md", "# Fixture\n\nSee [the skill](skills/example-skill/SKILL.md).\n")
     write(
@@ -80,44 +83,61 @@ class PackageValidationTests(unittest.TestCase):
     def test_valid_release_and_prerelease_directories_pass(self):
         for version in ("1.2.3", "2.0.0-rc.1+build.7"):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
-                identity = validator.validate_package(make_package(pathlib.Path(directory), version))
+                identity = validator.validate_package(
+                    make_package(pathlib.Path(directory), version)
+                )
                 self.assertEqual(identity.version, version)
                 self.assertEqual(identity.skills, ("example-skill",))
 
     def test_malformed_frontmatter_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = make_package(pathlib.Path(directory))
-            write(root / "skills/example-skill/SKILL.md", "---\nname example-skill\n---\n\nBody\n")
-            with self.assertRaisesRegex(validator.PackageValidationError, "expected a key: value"):
+            write(
+                root / "skills/example-skill/SKILL.md",
+                "---\nname example-skill\n---\n\nBody\n",
+            )
+            with self.assertRaisesRegex(
+                validator.PackageValidationError, "expected a key: value"
+            ):
                 validator.validate_package(root)
 
     def test_skill_name_must_match_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = make_package(pathlib.Path(directory))
             skill = root / "skills/example-skill/SKILL.md"
-            write(skill, skill.read_text().replace("name: example-skill", "name: another-skill"))
-            with self.assertRaisesRegex(validator.PackageValidationError, "does not match directory"):
+            write(
+                skill, skill.read_text().replace("name: example-skill", "name: another-skill")
+            )
+            with self.assertRaisesRegex(
+                validator.PackageValidationError, "does not match directory"
+            ):
                 validator.validate_package(root)
 
     def test_missing_relative_reference_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = make_package(pathlib.Path(directory))
             (root / "skills/example-skill/references/guide.md").unlink()
-            with self.assertRaisesRegex(validator.PackageValidationError, "link target does not exist"):
+            with self.assertRaisesRegex(
+                validator.PackageValidationError, "link target does not exist"
+            ):
                 validator.validate_package(root)
 
     def test_manifest_and_changelog_version_drift_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = make_package(pathlib.Path(directory))
             write(root / "CHANGELOG.md", "# Changelog\n\n## [1.2.4]\n")
-            with self.assertRaisesRegex(validator.PackageValidationError, "does not match plugin manifests"):
+            with self.assertRaisesRegex(
+                validator.PackageValidationError, "does not match plugin manifests"
+            ):
                 validator.validate_package(root)
 
     def test_host_manifest_version_drift_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = make_package(pathlib.Path(directory))
             write(root / ".claude-plugin/plugin.json", json.dumps(manifest("1.2.4", False)))
-            with self.assertRaisesRegex(validator.PackageValidationError, "manifests disagree on version"):
+            with self.assertRaisesRegex(
+                validator.PackageValidationError, "manifests disagree on version"
+            ):
                 validator.validate_package(root)
 
     def test_missing_license_and_changelog_fail(self):
@@ -125,7 +145,9 @@ class PackageValidationTests(unittest.TestCase):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
                 root = make_package(pathlib.Path(directory))
                 (root / missing).unlink()
-                with self.assertRaisesRegex(validator.PackageValidationError, "required package file is missing"):
+                with self.assertRaisesRegex(
+                    validator.PackageValidationError, "required package file is missing"
+                ):
                     validator.validate_package(root)
 
     def test_private_path_and_secret_material_fail(self):
@@ -135,7 +157,10 @@ class PackageValidationTests(unittest.TestCase):
             ("token = ghp_abcdefghijklmnopqrstuvwxyz123456\n", "credential-like"),
         )
         for content, diagnostic in cases:
-            with self.subTest(diagnostic=diagnostic), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(diagnostic=diagnostic),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 root = make_package(pathlib.Path(directory))
                 write(root / "skills/example-skill/references/guide.md", content)
                 with self.assertRaisesRegex(validator.PackageValidationError, diagnostic):
@@ -146,7 +171,9 @@ class PackageValidationTests(unittest.TestCase):
             with self.subTest(filename=filename), tempfile.TemporaryDirectory() as directory:
                 root = make_package(pathlib.Path(directory))
                 write(root / filename, "ANYTYPE_TOKEN=$TOKEN\n")
-                with self.assertRaisesRegex(validator.PackageValidationError, "credential files"):
+                with self.assertRaisesRegex(
+                    validator.PackageValidationError, "credential files"
+                ):
                     validator.validate_package(root)
 
     def test_valid_prefixed_archive_passes(self):
@@ -163,7 +190,9 @@ class PackageValidationTests(unittest.TestCase):
             archive = pathlib.Path(directory) / "unsafe.zip"
             with zipfile.ZipFile(archive, "w") as output:
                 output.writestr("../escape", "bad")
-            with self.assertRaisesRegex(validator.PackageValidationError, "escapes or aliases"):
+            with self.assertRaisesRegex(
+                validator.PackageValidationError, "escapes or aliases"
+            ):
                 validator.validate_archive(archive)
 
     def test_archive_alias_and_case_collision_fail(self):
@@ -188,13 +217,17 @@ class PackageValidationTests(unittest.TestCase):
             info.external_attr = (stat.S_IFLNK | 0o777) << 16
             with zipfile.ZipFile(archive, "w") as output:
                 output.writestr(info, "target")
-            with self.assertRaisesRegex(validator.PackageValidationError, "not a regular file"):
+            with self.assertRaisesRegex(
+                validator.PackageValidationError, "not a regular file"
+            ):
                 validator.validate_archive(archive)
 
     def test_expected_version_mismatch_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = make_package(pathlib.Path(directory), "1.2.3")
-            with self.assertRaisesRegex(validator.PackageValidationError, "does not match expected version"):
+            with self.assertRaisesRegex(
+                validator.PackageValidationError, "does not match expected version"
+            ):
                 validator.validate_package(root, "1.2.4-rc.1")
 
 

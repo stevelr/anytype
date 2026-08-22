@@ -18,14 +18,14 @@ authenticate for that endpoint and store its token under the intended service.
 A specification starts with a backend name. Backends that accept settings use
 colon-separated `key=value` modifiers.
 
-| Specification | Storage |
-| --- | --- |
-| `file` | SQLite database in the default application location |
-| `file:path=/private/keys.db` | SQLite database at an explicit path |
-| `secret-service` | Linux Secret Service |
-| `keychain` | macOS Keychain |
-| `windows` | Windows Credential Manager |
-| `env` | Process environment, with no persistence |
+| Specification                | Storage                                             |
+| ---------------------------- | --------------------------------------------------- |
+| `file`                       | SQLite database in the default application location |
+| `file:path=/private/keys.db` | SQLite database at an explicit path                 |
+| `secret-service`             | Linux Secret Service                                |
+| `keychain`                   | macOS Keychain                                      |
+| `windows`                    | Windows Credential Manager                          |
+| `env`                        | Process environment, with no persistence            |
 
 The platform default uses the operating-system credential store when one is
 available. `keyutils` is also supported on Linux, but its keys do not survive a
@@ -56,10 +56,10 @@ for supported file-backend modifiers.
 `ANYTYPE_KEYSTORE=env` reads credentials into memory without writing them to
 disk:
 
-| Variable | Credential |
-| --- | --- |
-| `ANYTYPE_KEY_HTTP_TOKEN` | HTTP access token |
-| `ANYTYPE_KEY_ACCOUNT_KEY` | gRPC account key |
+| Variable                    | Credential         |
+| --------------------------- | ------------------ |
+| `ANYTYPE_KEY_HTTP_TOKEN`    | HTTP access token  |
+| `ANYTYPE_KEY_ACCOUNT_KEY`   | gRPC account key   |
 | `ANYTYPE_KEY_SESSION_TOKEN` | gRPC session token |
 
 HTTP requires `ANYTYPE_KEY_HTTP_TOKEN`. gRPC requires either the account key or

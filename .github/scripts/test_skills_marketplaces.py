@@ -56,7 +56,9 @@ class MarketplaceTests(unittest.TestCase):
             ".claude-plugin/marketplace.json",
             lambda value: value["plugins"][0].update(source="./other"),
         )
-        with self.assertRaisesRegex(marketplaces.MarketplaceValidationError, "resolve to ./skills"):
+        with self.assertRaisesRegex(
+            marketplaces.MarketplaceValidationError, "resolve to ./skills"
+        ):
             marketplaces.validate_catalogs(self.root)
 
     def test_claude_entry_version_must_match_manifest(self) -> None:
@@ -64,7 +66,9 @@ class MarketplaceTests(unittest.TestCase):
             ".claude-plugin/marketplace.json",
             lambda value: value["plugins"][0].update(version="9.9.9"),
         )
-        with self.assertRaisesRegex(marketplaces.MarketplaceValidationError, "version does not match"):
+        with self.assertRaisesRegex(
+            marketplaces.MarketplaceValidationError, "version does not match"
+        ):
             marketplaces.validate_catalogs(self.root)
 
     def test_catalog_owner_must_match_plugin_author(self) -> None:
@@ -72,7 +76,9 @@ class MarketplaceTests(unittest.TestCase):
             ".claude-plugin/marketplace.json",
             lambda value: value.update(owner={"name": "Anytype"}),
         )
-        with self.assertRaisesRegex(marketplaces.MarketplaceValidationError, "owner does not match"):
+        with self.assertRaisesRegex(
+            marketplaces.MarketplaceValidationError, "owner does not match"
+        ):
             marketplaces.validate_catalogs(self.root)
 
 

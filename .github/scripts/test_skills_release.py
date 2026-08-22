@@ -77,7 +77,9 @@ class SkillsReleaseTests(unittest.TestCase):
                 release.version_from_tag(tag)
 
     def test_rejects_tag_manifest_version_mismatch(self) -> None:
-        with self.assertRaisesRegex(release.ReleasePreparationError, "does not match expected version"):
+        with self.assertRaisesRegex(
+            release.ReleasePreparationError, "does not match expected version"
+        ):
             self.prepare("anytype-toolbox-skills-v0.2.0")
 
     def test_prepares_prerelease_package(self) -> None:
@@ -94,7 +96,9 @@ class SkillsReleaseTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(release.ReleasePreparationError, "first release version does not match"):
+        with self.assertRaisesRegex(
+            release.ReleasePreparationError, "first release version does not match"
+        ):
             self.prepare()
 
     def test_release_notes_are_exact_version_section(self) -> None:
@@ -113,9 +117,7 @@ class SkillsReleaseTests(unittest.TestCase):
 
     def test_release_requires_nonempty_matching_changelog_section(self) -> None:
         changelog = self.package / "CHANGELOG.md"
-        changelog.write_text(
-            f"# Changelog\n\n## [{CURRENT_VERSION}]\n", encoding="utf-8"
-        )
+        changelog.write_text(f"# Changelog\n\n## [{CURRENT_VERSION}]\n", encoding="utf-8")
         with self.assertRaisesRegex(release.ReleasePreparationError, "must not be empty"):
             self.prepare()
 
@@ -133,11 +135,18 @@ class SkillsReleaseTests(unittest.TestCase):
         with zipfile.ZipFile(first.zip_path) as archive:
             zip_files = {info.filename for info in archive.infolist() if not info.is_dir()}
             self.assertEqual(zip_files, expected_files)
-            self.assertTrue(all(info.date_time == release.FIXED_ZIP_TIME for info in archive.infolist()))
+            self.assertTrue(
+                all(info.date_time == release.FIXED_ZIP_TIME for info in archive.infolist())
+            )
         with tarfile.open(first.tar_path, "r:gz") as archive:
             tar_files = {member.name for member in archive.getmembers() if member.isfile()}
             self.assertEqual(tar_files, expected_files)
-            self.assertTrue(all(member.mtime == 0 and member.uid == 0 and member.gid == 0 for member in archive.getmembers()))
+            self.assertTrue(
+                all(
+                    member.mtime == 0 and member.uid == 0 and member.gid == 0
+                    for member in archive.getmembers()
+                )
+            )
             for source in self.package.rglob("*"):
                 if not source.is_file():
                     continue
@@ -198,7 +207,9 @@ class WorkflowRoutingTests(unittest.TestCase):
 
     def test_release_workflow_tag_routes_are_disjoint(self) -> None:
         rust_patterns = self.tag_patterns(REPOSITORY_ROOT / ".github/workflows/release.yml")
-        skills_patterns = self.tag_patterns(REPOSITORY_ROOT / ".github/workflows/skills-release.yml")
+        skills_patterns = self.tag_patterns(
+            REPOSITORY_ROOT / ".github/workflows/skills-release.yml"
+        )
 
         def matches(tag: str, patterns: list[str]) -> bool:
             return any(fnmatch.fnmatchcase(tag, pattern) for pattern in patterns)
@@ -212,10 +223,14 @@ class WorkflowRoutingTests(unittest.TestCase):
         self.assertEqual(skills_patterns, ["anytype-toolbox-skills-v*"])
 
     def test_workflow_preserves_nonlatest_release_and_minimal_permissions(self) -> None:
-        workflow = (REPOSITORY_ROOT / ".github/workflows/skills-release.yml").read_text(encoding="utf-8")
+        workflow = (REPOSITORY_ROOT / ".github/workflows/skills-release.yml").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertRegex(workflow, r"package:\n    permissions:\n      contents: read")
-        self.assertRegex(workflow, r"publish:\n    needs: package\n    permissions:\n      contents: write")
+        self.assertRegex(
+            workflow, r"publish:\n    needs: package\n    permissions:\n      contents: write"
+        )
         self.assertIn('gh release create "$RELEASE_TAG"', workflow)
         self.assertIn("--latest=false", workflow)
         self.assertNotIn("workflow_dispatch:", workflow)

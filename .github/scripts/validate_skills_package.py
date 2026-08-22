@@ -186,7 +186,9 @@ def parse_frontmatter(text: str, context: str) -> dict[str, Any]:
         end = lines.index("---", 1)
     except ValueError:
         fail(f"{context}: frontmatter is missing its closing ---")
-    require(any(line.strip() for line in lines[end + 1 :]), f"{context}: instruction body is empty")
+    require(
+        any(line.strip() for line in lines[end + 1 :]), f"{context}: instruction body is empty"
+    )
 
     metadata: dict[str, Any] = {}
     index = 1
@@ -199,7 +201,9 @@ def parse_frontmatter(text: str, context: str) -> dict[str, Any]:
         require(":" in line, f"{context}:{index}: expected a key: value entry")
         key, raw_value = line.split(":", 1)
         key = key.strip()
-        require(key in SKILL_FIELDS, f"{context}:{index}: unsupported frontmatter field {key!r}")
+        require(
+            key in SKILL_FIELDS, f"{context}:{index}: unsupported frontmatter field {key!r}"
+        )
         require(key not in metadata, f"{context}:{index}: duplicate frontmatter field {key!r}")
 
         raw_value = raw_value.strip()
@@ -210,18 +214,29 @@ def parse_frontmatter(text: str, context: str) -> dict[str, Any]:
             while index < end and lines[index].startswith((" ", "\t")):
                 nested = lines[index]
                 index += 1
-                require("\t" not in nested[: len(nested) - len(nested.lstrip())], f"{context}:{index}: metadata indentation must use spaces")
+                require(
+                    "\t" not in nested[: len(nested) - len(nested.lstrip())],
+                    f"{context}:{index}: metadata indentation must use spaces",
+                )
                 indent = len(nested) - len(nested.lstrip(" "))
                 require(indent > 0, f"{context}:{index}: metadata entry must be indented")
                 if metadata_indent is None:
                     metadata_indent = indent
-                require(indent == metadata_indent, f"{context}:{index}: metadata entries must use consistent indentation")
+                require(
+                    indent == metadata_indent,
+                    f"{context}:{index}: metadata entries must use consistent indentation",
+                )
                 nested = nested.strip()
-                require(":" in nested, f"{context}:{index}: expected a metadata key: value entry")
+                require(
+                    ":" in nested, f"{context}:{index}: expected a metadata key: value entry"
+                )
                 nested_key, nested_value = nested.split(":", 1)
                 nested_key = nested_key.strip()
                 require(nested_key != "", f"{context}:{index}: metadata key must not be empty")
-                require(nested_key not in values, f"{context}:{index}: duplicate metadata key {nested_key!r}")
+                require(
+                    nested_key not in values,
+                    f"{context}:{index}: duplicate metadata key {nested_key!r}",
+                )
                 values[nested_key] = parse_scalar(nested_value, f"{context}:{index}")
             metadata[key] = values
             continue
@@ -243,7 +258,10 @@ def validate_semver(version: Any, context: str) -> str:
 
     require(isinstance(version, str), f"{context}: version must be a string")
     require(len(version) <= 64, f"{context}: version must be 64 characters or fewer")
-    require(SEMVER_PATTERN.fullmatch(version) is not None, f"{context}: invalid semantic version {version!r}")
+    require(
+        SEMVER_PATTERN.fullmatch(version) is not None,
+        f"{context}: invalid semantic version {version!r}",
+    )
     return version
 
 
@@ -251,9 +269,14 @@ def safe_package_path(root: pathlib.Path, value: str, context: str) -> pathlib.P
     """Resolve one manifest path while keeping it inside the plugin root."""
 
     require(value.startswith("./"), f"{context}: path must start with ./")
-    require("\\" not in value and "\x00" not in value, f"{context}: path uses unsafe separators")
+    require(
+        "\\" not in value and "\x00" not in value, f"{context}: path uses unsafe separators"
+    )
     relative = pathlib.PurePosixPath(value[2:])
-    require(relative.parts and ".." not in relative.parts, f"{context}: path escapes the plugin root")
+    require(
+        relative.parts and ".." not in relative.parts,
+        f"{context}: path escapes the plugin root",
+    )
     candidate = (root / pathlib.Path(*relative.parts)).resolve()
     try:
         candidate.relative_to(root.resolve())
@@ -266,11 +289,15 @@ def safe_package_path(root: pathlib.Path, value: str, context: str) -> pathlib.P
 def manifest_paths(manifest: dict[str, Any], host: str) -> Iterable[tuple[str, str]]:
     """Yield path-valued fields supported by a host manifest."""
 
-    fields = ("skills", "hooks", "mcpServers", "apps") if host == "codex" else (
-        "commands",
-        "agents",
-        "hooks",
-        "mcpServers",
+    fields = (
+        ("skills", "hooks", "mcpServers", "apps")
+        if host == "codex"
+        else (
+            "commands",
+            "agents",
+            "hooks",
+            "mcpServers",
+        )
     )
     for field in fields:
         value = manifest.get(field)
@@ -300,7 +327,10 @@ def manifest_paths(manifest: dict[str, Any], host: str) -> Iterable[tuple[str, s
         screenshots = interface.get("screenshots")
         if isinstance(screenshots, list):
             for index, value in enumerate(screenshots):
-                require(isinstance(value, str), f"{host} manifest interface.screenshots[{index}]: path must be a string")
+                require(
+                    isinstance(value, str),
+                    f"{host} manifest interface.screenshots[{index}]: path must be a string",
+                )
                 yield f"interface.screenshots[{index}]", value
         elif screenshots is not None:
             fail(f"{host} manifest interface.screenshots: expected a path list")
@@ -310,22 +340,39 @@ def validate_manifest(manifest: dict[str, Any], host: str, root: pathlib.Path) -
     """Validate one host manifest and every declared package path."""
 
     name = manifest.get("name")
-    require(isinstance(name, str) and name == PLUGIN_NAME, f"{host} manifest: name must be {PLUGIN_NAME!r}")
+    require(
+        isinstance(name, str) and name == PLUGIN_NAME,
+        f"{host} manifest: name must be {PLUGIN_NAME!r}",
+    )
     validate_semver(manifest.get("version"), f"{host} manifest")
     description = manifest.get("description")
-    require(isinstance(description, str) and 1 <= len(description) <= 1_024, f"{host} manifest: description must contain 1-1024 characters")
+    require(
+        isinstance(description, str) and 1 <= len(description) <= 1_024,
+        f"{host} manifest: description must contain 1-1024 characters",
+    )
     author = manifest.get("author")
     require(isinstance(author, dict), f"{host} manifest: author must be an object")
     author_name = author.get("name") if isinstance(author, dict) else None
-    require(isinstance(author_name, str) and 1 <= len(author_name) <= 120, f"{host} manifest: author.name must contain 1-120 characters")
+    require(
+        isinstance(author_name, str) and 1 <= len(author_name) <= 120,
+        f"{host} manifest: author.name must contain 1-120 characters",
+    )
     license_name = manifest.get("license")
-    require(isinstance(license_name, str) and license_name != "", f"{host} manifest: license must be non-empty")
+    require(
+        isinstance(license_name, str) and license_name != "",
+        f"{host} manifest: license must be non-empty",
+    )
 
     if host == "codex":
-        require(manifest.get("skills") == "./skills/", "codex manifest: skills must be ./skills/")
+        require(
+            manifest.get("skills") == "./skills/", "codex manifest: skills must be ./skills/"
+        )
         interface = manifest.get("interface")
         require(isinstance(interface, dict), "codex manifest: interface must be an object")
-        require(interface.get("developerName") == author_name, "codex manifest: interface.developerName must match author.name")
+        require(
+            interface.get("developerName") == author_name,
+            "codex manifest: interface.developerName must match author.name",
+        )
 
     for field, value in manifest_paths(manifest, host):
         safe_package_path(root, value, f"{host} manifest {field}")
@@ -341,12 +388,24 @@ def validate_skill(skill_root: pathlib.Path, package_root: pathlib.Path) -> str:
     metadata = parse_frontmatter(read_utf8(skill_file, package_root), f"{relative}/SKILL.md")
     name = metadata.get("name")
     require(isinstance(name, str), f"{relative}/SKILL.md: name is required")
-    require(SKILL_NAME_PATTERN.fullmatch(name) is not None and len(name) <= 64, f"{relative}/SKILL.md: invalid skill name {name!r}")
-    require(name == skill_root.name, f"{relative}/SKILL.md: name {name!r} does not match directory {skill_root.name!r}")
+    require(
+        SKILL_NAME_PATTERN.fullmatch(name) is not None and len(name) <= 64,
+        f"{relative}/SKILL.md: invalid skill name {name!r}",
+    )
+    require(
+        name == skill_root.name,
+        f"{relative}/SKILL.md: name {name!r} does not match directory {skill_root.name!r}",
+    )
     description = metadata.get("description")
-    require(isinstance(description, str) and 1 <= len(description) <= 1_024, f"{relative}/SKILL.md: description must contain 1-1024 characters")
+    require(
+        isinstance(description, str) and 1 <= len(description) <= 1_024,
+        f"{relative}/SKILL.md: description must contain 1-1024 characters",
+    )
     compatibility = metadata.get("compatibility")
-    require(compatibility is None or 1 <= len(compatibility) <= 500, f"{relative}/SKILL.md: compatibility must contain 1-500 characters")
+    require(
+        compatibility is None or 1 <= len(compatibility) <= 500,
+        f"{relative}/SKILL.md: compatibility must contain 1-500 characters",
+    )
     return name
 
 
@@ -375,7 +434,9 @@ def validate_markdown_links(root: pathlib.Path) -> None:
             decoded = urllib.parse.unquote(parsed.path)
             if decoded == "":
                 continue
-            require("\\" not in decoded, f"{relative}: link uses a backslash path: {destination}")
+            require(
+                "\\" not in decoded, f"{relative}: link uses a backslash path: {destination}"
+            )
             target = (path.parent / decoded).resolve()
             try:
                 target.relative_to(root.resolve())
@@ -387,7 +448,11 @@ def validate_markdown_links(root: pathlib.Path) -> None:
 def is_text_file(path: pathlib.Path) -> bool:
     """Return whether a package file belongs to the public text surface."""
 
-    return path.suffix.lower() in TEXT_SUFFIXES or path.name in {"LICENSE", "README", "CHANGELOG"}
+    return path.suffix.lower() in TEXT_SUFFIXES or path.name in {
+        "LICENSE",
+        "README",
+        "CHANGELOG",
+    }
 
 
 def validate_public_text(root: pathlib.Path) -> None:
@@ -396,20 +461,33 @@ def validate_public_text(root: pathlib.Path) -> None:
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
         require(not path.is_symlink(), f"{relative}: symlinks are not permitted")
-        require(path.is_file() or path.is_dir(), f"{relative}: only regular files and directories are permitted")
+        require(
+            path.is_file() or path.is_dir(),
+            f"{relative}: only regular files and directories are permitted",
+        )
         filename = path.name.casefold()
         require(
-            filename not in CREDENTIAL_FILENAMES and filename != ".env" and not filename.startswith(".env."),
+            filename not in CREDENTIAL_FILENAMES
+            and filename != ".env"
+            and not filename.startswith(".env."),
             f"{relative}: credential files are not permitted",
         )
-        require(path.suffix.casefold() not in CREDENTIAL_SUFFIXES, f"{relative}: credential files are not permitted")
+        require(
+            path.suffix.casefold() not in CREDENTIAL_SUFFIXES,
+            f"{relative}: credential files are not permitted",
+        )
         if not path.is_file() or not is_text_file(path):
             continue
         text = read_utf8(path, root)
         for pattern in PRIVATE_PATH_PATTERNS:
-            require(pattern.search(text) is None, f"{relative}: contains checkout-private path or test guidance")
+            require(
+                pattern.search(text) is None,
+                f"{relative}: contains checkout-private path or test guidance",
+            )
         for pattern in SECRET_PATTERNS:
-            require(pattern.search(text) is None, f"{relative}: contains credential-like material")
+            require(
+                pattern.search(text) is None, f"{relative}: contains credential-like material"
+            )
 
 
 def changelog_version(path: pathlib.Path, root: pathlib.Path) -> str:
@@ -421,7 +499,9 @@ def changelog_version(path: pathlib.Path, root: pathlib.Path) -> str:
     return validate_semver(versions[0], "CHANGELOG.md first release heading")
 
 
-def validate_package(root: pathlib.Path, expected_version: str | None = None) -> PackageIdentity:
+def validate_package(
+    root: pathlib.Path, expected_version: str | None = None
+) -> PackageIdentity:
     """Validate one unpacked plugin directory."""
 
     require(root.exists(), f"{root}: package root does not exist")
@@ -439,13 +519,22 @@ def validate_package(root: pathlib.Path, expected_version: str | None = None) ->
         require(codex.get(field) == claude.get(field), f"plugin manifests disagree on {field}")
 
     version = validate_semver(codex.get("version"), "plugin manifests")
-    require(changelog_version(root / "CHANGELOG.md", root) == version, "CHANGELOG.md first release version does not match plugin manifests")
+    require(
+        changelog_version(root / "CHANGELOG.md", root) == version,
+        "CHANGELOG.md first release version does not match plugin manifests",
+    )
     if expected_version is not None:
         validate_semver(expected_version, "expected version")
-        require(version == expected_version, f"plugin version {version!r} does not match expected version {expected_version!r}")
+        require(
+            version == expected_version,
+            f"plugin version {version!r} does not match expected version {expected_version!r}",
+        )
 
     skills_root = root / "skills"
-    require(skills_root.is_dir() and not skills_root.is_symlink(), "skills/: required skill directory is missing")
+    require(
+        skills_root.is_dir() and not skills_root.is_symlink(),
+        "skills/: required skill directory is missing",
+    )
     skill_directories = sorted(path for path in skills_root.iterdir() if path.is_dir())
     require(skill_directories, "skills/: at least one skill is required")
     skills = tuple(validate_skill(path, root) for path in skill_directories)
@@ -460,24 +549,44 @@ def validate_archive_member(info: zipfile.ZipInfo) -> pathlib.PurePosixPath:
     name = info.filename
     require(name != "" and "\x00" not in name, "archive contains an empty or NUL path")
     require("\\" not in name, f"archive member uses a backslash path: {name!r}")
-    require(all(ord(character) >= 32 for character in name), f"archive member uses control characters: {name!r}")
+    require(
+        all(ord(character) >= 32 for character in name),
+        f"archive member uses control characters: {name!r}",
+    )
     path = pathlib.PurePosixPath(name)
-    require(not path.is_absolute() and path.parts, f"archive member uses an absolute path: {name!r}")
+    require(
+        not path.is_absolute() and path.parts,
+        f"archive member uses an absolute path: {name!r}",
+    )
     archive_spelling = name[:-1] if name.endswith("/") else name
     require(
         ".." not in path.parts and path.as_posix() == archive_spelling,
         f"archive member escapes or aliases its root: {name!r}",
     )
-    require(not re.match(r"^[A-Za-z]:", path.parts[0]), f"archive member uses a drive path: {name!r}")
+    require(
+        not re.match(r"^[A-Za-z]:", path.parts[0]),
+        f"archive member uses a drive path: {name!r}",
+    )
     require(info.flag_bits & 0x1 == 0, f"archive member is encrypted: {name!r}")
-    require(info.file_size <= MAX_ARCHIVE_FILE_BYTES, f"archive member exceeds the size limit: {name!r}")
+    require(
+        info.file_size <= MAX_ARCHIVE_FILE_BYTES,
+        f"archive member exceeds the size limit: {name!r}",
+    )
     if info.file_size > 0:
-        require(info.compress_size > 0, f"archive member has an invalid compressed size: {name!r}")
-        require(info.file_size <= info.compress_size * MAX_COMPRESSION_RATIO, f"archive member exceeds the compression-ratio limit: {name!r}")
+        require(
+            info.compress_size > 0, f"archive member has an invalid compressed size: {name!r}"
+        )
+        require(
+            info.file_size <= info.compress_size * MAX_COMPRESSION_RATIO,
+            f"archive member exceeds the compression-ratio limit: {name!r}",
+        )
 
     mode = info.external_attr >> 16
     file_type = stat.S_IFMT(mode)
-    require(file_type in {0, stat.S_IFREG, stat.S_IFDIR}, f"archive member is not a regular file or directory: {name!r}")
+    require(
+        file_type in {0, stat.S_IFREG, stat.S_IFDIR},
+        f"archive member is not a regular file or directory: {name!r}",
+    )
     return path
 
 
@@ -488,13 +597,20 @@ def archive_plugin_prefix(paths: list[pathlib.PurePosixPath]) -> pathlib.PurePos
     if codex_manifest in paths:
         return pathlib.PurePosixPath()
     top_levels = {path.parts[0] for path in paths if path.parts}
-    require(len(top_levels) == 1, "archive must contain one plugin root and no sibling entries")
+    require(
+        len(top_levels) == 1, "archive must contain one plugin root and no sibling entries"
+    )
     prefix = pathlib.PurePosixPath(next(iter(top_levels)))
-    require(prefix / codex_manifest in paths, "archive plugin root is missing .codex-plugin/plugin.json")
+    require(
+        prefix / codex_manifest in paths,
+        "archive plugin root is missing .codex-plugin/plugin.json",
+    )
     return prefix
 
 
-def validate_archive(path: pathlib.Path, expected_version: str | None = None) -> PackageIdentity:
+def validate_archive(
+    path: pathlib.Path, expected_version: str | None = None
+) -> PackageIdentity:
     """Validate a release ZIP without trusting its entry paths or metadata."""
 
     require(path.is_file(), f"{path}: archive does not exist")
@@ -506,12 +622,23 @@ def validate_archive(path: pathlib.Path, expected_version: str | None = None) ->
 
     with archive:
         infos = archive.infolist()
-        require(0 < len(infos) <= MAX_ARCHIVE_MEMBERS, "archive member count is outside the permitted range")
+        require(
+            0 < len(infos) <= MAX_ARCHIVE_MEMBERS,
+            "archive member count is outside the permitted range",
+        )
         paths = [validate_archive_member(info) for info in infos]
-        folded = [unicodedata.normalize("NFC", member.as_posix()).casefold() for member in paths]
-        require(len(folded) == len(set(folded)), "archive contains duplicate or case-colliding member paths")
+        folded = [
+            unicodedata.normalize("NFC", member.as_posix()).casefold() for member in paths
+        ]
+        require(
+            len(folded) == len(set(folded)),
+            "archive contains duplicate or case-colliding member paths",
+        )
         total_bytes = sum(info.file_size for info in infos)
-        require(total_bytes <= MAX_ARCHIVE_TOTAL_BYTES, "archive exceeds the total uncompressed size limit")
+        require(
+            total_bytes <= MAX_ARCHIVE_TOTAL_BYTES,
+            "archive exceeds the total uncompressed size limit",
+        )
         prefix = archive_plugin_prefix(paths)
 
         with tempfile.TemporaryDirectory(prefix="anytype-skills-validate-") as temporary:
@@ -533,8 +660,12 @@ def parse_arguments() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", nargs="?", default="skills", type=pathlib.Path)
-    parser.add_argument("--expected-version", help="require this exact release or prerelease version")
-    parser.add_argument("--json", action="store_true", help="print the validated identity as JSON")
+    parser.add_argument(
+        "--expected-version", help="require this exact release or prerelease version"
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="print the validated identity as JSON"
+    )
     return parser.parse_args()
 
 
@@ -555,7 +686,11 @@ def main() -> int:
         return 1
 
     if arguments.json:
-        print(json.dumps({"name": identity.name, "version": identity.version, "skills": identity.skills}))
+        print(
+            json.dumps(
+                {"name": identity.name, "version": identity.version, "skills": identity.skills}
+            )
+        )
     else:
         print(f"validated {identity.name} {identity.version}: {', '.join(identity.skills)}")
     return 0

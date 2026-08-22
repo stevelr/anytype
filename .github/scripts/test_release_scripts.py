@@ -21,7 +21,9 @@ eligibility = load("release_eligibility")
 qual = load("release_qual")
 
 
-def run(name: str, conclusion: str | None, completed_at: str | None, status: str = "completed"):
+def run(
+    name: str, conclusion: str | None, completed_at: str | None, status: str = "completed"
+):
     return {
         "name": name,
         "status": status,
@@ -32,11 +34,17 @@ def run(name: str, conclusion: str | None, completed_at: str | None, status: str
 
 class EligibilityTests(unittest.TestCase):
     def test_every_required_check_green_is_eligible(self):
-        runs = [run(name, "success", "2026-08-19T10:00:00Z") for name in eligibility.REQUIRED_CHECKS]
+        runs = [
+            run(name, "success", "2026-08-19T10:00:00Z")
+            for name in eligibility.REQUIRED_CHECKS
+        ]
         self.assertEqual(eligibility.evaluate(runs), ([], []))
 
     def test_missing_and_failed_checks_are_reported_separately(self):
-        runs = [run(name, "success", "2026-08-19T10:00:00Z") for name in eligibility.REQUIRED_CHECKS]
+        runs = [
+            run(name, "success", "2026-08-19T10:00:00Z")
+            for name in eligibility.REQUIRED_CHECKS
+        ]
         runs = [r for r in runs if r["name"] != "stdio to headless Anytype"]
         runs = [
             run("native gates (macos-aarch64)", "failure", "2026-08-19T10:00:00Z")
@@ -62,12 +70,17 @@ class EligibilityTests(unittest.TestCase):
             run("clippy (linux-aarch64)", "success", "2026-08-19T10:00:00Z"),
             run("clippy (linux-aarch64)", None, None, status="in_progress"),
         ]
-        self.assertEqual(eligibility.latest_conclusions(runs), {"clippy (linux-aarch64)": None})
+        self.assertEqual(
+            eligibility.latest_conclusions(runs), {"clippy (linux-aarch64)": None}
+        )
         _, failing = eligibility.evaluate(runs, ("clippy (linux-aarch64)",))
         self.assertEqual(failing, [("clippy (linux-aarch64)", None)])
 
     def test_unrelated_check_runs_are_ignored(self):
-        runs = [run(name, "success", "2026-08-19T10:00:00Z") for name in eligibility.REQUIRED_CHECKS]
+        runs = [
+            run(name, "success", "2026-08-19T10:00:00Z")
+            for name in eligibility.REQUIRED_CHECKS
+        ]
         runs.append(run("build-global-artifacts", "failure", "2026-08-19T10:00:00Z"))
         self.assertEqual(eligibility.evaluate(runs), ([], []))
 
@@ -77,7 +90,13 @@ class QualificationTests(unittest.TestCase):
         plan = qual.stage_plan("test", "main", "all", "required")
         self.assertEqual(
             [name for name, _ in plan],
-            ["smoke.yml", "ci.yml", "any-mcp.yml", "anytype-api-live.yml", "anyr-anyback-live.yml"],
+            [
+                "smoke.yml",
+                "ci.yml",
+                "any-mcp.yml",
+                "anytype-api-live.yml",
+                "anyr-anyback-live.yml",
+            ],
         )
         inputs = dict(plan)
         self.assertEqual(inputs["ci.yml"], {"platform": "all"})

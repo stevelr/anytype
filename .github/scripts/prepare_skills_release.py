@@ -65,15 +65,23 @@ def changelog_section(changelog: pathlib.Path, version: str) -> str:
     try:
         text = changelog.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
-        raise ReleasePreparationError(f"CHANGELOG.md: expected UTF-8 text ({error})") from error
+        raise ReleasePreparationError(
+            f"CHANGELOG.md: expected UTF-8 text ({error})"
+        ) from error
     headings = list(CHANGELOG_SECTION_PATTERN.finditer(text))
     matching = [match for match in headings if match.group(0).strip() == f"## [{version}]"]
-    require(len(matching) == 1, f"CHANGELOG.md must contain exactly one ## [{version}] section")
+    require(
+        len(matching) == 1, f"CHANGELOG.md must contain exactly one ## [{version}] section"
+    )
     match = matching[0]
-    following = next((heading for heading in headings if heading.start() > match.start()), None)
+    following = next(
+        (heading for heading in headings if heading.start() > match.start()), None
+    )
     end = following.start() if following is not None else len(text)
     section = text[match.start() : end].strip()
-    require(section != f"## [{version}]", f"CHANGELOG.md section [{version}] must not be empty")
+    require(
+        section != f"## [{version}]", f"CHANGELOG.md section [{version}] must not be empty"
+    )
     return section + "\n"
 
 
@@ -84,7 +92,10 @@ def package_entries(root: pathlib.Path) -> list[pathlib.Path]:
     for entry in entries:
         relative = entry.relative_to(root).as_posix()
         require(not entry.is_symlink(), f"{relative}: symlinks are not permitted")
-        require(entry.is_dir() or entry.is_file(), f"{relative}: only regular files and directories are permitted")
+        require(
+            entry.is_dir() or entry.is_file(),
+            f"{relative}: only regular files and directories are permitted",
+        )
     return entries
 
 
@@ -107,7 +118,9 @@ def normalized_mode(path: pathlib.Path) -> int:
 def write_zip(path: pathlib.Path, root: pathlib.Path, entries: list[pathlib.Path]) -> None:
     """Write a deterministic ZIP containing the plugin tree."""
 
-    with zipfile.ZipFile(path, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    with zipfile.ZipFile(
+        path, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as archive:
         root_info = zipfile.ZipInfo(f"{ARCHIVE_ROOT}/", FIXED_ZIP_TIME)
         root_info.create_system = 3
         root_info.external_attr = (stat.S_IFDIR | 0o755) << 16
@@ -143,8 +156,12 @@ def write_tar_gz(path: pathlib.Path, root: pathlib.Path, entries: list[pathlib.P
     """Write a deterministic gzip-compressed USTAR archive."""
 
     with path.open("xb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=9) as compressed:
-            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        with gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=9
+        ) as compressed:
+            with tarfile.open(
+                fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT
+            ) as archive:
                 archive.addfile(tar_info(f"{ARCHIVE_ROOT}/", 0o755, True))
                 for entry in entries:
                     is_directory = entry.is_dir()
