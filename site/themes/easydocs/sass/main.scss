@@ -599,9 +599,36 @@ pre {
     font-size: 0.95rem;
     color: #4c4a5c;
   }
+}
 
-  a {
-    font-weight: 600;
+a.card {
+  display: block;
+
+  &:link,
+  &:visited {
+    color: inherit;
+  }
+
+  &:link h3 {
+    color: $links;
+  }
+
+  &:visited h3 {
+    color: $visited-links;
+  }
+
+  &:hover {
+    border-color: $hover-links;
+    box-shadow: 0 2px 8px rgb(36 34 56 / 12%);
+
+    h3 {
+      color: $hover-links;
+    }
+  }
+
+  &:focus-visible {
+    outline: 3px solid $links;
+    outline-offset: 2px;
   }
 }
 
