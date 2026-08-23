@@ -1199,13 +1199,37 @@ fn write_all_deadline(
         .map_err(|error| format!("cannot write JSON-RPC request: {error}"))
 }
 
+/// Whether a failed `kill(-pgid, …)` means the owned group has no live,
+/// signalable member left.
+///
+/// ESRCH is the portable answer. XNU's POSIX `kill()` skips zombies while
+/// iterating a group and reports EPERM when it signalled nobody, so on Apple
+/// targets a group whose members were all killed but not yet reaped reports
+/// EPERM rather than ESRCH. The group was created by this process in
+/// `pre_exec`, so a genuine permission failure cannot occur there.
+#[cfg(all(unix, target_vendor = "apple"))]
+const GONE_ERRNOS: &[i32] = &[libc::ESRCH, libc::EPERM];
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const GONE_ERRNOS: &[i32] = &[libc::ESRCH];
+
+#[cfg(unix)]
+fn process_group_is_gone(error: &std::io::Error) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|errno| GONE_ERRNOS.contains(&errno))
+}
+
 #[cfg(unix)]
 fn kill_process_group(process_group: i32) -> Result<(), String> {
-    // SAFETY: the negative PID targets the group created in pre_exec. ESRCH
-    // means the complete group already exited.
+    // SAFETY: the negative PID targets the group created in pre_exec.
     let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
-    if result != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
-        return Err("cannot terminate benchmark child process group".to_owned());
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if !process_group_is_gone(&error) {
+            return Err(format!(
+                "cannot terminate benchmark child process group: {error}"
+            ));
+        }
     }
     Ok(())
 }
@@ -1257,7 +1281,7 @@ fn require_process_group_empty(process_group: i32, deadline: Instant) -> Result<
         // SAFETY: signal zero only checks whether the owned process group has
         // members and does not change process state.
         let result = unsafe { libc::kill(-process_group, 0) };
-        if result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        if result != 0 && process_group_is_gone(&std::io::Error::last_os_error()) {
             return Ok(());
         }
         if !process_group_has_live_member(process_group) {

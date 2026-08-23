@@ -13,6 +13,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Report failed live-test identifiers when Cargo emits ANSI-colored output,
   and retain safe test progress for abnormal exits while keeping the protected
   child transcript private.
+- Treat EPERM from `kill(-pgid, …)` on macOS as an already-exited benchmark
+  process group: XNU skips zombies and reports EPERM instead of ESRCH, which
+  intermittently failed benchmark teardown on Apple runners.
 - Surface scrubbed live-gate failure diagnostics: panic headers and messages
   are echoed to the job log and a bounded, credential-masked transcript tail
   is retained as a short-lived artifact. Raw transcripts stay private; lines

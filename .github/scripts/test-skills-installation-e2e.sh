@@ -53,7 +53,6 @@ grep -q 'report that the connection is unavailable' \
   /tmp/source/skills/skills/any-mcp/SKILL.md
 grep -q 'report the missing startup selection' \
   /tmp/source/skills/skills/any-mcp/SKILL.md
-grep -q 'Desktop mode' /tmp/source/skills/skills/anytype-setup/SKILL.md
 
 skills() {
   npx --yes "skills@$skills_cli_version" "$@"

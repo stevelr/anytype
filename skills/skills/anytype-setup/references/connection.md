@@ -26,8 +26,24 @@ anyr auth login
 anyr auth status
 ```
 
-For `anyr mcp`, also set `ANY_MCP_CONNECTION_MODE=desktop` in the MCP host and
-omit `ANYTYPE_GRPC_ENDPOINT` from that process environment. Omitting this
+For `anyr mcp`, set `ANY_MCP_CONNECTION_MODE=desktop` in the MCP host and
+omit `ANYTYPE_GRPC_ENDPOINT` from that process environment, e.g.:
+
+```json
+{
+  "anytype": {
+    "command": "anyr",
+    "args": ["mcp"],
+    "env": {
+      "ANY_MCP_CONNECTION_MODE": "desktop",
+      "ANYTYPE_URL": "http://127.0.0.1:31009",
+      "ANYTYPE_KEYSTORE_SERVICE": "anyr-desktop"
+    }
+  }
+}
+```
+
+Omitting this
 non-secret selector from one isolated profile does not remove saved gRPC
 credentials from another keystore profile.
 
@@ -56,7 +72,24 @@ anyr init-cli
 anyr auth status
 ```
 
-For `anyr mcp`, also set `ANY_MCP_CONNECTION_MODE=headless`. When customized
+For `anyr mcp`, set `ANY_MCP_CONNECTION_MODE=headless` in the MCP host, e.g.:
+
+```json
+{
+  "anytype": {
+    "command": "anyr",
+    "args": ["mcp"],
+    "env": {
+      "ANY_MCP_CONNECTION_MODE": "headless",
+      "ANYTYPE_URL": "http://127.0.0.1:31012",
+      "ANYTYPE_GRPC_ENDPOINT": "http://127.0.0.1:31010",
+      "ANYTYPE_KEYSTORE_SERVICE": "anyr-headless"
+    }
+  }
+}
+```
+
+When customized
 endpoints are needed, provide both HTTP and gRPC endpoints for the same host;
 do not combine transports from different Anytype processes.
 

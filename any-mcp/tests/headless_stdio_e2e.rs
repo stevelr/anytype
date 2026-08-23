@@ -2328,6 +2328,24 @@ enum ArtifactDiagnostic<'a> {
 }
 
 #[cfg(feature = "acceptance-harness")]
+#[test]
+fn artifact_diagnostic_parser_accepts_the_production_ready_line() {
+    // Mirrors the `tracing::info!` in `any_mcp::run_server`; renaming a
+    // field there must fail here, not forty minutes into a live gate.
+    let ready = "2026-08-22T19:50:01.123456Z  INFO authenticated Anytype runtime ready http_available=true grpc_configured=true";
+    assert!(matches!(
+        parse_artifact_diagnostic(ready),
+        Ok(ArtifactDiagnostic::RuntimeReady)
+    ));
+    let stale = ready.replace("grpc_configured", "grpc_available");
+    let error = parse_artifact_diagnostic(&stale).err();
+    assert_eq!(
+        error.as_deref(),
+        Some("artifact child diagnostic fields were not exact")
+    );
+}
+
+#[cfg(feature = "acceptance-harness")]
 fn parse_artifact_diagnostic(line: &str) -> Result<ArtifactDiagnostic<'_>, String> {
     const RUNTIME_READY: &str = "authenticated Anytype runtime ready";
     const OPERATION: &str = "Anytype operation completed";
@@ -2335,7 +2353,7 @@ fn parse_artifact_diagnostic(line: &str) -> Result<ArtifactDiagnostic<'_>, Strin
     const RECONCILIATION: &str = "Artifact staging reconciliation completed";
 
     let (message, required_fields): (&str, &[&str]) = if line.contains(RUNTIME_READY) {
-        (RUNTIME_READY, &["http_available", "grpc_available"])
+        (RUNTIME_READY, &["http_available", "grpc_configured"])
     } else if line.contains(OPERATION) {
         (
             OPERATION,
@@ -2409,7 +2427,7 @@ fn parse_artifact_diagnostic(line: &str) -> Result<ArtifactDiagnostic<'_>, Strin
     match message {
         RUNTIME_READY => {
             if !matches!(field("http_available")?, "true" | "false")
-                || !matches!(field("grpc_available")?, "true" | "false")
+                || !matches!(field("grpc_configured")?, "true" | "false")
             {
                 return Err("artifact runtime diagnostic booleans were malformed".to_owned());
             }

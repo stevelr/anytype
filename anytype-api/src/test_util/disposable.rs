@@ -66,6 +66,23 @@ pub enum DisposableRun<T> {
 /// credentials, and upstream bodies are discarded.
 #[doc(hidden)]
 pub fn disposable_callback_error(stage: DisposableCallbackStage, error: TestError) -> TestError {
+    // The closed category erases the cause by design; record the redacted
+    // Display of the inner error first so a failing live gate can explain
+    // itself. gRPC errors render their variant-level (details-redacted) cause.
+    let detail = match &error {
+        TestError::Api {
+            source: AnytypeError::Grpc { source },
+        } => source.to_string(),
+        other => other.to_string(),
+    };
+    eprintln!(
+        "disposable callback stage={stage} failure={}",
+        detail
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(300)
+            .collect::<String>()
+    );
     let category = match error {
         TestError::Api { source } => failure_category_from_anytype(&source),
         TestError::Env { .. } => DisposableFailureCategory::Environment,

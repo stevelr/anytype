@@ -17,11 +17,13 @@ Choose the backend before writing credentials:
 - **Headless** uses the Anytype CLI service for both HTTP and gRPC. Initialize
   it from that service without creating a new account when one already exists.
 
-Keep profiles separate with distinct `ANYTYPE_KEYSTORE_SERVICE` values. Set
-both `ANYTYPE_URL` and `ANYTYPE_GRPC_ENDPOINT` explicitly for headless work;
-set `ANY_MCP_CONNECTION_MODE=desktop` and only the desktop HTTP URL for desktop
-MCP work. This prevents a desktop HTTP token from being combined with headless
-gRPC credentials. Ordinary advertised HTTP tools do not require another
+Keep profiles separate with distinct `ANYTYPE_KEYSTORE_SERVICE` values. The
+MCP backend is selected only by `ANY_MCP_CONNECTION_MODE` (`desktop`, the
+default, or `headless`); the user names the backend, the agent sets the
+variable in the MCP host's `env` — never infer it from endpoints. Headless
+also needs the `ANYTYPE_URL` + `ANYTYPE_GRPC_ENDPOINT` pair; desktop needs only
+the HTTP URL and no gRPC endpoint. This prevents a desktop HTTP token from
+being combined with headless gRPC credentials. Ordinary advertised HTTP tools do not require another
 backend-selection question or gRPC preflight.
 
 Read [connection.md](references/connection.md) for installation and the chosen
