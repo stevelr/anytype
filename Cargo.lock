@@ -219,7 +219,6 @@ name = "any-mcp"
 version = "0.5.2"
 dependencies = [
  "anytype",
- "axum",
  "base64 0.23.1",
  "bytes",
  "cap-fs-ext",
@@ -611,8 +610,6 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "hyper",
- "hyper-util",
  "itoa",
  "matchit",
  "memchr",
@@ -621,7 +618,6 @@ dependencies = [
  "pin-project-lite",
  "serde_core",
  "sync_wrapper",
- "tokio",
  "tower",
  "tower-layer",
  "tower-service",

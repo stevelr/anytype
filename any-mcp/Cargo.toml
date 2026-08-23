@@ -63,7 +63,6 @@ benchmark-harness = ["dep:benchmark-flate2"]
 
 [dependencies]
 anytype.workspace = true
-axum.workspace = true
 base64.workspace = true
 # The private benchmark's npm provenance decoder is feature scoped.
 benchmark-flate2 = { package = "flate2", version = "1.1.2", optional = true }
