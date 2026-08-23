@@ -519,6 +519,8 @@ static CLEANUP_TEST_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<CleanupTe
 #[cfg(test)]
 static CLEANUP_TEST_SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> =
     std::sync::OnceLock::new();
+#[cfg(test)]
+const CLEANUP_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn begin_publication(
     lease: &mut StageWriteLease,
@@ -6058,7 +6060,7 @@ mod tests {
         clear_cleanup_pause();
 
         let staged_path = payload_path(&test.root, &allocation.record);
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(CLEANUP_TEST_TIMEOUT, async {
             while !test.staging.state.records.read().await.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -6100,7 +6102,7 @@ mod tests {
         release.notify_one();
         clear_cleanup_pause();
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(CLEANUP_TEST_TIMEOUT, async {
             while !test.staging.state.records.read().await.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -6145,7 +6147,7 @@ mod tests {
         release.notify_one();
         clear_cleanup_pause();
         assert!(task.await.expect_err("coordinator aborted").is_cancelled());
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(CLEANUP_TEST_TIMEOUT, async {
             while record.cleanup_blocked.load(Ordering::Acquire) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }

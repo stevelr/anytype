@@ -8,6 +8,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Give detached artifact cleanup coordinators enough time to finish durable
+  filesystem work in parallel Windows test runs.
 - Select headless connection mode in CI environments provisioned with paired
   HTTP and gRPC endpoints, and keep Windows Rust 1.98 Clippy checks clean.
 - Report failed live-test identifiers when Cargo emits ANSI-colored output,
