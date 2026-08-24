@@ -26,6 +26,43 @@ sys.path.insert(0, str(SCRIPT_ROOT))
 import prepare_skills_release as release  # noqa: E402
 
 
+def mapping_block(document: str, name: str, indent: int) -> str:
+    """Return one indentation-delimited YAML mapping block."""
+    marker = f"{' ' * indent}{name}:"
+    lines = document.splitlines()
+    start = next((index for index, line in enumerate(lines) if line.rstrip() == marker), None)
+    if start is None:
+        raise AssertionError(f"workflow has no {name!r} mapping at indent {indent}")
+    end = len(lines)
+    for index, raw_line in enumerate(lines[start + 1 :], start + 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line_indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if line_indent <= indent:
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+def mapping_entries(document: str, name: str, indent: int) -> dict[str, str]:
+    """Return direct keys and scalar values from one YAML mapping."""
+    block = mapping_block(document, name, indent)
+    entries: dict[str, str] = {}
+    for raw_line in block.splitlines()[1:]:
+        line = raw_line.strip()
+        line_indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if not line or line.startswith("#") or line_indent != indent + 2:
+            continue
+        key, separator, value = line.partition(":")
+        if not separator:
+            raise AssertionError(f"invalid {name} mapping entry {line!r}")
+        if key in entries:
+            raise AssertionError(f"duplicate {name} mapping key {key!r}")
+        entries[key] = value.strip()
+    return entries
+
+
 class SkillsReleaseTests(unittest.TestCase):
     """Exercise release identity, notes, archives, and workflow routing."""
 
@@ -226,14 +263,20 @@ class WorkflowRoutingTests(unittest.TestCase):
         workflow = (REPOSITORY_ROOT / ".github/workflows/skills-release.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("permissions:\n  contents: read", workflow)
-        self.assertRegex(workflow, r"package:\n    permissions:\n      contents: read")
-        self.assertRegex(
-            workflow, r"publish:\n    needs: package\n    permissions:\n      contents: write"
-        )
+        self.assertEqual(mapping_entries(workflow, "on", 0), {"push": ""})
+        self.assertEqual(mapping_entries(workflow, "permissions", 0), {"contents": "read"})
+        package = mapping_block(workflow, "package", 2)
+        self.assertEqual(mapping_entries(package, "permissions", 4), {"contents": "read"})
+        publish = mapping_block(workflow, "publish", 2)
+        self.assertEqual(mapping_entries(workflow, "publish", 2)["needs"], "package")
+        self.assertEqual(mapping_entries(publish, "permissions", 4), {"contents": "write"})
+        for line in workflow.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- uses:") or stripped.startswith("uses:"):
+                reference = stripped.split("@", 1)[1].split()[0]
+                self.assertRegex(reference, r"^[0-9a-f]{40}$", stripped)
         self.assertIn('gh release create "$RELEASE_TAG"', workflow)
         self.assertIn("--latest=false", workflow)
-        self.assertNotIn("workflow_dispatch:", workflow)
 
 
 if __name__ == "__main__":

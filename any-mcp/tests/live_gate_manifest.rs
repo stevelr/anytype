@@ -2,8 +2,6 @@
 
 use std::{collections::BTreeSet, path::Path, process::Command};
 
-use sha2::{Digest, Sha256};
-
 const ADMITTED_IGNORED_LIB_TESTS: &[&str] = &[
     "chat_add_toolset::tests::headless_direct_and_preview_stdio_add_concurrent_replay_and_capacity_paths",
     "chat_delete_toolset::tests::headless_direct_and_spawned_stdio_delete_conflict_and_absence",
@@ -124,14 +122,16 @@ const HEADLESS_STDIO_IGNORED_TESTS: &[&str] = &[
 const DISCUSSIONS_STDIO_IGNORED_TESTS: &[&str] =
     &["cleanup_owned_stable_and_preview_processes_cover_real_discussions"];
 
-/// Released targets of the artifact data-plane platform matrix, as the
-/// portable workflow job declares them.
-const PORTABLE_PLATFORM_MATRIX: [(&str, &str); 5] = [
-    ("ubuntu-latest", "linux-x86_64"),
-    ("ubuntu-24.04-arm", "linux-aarch64"),
-    ("macos-latest", "macos-aarch64"),
-    ("windows-latest", "windows-x86_64"),
-    ("windows-11-arm", "windows-aarch64"),
+/// Released targets the artifact data-plane platform matrix must cover.
+///
+/// Runner labels are deliberately not pinned here: moving a target to a newer
+/// GitHub-hosted image does not change the coverage contract.
+const PORTABLE_PLATFORMS: [&str; 5] = [
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-aarch64",
+    "windows-x86_64",
+    "windows-aarch64",
 ];
 
 /// Whitespace-compacted artifact acceptance and adversarial commands that
@@ -243,10 +243,6 @@ fn test_names(entries: &[&str]) -> BTreeSet<String> {
     entries.iter().copied().map(str::to_owned).collect()
 }
 
-fn occurrences(haystack: &str, needle: &str) -> usize {
-    haystack.match_indices(needle).count()
-}
-
 fn workflow_job<'a>(workflow: &'a str, job: &str, next_job: Option<&str>) -> &'a str {
     let start_marker = format!("  {job}:\n");
     let start = workflow
@@ -265,6 +261,94 @@ fn workflow_job<'a>(workflow: &'a str, job: &str, next_job: Option<&str>) -> &'a
 
 fn compact_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn top_level_mapping<'a>(document: &'a str, name: &str) -> BTreeSet<(&'a str, &'a str)> {
+    let marker = format!("{name}:");
+    let mut in_mapping = false;
+    let mut entries = BTreeSet::new();
+
+    for raw_line in document.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let indent = raw_line.len() - raw_line.trim_start_matches(' ').len();
+        if !in_mapping {
+            if indent == 0 && line == marker {
+                in_mapping = true;
+            }
+            continue;
+        }
+        if indent == 0 {
+            break;
+        }
+        if indent != 2 || line.starts_with('-') {
+            continue;
+        }
+        let (key, value) = line
+            .split_once(':')
+            .unwrap_or_else(|| panic!("invalid {name} mapping entry {line:?}"));
+        assert!(entries.insert((key.trim(), value.trim())));
+    }
+
+    assert!(in_mapping, "workflow has no top-level {name} mapping");
+    entries
+}
+
+fn workflow_crons(workflow: &str) -> Vec<&str> {
+    workflow
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- cron:"))
+        .map(str::trim)
+        .map(|value| value.trim_matches(|character| character == '\'' || character == '"'))
+        .collect()
+}
+
+fn permission_values(workflow: &str) -> Vec<&str> {
+    let lines = workflow.lines().collect::<Vec<_>>();
+    let mut values = Vec::new();
+    for (index, raw_line) in lines.iter().enumerate() {
+        if raw_line.trim() != "permissions:" {
+            continue;
+        }
+        let parent_indent = raw_line.len() - raw_line.trim_start_matches(' ').len();
+        for child in &lines[index + 1..] {
+            let line = child.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let indent = child.len() - child.trim_start_matches(' ').len();
+            if indent <= parent_indent {
+                break;
+            }
+            if indent == parent_indent + 2 {
+                let (_, value) = line
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("invalid permissions entry {line:?}"));
+                values.push(value.trim());
+            }
+        }
+    }
+    values
+}
+
+fn assert_actions_are_commit_pinned(workflow: &str) {
+    let action_lines = workflow.lines().filter(|line| {
+        let line = line.trim();
+        line.starts_with("- uses:") || line.starts_with("uses:")
+    });
+    for line in action_lines {
+        let reference = line
+            .split_once('@')
+            .map(|(_, reference)| reference.split_whitespace().next().unwrap_or(""))
+            .unwrap_or("");
+        assert_eq!(reference.len(), 40, "action is not commit-pinned: {line}");
+        assert!(
+            reference.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "action is not commit-pinned: {line}"
+        );
+    }
 }
 
 #[test]
@@ -400,49 +484,52 @@ fn inventory_comparison_rejects_a_same_count_replacement() {
 
 #[test]
 fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
-    // Every platform row of the matrix runs this gate, and a Windows checkout
-    // may translate the committed line endings. The reviewed representation is
-    // therefore pinned in its canonical newline form.
-    //
-    // Updating after an intentional workflow change: review the workflow
-    // diff, run this test, and replace the pinned digest with the reported
-    // `left` value (equivalently `sha256sum .github/workflows/any-mcp.yml`
-    // on an LF checkout). The structural assertions below are the audit
-    // checklist; extend them when the change adds or removes an invariant.
-    let workflow = include_str!("../../.github/workflows/any-mcp.yml").replace("\r\n", "\n");
-    let workflow = workflow.as_str();
-    let digest = Sha256::digest(workflow.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let workflow = include_str!("../../.github/workflows/any-mcp.yml");
+    let preflight = workflow_job(workflow, "preflight", Some("portable-contracts"));
     assert_eq!(
-        digest, "483582070bf6343b7d38530a4cf60397e527f8524de0e70fd57773e1932035b3",
-        "workflow policy is an exact reviewed representation; audit before updating this digest"
+        top_level_mapping(workflow, "on")
+            .into_iter()
+            .map(|(event, _)| event)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["push", "schedule", "workflow_dispatch"]),
+        "credentialed jobs must only be reachable from reviewed events"
+    );
+    assert_eq!(
+        top_level_mapping(workflow, "permissions"),
+        BTreeSet::from([("contents", "read")]),
+        "workflow-wide token permissions must remain read-only"
+    );
+    assert!(
+        permission_values(workflow)
+            .into_iter()
+            .all(|value| value == "read"),
+        "protected jobs must not widen token permissions"
     );
     let portable = workflow_job(workflow, "portable-contracts", Some("headless-e2e"));
     let live = workflow_job(workflow, "headless-e2e", Some("headless-clean-server-soak"));
     let clean = workflow_job(workflow, "headless-clean-server-soak", None);
 
-    assert!(workflow.contains("  workflow_dispatch:\n"));
-    assert!(!workflow.contains("  pull_request:\n"));
-    assert!(workflow.contains("  push:\n"));
-    assert!(workflow.contains("  schedule:\n"));
-    assert!(workflow.contains("- cron: \"23 2 * * *\""));
+    assert!(workflow.contains("  push:\n    branches:\n      - main\n"));
+    let crons = workflow_crons(workflow);
+    assert!(!crons.is_empty(), "scheduled coverage must remain enabled");
+    assert!(
+        crons
+            .iter()
+            .all(|cron| cron.split_whitespace().count() == 5),
+        "scheduled triggers must use five-field cron expressions"
+    );
+    assert!(preflight.contains("--test live_gate_manifest"));
+    assert!(!portable.contains("--test live_gate_manifest"));
     assert!(!portable.contains("self-hosted"));
-    assert_eq!(occurrences(portable, "if: runner.os == 'Linux'"), 1);
+    assert!(portable.contains("if: runner.os == 'Linux'"));
 
     let compact_portable = compact_whitespace(portable);
-    for (os, platform) in PORTABLE_PLATFORM_MATRIX {
+    for platform in PORTABLE_PLATFORMS {
         assert!(
-            compact_portable.contains(&format!("- os: {os} platform: {platform}")),
+            compact_portable.contains(&format!("platform: {platform}")),
             "portable matrix is missing platform row {platform}"
         );
     }
-    assert_eq!(
-        occurrences(portable, "- os: "),
-        PORTABLE_PLATFORM_MATRIX.len(),
-        "portable matrix carries an undeclared platform row"
-    );
     for suite in PORTABLE_ARTIFACT_SUITES {
         assert!(
             compact_portable.contains(suite),
@@ -450,19 +537,28 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         );
     }
 
-    for (block, predicate) in [
-        (
-            live,
-            "if: ${{ inputs.tier == 'live' || inputs.tier == 'all' || github.event_name == 'push' || github.event_name == 'schedule' }}",
-        ),
-        (
-            clean,
-            "if: ${{ inputs.tier == 'clean-server' || inputs.tier == 'all' }}",
-        ),
+    let compact_live = compact_whitespace(live);
+    for admission in [
+        "inputs.tier == 'live'",
+        "inputs.tier == 'all'",
+        "github.event_name == 'push'",
+        "github.event_name == 'schedule'",
     ] {
-        assert!(compact_whitespace(block).contains(predicate));
+        assert!(compact_live.contains(admission));
+    }
+    let compact_clean = compact_whitespace(clean);
+    for admission in ["inputs.tier == 'clean-server'", "inputs.tier == 'all'"] {
+        assert!(compact_clean.contains(admission));
+    }
+    assert!(!compact_clean.contains("github.event_name"));
+
+    for block in [live, clean] {
         assert!(block.contains("needs: portable-contracts"));
-        assert!(block.contains("runs-on: ubuntu-24.04"));
+        assert!(block.lines().any(|line| {
+            line.trim()
+                .strip_prefix("runs-on:")
+                .is_some_and(|runner| runner.trim().starts_with("ubuntu-"))
+        }));
         assert!(block.contains("provision-headless-server.sh ANY_MCP_HEADLESS"));
         assert!(block.contains("loginctl enable-linger"));
         assert!(!block.contains("tee"));
@@ -471,6 +567,10 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
         assert!(block.contains("ANY_MCP_HEADLESS_EVIDENCE_CONTEXT"));
         assert!(block.contains("ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"));
         assert!(block.contains("retention-days: 7"));
+        assert!(block.contains("Retain scrubbed live-gate failure diagnostics"));
+        assert!(
+            block.contains("${{ env.ANY_MCP_LIVE_DIAGNOSTICS_DIR }}/*-failure-diagnostics.txt")
+        );
         assert!(block.contains("\"$RUNNER_TEMP\"/any-mcp-live-??????"));
         assert!(block.contains("systemctl --user show-environment"));
         for label in ["direct", "stdio", "discussions"] {
@@ -493,81 +593,11 @@ fn workflow_isolates_protected_jobs_to_trusted_events_and_pinned_actions() {
     assert!(!workflow.contains("anytype-headless"));
     assert!(!workflow.contains("command reset --"));
     assert_eq!(
-        occurrences(workflow, "provision-headless-server.sh ANY_MCP_HEADLESS"),
-        2
+        workflow.matches("actions/checkout@").count(),
+        workflow.matches("persist-credentials: false").count(),
+        "every checkout must disable credential persistence"
     );
-    assert_eq!(
-        occurrences(workflow, "run-live-cgroup.sh command auth --"),
-        2
-    );
-    assert_eq!(occurrences(workflow, "--test live_gate_manifest"), 1);
-    assert_eq!(
-        occurrences(workflow, "Retain scrubbed live-gate failure diagnostics"),
-        2
-    );
-    assert_eq!(
-        occurrences(
-            workflow,
-            "${{ env.ANY_MCP_LIVE_DIAGNOSTICS_DIR }}/*-failure-diagnostics.txt"
-        ),
-        2
-    );
-
-    let action_lines = workflow
-        .lines()
-        .filter(|line| {
-            let line = line.trim();
-            line.starts_with("- uses:") || line.starts_with("uses:")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(action_lines.len(), 15);
-    for line in action_lines {
-        let reference = line
-            .split_once('@')
-            .map(|(_, reference)| reference.split_whitespace().next().unwrap_or(""))
-            .unwrap_or("");
-        assert_eq!(reference.len(), 40, "action is not pinned: {line}");
-        assert!(
-            reference.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "action is not pinned: {line}"
-        );
-    }
-    assert_eq!(
-        occurrences(
-            workflow,
-            "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
-        ),
-        4
-    );
-    assert_eq!(
-        occurrences(
-            workflow,
-            "DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25"
-        ),
-        3
-    );
-    assert_eq!(
-        occurrences(
-            workflow,
-            "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
-        ),
-        1
-    );
-    assert_eq!(occurrences(workflow, "run: rustup show"), 1);
-    assert_eq!(
-        occurrences(
-            workflow,
-            "Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c"
-        ),
-        3
-    );
-    assert_eq!(
-        occurrences(
-            workflow,
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
-        ),
-        4
-    );
+    assert_actions_are_commit_pinned(workflow);
 }
 
 #[test]

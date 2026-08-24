@@ -149,10 +149,10 @@ fi
 
 grep -q 'attestations: write' "$finalize_workflow"
 grep -q 'id-token: write' "$finalize_workflow"
-grep -q 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6' "$finalize_workflow"
+grep -Eq '^[[:space:]]+uses: actions/attest@[0-9a-f]{40}([[:space:]]|$)' "$finalize_workflow"
 grep -q 'subject-path: artifacts/\*' "$finalize_workflow"
 grep -q 'anyr-aarch64-apple-darwin.notarization.json' "$finalize_workflow"
 grep -Fq "test \"\$GITHUB_REF\" = \"refs/tags/\$RELEASE_TAG\"" "$finalize_workflow"
 grep -q 'cron:' "$audit_workflow"
-grep -q 'runs-on: macos-15' "$audit_workflow"
+grep -Eq '^    runs-on: macos-(latest|[0-9]+)$' "$audit_workflow"
 grep -q 'verify-release-security.sh' "$audit_workflow"

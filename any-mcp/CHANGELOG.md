@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.5.3] - 2026-08-24
+
+### Changed
+
+- Replace the whole-workflow digest and incidental cron, runner-image, matrix,
+  and action-count pins with semantic checks for trusted triggers, read-only
+  permissions, commit-pinned actions, hosted runners, credential containment,
+  live-test coverage, and private failure evidence. Run this repository-wide
+  policy and inventory gate once during preflight, before the long portable
+  platform matrix.
+
 ## [0.5.2] - 2026-08-22
 
 ### Fixed

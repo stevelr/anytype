@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [0.5.3] - 2026-08-24
 
+### Changed
+
+- Check the protected live workflow by trusted event, read-only permission,
+  hosted-runner, action-pin, and schedule-to-job-guard contracts instead of
+  pinning the daily and weekly cron bytes or a specific runner image.
+
 ### Fixed
 
 - Keep the protected live workflow's daily and weekly schedule guards aligned

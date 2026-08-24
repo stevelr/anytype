@@ -9,6 +9,9 @@ Versioning independently from the Anytype Toolbox Rust crates.
 
 ### Changed
 
+- Check skills-release routing, permissions, dependencies, and action pinning
+  as YAML trust-boundary contracts instead of depending on adjacent workflow
+  lines.
 - Recommend a dedicated headless account invited only to a purpose-built
   LLM-sharing space when users want to limit accessible data, and document
   that space-wide roles do not provide per-object isolation.

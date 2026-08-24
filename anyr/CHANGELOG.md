@@ -6,13 +6,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## 0.5.3
 
-This release adds github attestation to release assets (.tar.xz and .zip files). macOS binaries were already signed.
+This release adds github attestation to release assets (.tar.xz and .zip files). macOS binaries are signed.
 
 ### Changed
 
 - Attest every final GitHub Release asset with tag-scoped build provenance,
   publish the macOS notarization record, and audit published checksums,
   attestations, Developer ID signatures, and notarization evidence daily.
+- Keep live and release workflow fixtures focused on trust boundaries: an exact
+  trusted-event allowlist, read-only default permissions, commit-pinned
+  actions, non-persistent checkout credentials, attestation coverage, and a
+  GitHub-hosted macOS verifier. Action revisions and macOS image upgrades no
+  longer require fixture-only edits.
 
 ## 0.5.2
 

@@ -377,6 +377,105 @@ fn manifest_entry_grammar_rejects_traversal_and_options() {
     }
 }
 
+fn top_level_mapping<'a>(document: &'a str, name: &str) -> BTreeSet<(&'a str, &'a str)> {
+    let marker = format!("{name}:");
+    let mut in_mapping = false;
+    let mut entries = BTreeSet::new();
+
+    for raw_line in document.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let indent = raw_line.len() - raw_line.trim_start_matches(' ').len();
+        if !in_mapping {
+            if indent == 0 && line == marker {
+                in_mapping = true;
+            }
+            continue;
+        }
+        if indent == 0 {
+            break;
+        }
+        if indent != 2 || line.starts_with('-') {
+            continue;
+        }
+        let (key, value) = line
+            .split_once(':')
+            .unwrap_or_else(|| panic!("invalid {name} mapping entry {line:?}"));
+        assert!(entries.insert((key.trim(), value.trim())));
+    }
+
+    assert!(in_mapping, "workflow has no top-level {name} mapping");
+    entries
+}
+
+fn workflow_crons(workflow: &str) -> BTreeSet<&str> {
+    workflow
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- cron:"))
+        .map(str::trim)
+        .map(|value| value.trim_matches(|character| character == '\'' || character == '"'))
+        .collect()
+}
+
+fn permission_values(workflow: &str) -> Vec<&str> {
+    let lines = workflow.lines().collect::<Vec<_>>();
+    let mut values = Vec::new();
+    for (index, raw_line) in lines.iter().enumerate() {
+        if raw_line.trim() != "permissions:" {
+            continue;
+        }
+        let parent_indent = raw_line.len() - raw_line.trim_start_matches(' ').len();
+        for child in &lines[index + 1..] {
+            let line = child.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let indent = child.len() - child.trim_start_matches(' ').len();
+            if indent <= parent_indent {
+                break;
+            }
+            if indent == parent_indent + 2 {
+                let (_, value) = line
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("invalid permissions entry {line:?}"));
+                values.push(value.trim());
+            }
+        }
+    }
+    values
+}
+
+fn guarded_schedules(job: &str) -> BTreeSet<&str> {
+    job.split("github.event.schedule == '")
+        .skip(1)
+        .map(|suffix| {
+            suffix
+                .split_once('\'')
+                .map(|(schedule, _)| schedule)
+                .expect("schedule guard closes its quoted value")
+        })
+        .collect()
+}
+
+fn assert_actions_are_commit_pinned(workflow: &str) {
+    for line in workflow.lines().filter(|line| {
+        let line = line.trim();
+        line.starts_with("- uses:") || line.starts_with("uses:")
+    }) {
+        let reference = line
+            .split_once('@')
+            .map(|(_, reference)| reference.split_whitespace().next().unwrap_or(""))
+            .unwrap_or("");
+        assert_eq!(reference.len(), 40, "action is not commit-pinned: {line}");
+        assert!(
+            reference.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "action is not commit-pinned: {line}"
+        );
+    }
+}
+
 #[test]
 fn protected_live_workflow_requires_inventory_and_trusted_events() {
     let workflow = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -385,12 +484,26 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
         .join(".github/workflows/anytype-api-live.yml");
     let workflow = std::fs::read_to_string(&workflow)
         .unwrap_or_else(|error| panic!("read {}: {error}", workflow.display()));
-    assert!(workflow.contains("  workflow_dispatch:\n"));
-    assert!(!workflow.contains("  pull_request:\n"));
-    assert!(workflow.contains("  push:\n"));
-    assert!(workflow.contains("  schedule:\n"));
-    assert!(workflow.contains("- cron: \"29 10 * * *\""));
-    assert!(workflow.contains("- cron: \"43 11 * * 0\""));
+    assert_eq!(
+        top_level_mapping(&workflow, "on")
+            .into_iter()
+            .map(|(event, _)| event)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["push", "schedule", "workflow_dispatch"]),
+        "credentialed jobs must only be reachable from reviewed events"
+    );
+    assert_eq!(
+        top_level_mapping(&workflow, "permissions"),
+        BTreeSet::from([("contents", "read")]),
+        "workflow-wide token permissions must remain read-only"
+    );
+    assert!(
+        permission_values(&workflow)
+            .into_iter()
+            .all(|value| value == "read"),
+        "protected jobs must not widen token permissions"
+    );
+    assert!(workflow.contains("  push:\n    branches:\n      - main\n"));
     let required = workflow
         .split("  headless-required:\n")
         .nth(1)
@@ -405,12 +518,26 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
         .split("  headless-soak:\n")
         .nth(1)
         .expect("headless-soak block");
+    let required_schedules = guarded_schedules(required);
+    let account_global_schedules = guarded_schedules(account_global);
+    let soak_schedules = guarded_schedules(soak);
+    assert_eq!(required_schedules.len(), 1);
+    assert_eq!(required_schedules, account_global_schedules);
+    assert_eq!(soak_schedules.len(), 1);
+    assert!(required_schedules.is_disjoint(&soak_schedules));
+    assert_eq!(
+        workflow_crons(&workflow),
+        required_schedules.union(&soak_schedules).copied().collect(),
+        "every configured schedule must select one reviewed tier, and every guarded schedule must exist"
+    );
     assert!(required.contains("github.event_name == 'push'"));
-    assert!(required.contains("github.event.schedule == '29 10 * * *'"));
     assert!(required.contains("needs: ignored-test-inventory"));
     assert!(account_global.contains("needs: ignored-test-inventory"));
-    assert!(account_global.contains("github.event.schedule == '29 10 * * *'"));
-    assert!(account_global.contains("runs-on: ubuntu-24.04"));
+    assert!(account_global.lines().any(|line| {
+        line.trim()
+            .strip_prefix("runs-on:")
+            .is_some_and(|runner| runner.trim().starts_with("ubuntu-"))
+    }));
     assert!(account_global.contains("provision-headless-server.sh ANYTYPE_ACCOUNT_GLOBAL"));
     assert!(account_global.contains("ANYTYPE_ACCOUNT_GLOBAL_TEST_PROCESS=1"));
     assert!(
@@ -432,15 +559,17 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
     }
     assert!(!account_global.contains("ANYTYPE_HEADLESS_NETWORK_MODE: connected"));
     assert!(!account_global.contains("self-hosted"));
-    assert!(soak.contains("github.event.schedule == '43 11 * * 0'"));
     for block in [required, soak] {
         assert!(block.contains("needs: ignored-test-inventory"));
         // The disposable per-runner server replaced the retired self-hosted
         // anytype-headless runner.
-        assert!(block.contains("runs-on: ubuntu-24.04"));
+        assert!(block.lines().any(|line| {
+            line.trim()
+                .strip_prefix("runs-on:")
+                .is_some_and(|runner| runner.trim().starts_with("ubuntu-"))
+        }));
         assert!(!block.contains("self-hosted"));
         assert!(block.contains("provision-headless-server.sh ANY_MCP_HEADLESS"));
-        assert!(block.contains("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"));
         assert!(block.contains("python3 anytype-api/scripts/run-live-gate.py"));
         assert!(block.contains("test -f \"/proc/self/fd/$reviewed_fd\""));
         assert!(block.contains("stat -Lc '%d|%i|%s' \"/proc/self/fd/$reviewed_fd\""));
@@ -451,4 +580,10 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
     }
     assert!(!required.contains("ANYTYPE_HEADLESS_NETWORK_MODE: connected"));
     assert!(soak.contains("ANYTYPE_HEADLESS_NETWORK_MODE: connected"));
+    assert_eq!(
+        workflow.matches("actions/checkout@").count(),
+        workflow.matches("persist-credentials: false").count(),
+        "every checkout must disable credential persistence"
+    );
+    assert_actions_are_commit_pinned(&workflow);
 }

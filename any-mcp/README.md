@@ -8,8 +8,9 @@
 embedded in `anyr mcp`. The package does not install an `any-mcp` executable.
 The site guide owns client registration, runtime settings, and operator usage.
 
-Status: prerelease. Portable tests cover Linux, macOS, and Windows; release
-qualification is ongoing.
+Status: prerelease. Portable tests cover Linux, macOS, and Windows. Their
+repository-wide inventory and workflow trust-boundary checks run once in
+preflight before the platform matrix; release qualification is ongoing.
 
 ## Design boundary
 

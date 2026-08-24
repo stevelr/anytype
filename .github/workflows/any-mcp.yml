@@ -42,8 +42,16 @@ jobs:
           persist-credentials: false
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: Cache repository policy build outputs
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: any-mcp-policy
       - name: Verify pinned CI prerequisites
         run: nix develop --command bash .github/scripts/verify-ci-prerequisites.sh --check-repository
+      # This repository-wide inventory and workflow policy is platform-neutral.
+      # Run it once before starting the long cross-platform matrix.
+      - name: Verify live-test inventory and workflow trust boundaries
+        run: nix develop --command cargo test --locked -p any-mcp --test live_gate_manifest
 
   portable-contracts:
     # One row per released target of the artifact data-plane platform matrix:
@@ -87,9 +95,6 @@ jobs:
       - name: Run schema, catalog, token-budget, and unit tests
         timeout-minutes: 30
         run: cargo test --locked -p any-mcp --lib
-
-      - name: Verify the ignored live-test inventory and workflow pins
-        run: cargo test --locked -p any-mcp --test live_gate_manifest
 
       - name: Verify private live-gate helper failure behavior
         if: runner.os == 'Linux'
