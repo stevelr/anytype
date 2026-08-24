@@ -17,6 +17,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Keep the protected live workflow's daily and weekly schedule guards aligned
   with their UTC triggers, and check every scheduled tier in the offline
   workflow-policy test.
+- Correlate the live process-watcher import fixture with a pre-dispatch event
+  barrier and the server response, so queued empty-space fallback events from
+  earlier serial cases cannot complete it. Retain the watcher's redacted error
+  category in failed workflow evidence.
 
 ## [0.5.2] - 2026-08-22
 

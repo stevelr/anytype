@@ -35,6 +35,17 @@ fn live_failure(category: &'static str, stage: &'static str) -> TestError {
     }
 }
 
+fn live_failure_with_error(
+    category: &'static str,
+    stage: &'static str,
+    error: impl std::fmt::Display,
+) -> TestError {
+    eprintln!("process-watcher live {category} failure at {stage}: {error}");
+    TestError::Assertion {
+        message: format!("process-watcher live {category} failure at {stage}"),
+    }
+}
+
 async fn bounded<T>(
     duration: Duration,
     category: &'static str,
@@ -114,6 +125,15 @@ async fn watcher_completes_on_real_import_finish_fallback() {
                         grpc.token(),
                     )
                     .map_err(|_| live_failure("credential", "import-auth"))?;
+                    let generation = watcher
+                        .begin_generation()
+                        .map_err(|error| {
+                            live_failure_with_error(
+                                "event-correlation",
+                                "dispatch-barrier",
+                                error,
+                            )
+                        })?;
                     let response = bounded(
                         EVENT_TIMEOUT,
                         "server",
@@ -126,6 +146,15 @@ async fn watcher_completes_on_real_import_finish_fallback() {
                     if response.error.as_ref().is_some_and(|error| error.code != 0) {
                         return Err(live_failure("server", "import-response"));
                     }
+                    let correlation = watcher
+                        .correlate_generation(generation, &response.collection_id)
+                        .map_err(|error| {
+                            live_failure_with_error(
+                                "event-correlation",
+                                "dispatch-response",
+                                error,
+                            )
+                        })?;
 
                     let request = ProcessWatchRequest::new(ProcessKind::Import, &ctx.space_id)
                         .allow_empty_space_id(true)
@@ -134,10 +163,12 @@ async fn watcher_completes_on_real_import_finish_fallback() {
                         EVENT_TIMEOUT,
                         "event-correlation",
                         "process-wait",
-                        watcher.wait_for_process(&grpc, &request, None),
+                        watcher.wait_for_generation(&grpc, &request, correlation, None),
                     )
                     .await?
-                    .map_err(|_| live_failure("event-correlation", "process-wait"))?;
+                    .map_err(|error| {
+                        live_failure_with_error("event-correlation", "process-wait", error)
+                    })?;
 
                     let process_progress = watcher.progress();
                     if process_progress.import_finish_events == 0 {
