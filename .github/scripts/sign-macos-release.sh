@@ -19,8 +19,6 @@ Options:
   --identifier ID          Code-signing identifier (default: com.stevelr.anyr)
   --keychain PATH          Keychain containing the identity (default: user default)
   --repo OWNER/REPO        GitHub repository (default: repository for this checkout)
-  --finalize-ref REF       Ref whose finalize-release.yml is dispatched
-                           (default: the release tag)
   --keep-work-dir          Keep downloaded and generated files after completion
   -h, --help               Show this help
 
@@ -49,7 +47,6 @@ notary_profile=
 identifier=com.stevelr.anyr
 repository=
 keychain_path=
-finalize_ref=
 keep_work_dir=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -82,11 +79,6 @@ while [[ "$#" -gt 0 ]]; do
     --keychain)
       [[ "$#" -ge 2 ]] || die '--keychain requires a value'
       keychain_path=$2
-      shift 2
-      ;;
-    --finalize-ref)
-      [[ "$#" -ge 2 ]] || die '--finalize-ref requires a value'
-      finalize_ref=$2
       shift 2
       ;;
     --keep-work-dir)
@@ -285,10 +277,9 @@ gh release upload "$release_tag" \
   --repo "$repository" \
   --clobber
 
-[[ -n "$finalize_ref" ]] || finalize_ref=$release_tag
 gh workflow run finalize-release.yml \
   --repo "$repository" \
-  --ref "$finalize_ref" \
+  --ref "$release_tag" \
   --field "source_run_id=$run_id" \
   --field "release_tag=$release_tag"
 

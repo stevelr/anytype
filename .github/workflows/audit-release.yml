@@ -1,0 +1,65 @@
+name: Audit published release
+
+permissions:
+  attestations: read
+  contents: read
+
+on:
+  schedule:
+    - cron: "23 14 * * *"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published anyr release tag; empty selects the latest release
+        required: false
+        type: string
+
+concurrency:
+  group: audit-published-release
+  cancel-in-progress: false
+
+jobs:
+  audit-release:
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      EXPECTED_TEAM_ID: ${{ vars.MACOS_DEVELOPER_TEAM_ID }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - id: release
+        name: Select published release
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_tag=$REQUESTED_TAG
+          if [[ -z "$release_tag" ]]; then
+            release_tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          fi
+          bash .github/scripts/validate-release-tag.sh "$release_tag"
+          test "$(gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = false
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+      - name: Download published assets
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets"
+      - name: Verify checksums, attestations, and macOS trust evidence
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          bash .github/scripts/verify-release-security.sh \
+            "$GITHUB_REPOSITORY" \
+            "$RELEASE_TAG" \
+            "$RUNNER_TEMP/release-assets" \
+            "$EXPECTED_TEAM_ID"

@@ -215,14 +215,6 @@ jq -e \
 grep -q 'release upload' "$MOCK_LOG"
 grep -q -- 'workflow run finalize-release.yml --repo stevelr/anytype --ref anyr-v0.5.0-pre.8' "$MOCK_LOG"
 
-PATH="$mock_bin:$PATH" "$script" \
-  --run-id "$source_run_id" \
-  --identity "Developer ID Application: Test Operator (TESTTEAM01)" \
-  --notary-profile anyr-notary \
-  --repo stevelr/anytype \
-  --finalize-ref main
-grep -q -- 'workflow run finalize-release.yml --repo stevelr/anytype --ref main' "$MOCK_LOG"
-
 if PATH="$mock_bin:$PATH" "$script" \
   --run-id invalid \
   --identity test \

@@ -60,6 +60,7 @@ bash .github/scripts/test-skills-release-ref.sh
 PYTHONDONTWRITEBYTECODE=1 python3 anyr/tests/test_live_workflow_policy.py
 bash .github/scripts/test-package-nix-dist-archive.sh
 bash .github/scripts/test-sign-macos-release.sh
+bash .github/scripts/test-verify-release-security.sh
 
 if "$check_gate"; then
   gate --version

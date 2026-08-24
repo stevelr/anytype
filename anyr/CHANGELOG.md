@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## Unreleased
+
+### Changed
+
+- Attest every final GitHub Release asset with tag-scoped build provenance,
+  publish the macOS notarization record, and audit published checksums,
+  attestations, Developer ID signatures, and notarization evidence daily.
+
 ## 0.5.2
 
 ### Changed

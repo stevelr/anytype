@@ -598,6 +598,17 @@ download against the published checksum, then extract `anyr` to a directory on
 `PATH`. Linux release archives contain the fully static musl binary built by
 the repository flake.
 
+GitHub CLI can also verify that the finalization workflow attested the exact
+archive from the selected release tag:
+
+```sh
+gh attestation verify ARCHIVE \
+  --repo stevelr/anytype \
+  --signer-workflow stevelr/anytype/.github/workflows/finalize-release.yml \
+  --source-ref refs/tags/RELEASE_TAG \
+  --deny-self-hosted-runners
+```
+
 **Windows Powershell**
 
 Download the Windows archive and its checksum from the

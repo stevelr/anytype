@@ -46,6 +46,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
           [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
             printf 'source_run_id must be a positive integer\n' >&2
             exit 2
@@ -260,9 +261,11 @@ jobs:
         run: |
           set -euo pipefail
           signed_binary=$RUNNER_TEMP/signed/anyr-aarch64-apple-darwin.signed
+          signed_manifest=$RUNNER_TEMP/signed/anyr-aarch64-apple-darwin.signed.json
           RELEASE_TAG=$RELEASE_TAG bash .github/scripts/package-nix-dist-archive.sh \
             aarch64-apple-darwin "$signed_binary"
           cp dist-manifest.json target/distrib/aarch64-apple-darwin-dist-manifest.json
+          cp "$signed_manifest" target/distrib/anyr-aarch64-apple-darwin.notarization.json
       - name: Upload signed macOS local artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -270,6 +273,7 @@ jobs:
           path: |
             target/distrib/anyr-aarch64-apple-darwin.tar.xz
             target/distrib/anyr-aarch64-apple-darwin.tar.xz.sha256
+            target/distrib/anyr-aarch64-apple-darwin.notarization.json
             target/distrib/aarch64-apple-darwin-dist-manifest.json
           if-no-files-found: error
 
@@ -406,7 +410,9 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       actions: read
+      attestations: write
       contents: write
+      id-token: write
     outputs:
       host: ${{ steps.host.outputs.manifest }}
     env:
@@ -449,12 +455,8 @@ jobs:
           dist host --tag="$RELEASE_TAG" --steps=upload --steps=release \
             --output-format=json > dist-manifest.json
           echo "manifest=$(jq -c . dist-manifest.json)" >> "$GITHUB_OUTPUT"
-      - name: Upload final assets and publish draft
+      - name: Collect final release assets
         shell: bash
-        env:
-          ANNOUNCEMENT_BODY: ${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}
-          ANNOUNCEMENT_IS_PRERELEASE: ${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease }}
-          ANNOUNCEMENT_TITLE: ${{ fromJson(steps.host.outputs.manifest).announcement_title }}
         run: |
           set -euo pipefail
           mkdir -p artifacts
@@ -463,6 +465,18 @@ jobs:
             ! -name 'dist-manifest.json' \
             -exec cp {} artifacts/ \;
           test "$(find artifacts -type f | wc -l | tr -d ' ')" -gt 0
+      - name: Attest final release assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: artifacts/*
+      - name: Upload final assets and publish draft
+        shell: bash
+        env:
+          ANNOUNCEMENT_BODY: ${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}
+          ANNOUNCEMENT_IS_PRERELEASE: ${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease }}
+          ANNOUNCEMENT_TITLE: ${{ fromJson(steps.host.outputs.manifest).announcement_title }}
+        run: |
+          set -euo pipefail
           gh release upload "$RELEASE_TAG" artifacts/* --clobber
           gh release delete-asset "$RELEASE_TAG" anyr-aarch64-apple-darwin.signed --yes
           gh release delete-asset "$RELEASE_TAG" anyr-aarch64-apple-darwin.signed.json --yes

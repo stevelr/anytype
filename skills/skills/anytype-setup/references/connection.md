@@ -63,8 +63,19 @@ if ($actual -ne $expected) { throw "anyr archive SHA-256 mismatch" }
 The adjacent checksum detects a corrupted or substituted download only when
 the checksum itself remains trustworthy; because both files are published in
 the same release, it does not independently prove publisher identity. On a
-platform without a native code signature, disclose that residual risk before
-installing or use the pinned Cargo source-build method.
+platform without a native code signature, verify the GitHub build-provenance
+attestation before installing or use the pinned Cargo source-build method:
+
+```sh
+gh attestation verify ARCHIVE \
+  --repo stevelr/anytype \
+  --signer-workflow stevelr/anytype/.github/workflows/finalize-release.yml \
+  --source-ref refs/tags/RELEASE_TAG \
+  --deny-self-hosted-runners
+```
+
+Stop if verification does not resolve the archive digest to the selected tag
+and finalization workflow.
 
 After extracting a macOS archive, verify the same Developer ID signature and
 Apple notarization assessment used by the Homebrew installation:

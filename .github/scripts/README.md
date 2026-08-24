@@ -91,7 +91,28 @@ Developer ID signature from the local keychain, submits it to Apple's notary
 service, uploads the signed handoff to a draft release, and dispatches the
 finalization workflow. The finalizer verifies the signature and notarization,
 rebuilds the macOS archive and global checksums, validates the installers, and
-publishes the draft.
+publishes the draft. Before publication, it creates GitHub build-provenance
+attestations for every downloadable asset. The release retains an attested
+macOS notarization record that binds the signed binary hash to the Developer ID
+identity, Apple submission ID, source commit, and release tag.
+
+`Audit published release` runs daily on a GitHub-hosted macOS runner. It
+downloads the latest public release, verifies every checksum and attestation,
+restricts accepted attestations to the tag-triggered finalization workflow, and
+rechecks the macOS binary's Developer ID signature and Gatekeeper assessment.
+You can dispatch the workflow with a release tag to audit a specific release.
+
+Consumers can verify an individual asset with GitHub CLI. Pin the signer
+workflow and source tag so another workflow in the repository cannot satisfy
+the provenance check:
+
+```sh
+gh attestation verify ASSET \
+  --repo stevelr/anytype \
+  --signer-workflow stevelr/anytype/.github/workflows/finalize-release.yml \
+  --source-ref refs/tags/RELEASE_TAG \
+  --deny-self-hosted-runners
+```
 
 ## One-time macOS setup
 
@@ -149,7 +170,8 @@ Use `--keychain PATH` when the identity is outside the default user keychain.
 The command refuses failed or non-tag workflow runs, a mismatched tag or hash,
 a non-Developer ID signature, a Team ID mismatch, and rejected notarization.
 It creates or updates only a draft release; `Finalize signed release` publishes
-it after all regenerated artifacts pass validation.
+it after all regenerated artifacts pass validation and receive provenance
+attestations.
 
 The notarization submission and GitHub upload require network access. The
 private key and the stored Apple credentials never leave the local keychain.

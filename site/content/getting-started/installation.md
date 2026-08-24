@@ -29,6 +29,16 @@ Download the archive for your architecture and its checksum from the
 download against the published checksum, then extract `anyr` to a directory on
 `PATH`.
 
+GitHub CLI can also verify the release archive's tag-scoped build provenance:
+
+```sh
+gh attestation verify ARCHIVE \
+  --repo stevelr/anytype \
+  --signer-workflow stevelr/anytype/.github/workflows/finalize-release.yml \
+  --source-ref refs/tags/RELEASE_TAG \
+  --deny-self-hosted-runners
+```
+
 ### Windows PowerShell
 
 Download the Windows archive and its checksum from the
