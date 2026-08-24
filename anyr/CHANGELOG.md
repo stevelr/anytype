@@ -6,7 +6,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## 0.5.3
 
-This release adds github attestation to release assets (.tar.xz and .zip files). macOS binaries are signed.
+This release adds github attestation to release assets (.tar.xz and .zip files), fixes a Windows test race condition (tokio thread releasing dir handle), and adds Security and vulnerability reporting policy to repo.
 
 ### Changed
 
