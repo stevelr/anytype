@@ -1,6 +1,6 @@
 ---
 name: anytype-setup
-description: Install anyr and, when needed, the Anytype headless CLI; connect safely to an existing desktop app or headless server. Use for authentication, endpoint selection, connection diagnosis, and bounded credential recovery; not ordinary object workflows.
+description: Install anyr, then connect safely to an existing desktop app or operator-installed Anytype headless server. Use for authentication, endpoint selection, connection diagnosis, and bounded credential recovery; not ordinary object workflows.
 ---
 
 # Anytype connection setup
@@ -9,6 +9,12 @@ Use this skill to install `anyr`, authenticate, select a backend, or recover a
 failed connection. It establishes one connection profile at a time. Use the
 `anyr` skill for direct CLI work after the connection is healthy, and
 `any-mcp` when a configured MCP connection advertises the required tool.
+
+Installing an executable changes the user's machine. Check for an existing
+executable first. If it is absent, present the supported methods and obtain
+approval for one method and an exact version before installing. Do not select
+`latest`, execute a remote installer script, use a fork or mirror, extract an
+unverified archive, or continue after a checksum or signature failure.
 
 Choose the backend before writing credentials:
 
@@ -26,9 +32,10 @@ the HTTP URL and no gRPC endpoint. This prevents a desktop HTTP token from
 being combined with headless gRPC credentials. Ordinary advertised HTTP tools do not require another
 backend-selection question or gRPC preflight.
 
-Read [connection.md](references/connection.md) for installation and the chosen
-desktop or headless procedure. Read its recovery section when an MCP or CLI
-reports a structured missing, unavailable, or authentication backend error.
+Read [connection.md](references/connection.md) for approved installation,
+artifact verification, and the chosen desktop or headless procedure. Read its
+recovery section when an MCP or CLI reports a structured missing, unavailable,
+or authentication backend error.
 
 Do not print, request in chat, copy into files, clear, or rotate credentials.
 Restart or reconnect the MCP process after changing connection selectors or

@@ -1,14 +1,99 @@
-# Connect `anyr` to Anytype
+# Install and connect `anyr`
 
-Install a released `anyr` binary from the
-[Anytype Toolbox releases](https://github.com/stevelr/anytype/releases), use
-`brew install stevelr/tap/anyr` on macOS, or use `cargo install anyr` when a
-Rust toolchain is appropriate. Confirm the executable before changing any
-connection state:
+Check for an existing executable before changing package state:
 
 ```sh
+command -v anyr
 anyr --version
 ```
+
+If `anyr` is absent, ask the operator to select Homebrew, an exact release
+archive, or Cargo and approve the exact version. Do not select `latest`, run a
+remote installer script, use a fork or mirror, or continue after verification
+fails.
+
+## Install `anyr`
+
+### Homebrew on macOS
+
+After approval, use the maintained tap:
+
+```sh
+brew install stevelr/tap/anyr
+anyr --version
+codesign --verify --strict --verbose=2 "$(command -v anyr)"
+codesign --display --verbose=4 "$(command -v anyr)"
+spctl --assess --type execute --verbose=2 "$(command -v anyr)"
+```
+
+The formula verifies the archive SHA-256 before installation. It installs the
+same macOS binary contained in the direct-download archive; that binary is
+signed with an Apple Developer ID certificate and notarized by Apple. Require
+`codesign --display` to show an `Authority=Developer ID Application:` entry and
+require `codesign --verify` to succeed. Treat `spctl` as a supplementary
+assessment: macOS 15 may report that a valid standalone executable does not
+seem to be an app, but stop on any other rejection.
+
+### Exact release archive
+
+Select one immutable `anyr-vVERSION` release and the archive for the detected
+platform from the
+[Anytype Toolbox releases](https://github.com/stevelr/anytype/releases). Download
+both the archive and its adjacent `.sha256` file from that exact release. Do
+not extract or execute the archive until one platform-appropriate check passes
+in the directory containing both files:
+
+```sh
+# Linux
+sha256sum --check ARCHIVE.sha256
+
+# macOS
+shasum -a 256 --check ARCHIVE.sha256
+```
+
+On Windows PowerShell, compare the sidecar's first field with `Get-FileHash`
+and stop on a mismatch:
+
+```powershell
+$expected = ((Get-Content "ARCHIVE.sha256" -Raw) -split '\s+')[0].ToLowerInvariant()
+$actual = (Get-FileHash "ARCHIVE" -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "anyr archive SHA-256 mismatch" }
+```
+
+The adjacent checksum detects a corrupted or substituted download only when
+the checksum itself remains trustworthy; because both files are published in
+the same release, it does not independently prove publisher identity. On a
+platform without a native code signature, disclose that residual risk before
+installing or use the pinned Cargo source-build method.
+
+After extracting a macOS archive, verify the same Developer ID signature and
+Apple notarization assessment used by the Homebrew installation:
+
+```sh
+codesign --verify --strict --verbose=2 ./anyr
+codesign --display --verbose=4 ./anyr
+spctl --assess --type execute --verbose=2 ./anyr
+```
+
+Require `codesign --display` to show an `Authority=Developer ID Application:`
+entry and require `codesign --verify` to succeed. Treat `spctl` as a
+supplementary assessment: macOS 15 may report that a valid standalone
+executable does not seem to be an app, but stop on any other rejection.
+
+Move the verified executable to the approved location on `PATH`, then run
+`anyr --version` and require the selected version.
+
+### Cargo
+
+When the operator chooses a Rust source build, pin the requested release and
+its lockfile:
+
+```sh
+cargo install anyr --locked --version '=VERSION'
+anyr --version
+```
+
+Stop if the reported version differs from the approved version.
 
 Choose one backend while configuring or switching a connection. Ask when that
 choice is genuinely ambiguous; an ordinary operation on an already configured
@@ -53,13 +138,17 @@ credentials to this profile.
 
 ## Headless
 
-Install the [Anytype CLI](https://github.com/anyproto/anytype-cli) by following
-its release instructions when it is absent, and confirm its executable before
+Check for the [Anytype CLI](https://github.com/anyproto/anytype-cli) before
 changing connection state:
 
 ```sh
 anytype --help
 ```
+
+If it is absent, show the operator the official project and stop. Do not run a
+remote installer script or download and execute an upstream release asset from
+this workflow. Resume after the operator installs an approved version and
+`anytype --help` succeeds.
 
 Start the operator's existing Anytype CLI account with `anytype serve`, then
 use a separate headless profile:

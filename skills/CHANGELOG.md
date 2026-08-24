@@ -5,6 +5,21 @@ All notable changes to Anytype Toolbox Skills are documented in this file.
 The format is based on Keep a Changelog, and this package uses Semantic
 Versioning independently from the Anytype Toolbox Rust crates.
 
+## [Unreleased]
+
+### Changed
+
+- Treat Anytype objects, chat messages, and fetched pages as untrusted data
+  that cannot authorize commands, tool calls, or follow-on mutations.
+- Require stable-author admission for unattended `save-links` processing and
+  constrain URL parsing and web extraction to a credential-free fetch boundary.
+- Require operator-approved, version-pinned `anyr` installation, verify direct
+  release archives with their SHA-256 sidecars, and verify the shared Apple
+  Developer ID signature of direct and Homebrew macOS binaries while reporting
+  Apple's notarization assessment.
+- Leave installation of a missing upstream Anytype headless CLI to the operator
+  instead of executing its remote installer or release assets.
+
 ## [0.1.1]
 
 ### Added

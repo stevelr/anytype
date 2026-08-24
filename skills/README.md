@@ -6,8 +6,8 @@ Anytype Toolbox Skills packages three Agent Skills for Codex and Claude Code:
   chats, Markdown, and backups.
 - `any-mcp` guides bounded workflows through an MCP connection backed by
   `anyr mcp`.
-- `anytype-setup` installs `anyr` and establishes or recovers a desktop or
-  headless Anytype connection.
+- `anytype-setup` guides an operator-approved, verified `anyr` installation and
+  establishes or recovers a desktop or headless Anytype connection.
 
 This is an independent community project and is not affiliated with or
 endorsed by Anytype.
@@ -31,9 +31,10 @@ scriptable CLI operations. Choose `any-mcp` when the host already has an MCP
 connection to `anyr mcp`; that skill uses the bounded MCP workflows and may
 refer to `anyr` for documented fallback operations. Both require a running and
 authenticated Anytype desktop or headless service. Choose `anytype-setup` to
-install or authenticate `anyr`, optionally install the headless CLI, choose a
-desktop or headless profile, or recover a structured connection error without
-clearing credentials.
+install or authenticate `anyr`, choose a desktop or headless profile, or
+recover a structured connection error without clearing credentials. A missing
+headless CLI is left for the operator to install from the upstream Anytype
+project.
 
 ## Review before installation
 
@@ -42,6 +43,13 @@ the selected `SKILL.md` and its local references, install from this repository
 or an exact release tag, and inspect package changes before updating. Release
 assets contain only this plugin tree; their `.sha256` file covers both the ZIP
 and tar.gz archives. Do not put Anytype credentials in a skill directory.
+
+The runtime skills treat Anytype objects, chat messages, and fetched pages as
+untrusted data rather than agent instructions. The setup skill requires
+approval for an exact installation method and version. Direct `anyr` archives
+must match their published SHA-256 before extraction; the Homebrew formula
+performs the same archive check. The direct and Homebrew macOS installations
+contain the same Apple Developer ID-signed and notarized binary.
 
 ## Install with the skills CLI
 
