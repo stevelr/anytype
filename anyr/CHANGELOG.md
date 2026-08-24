@@ -18,6 +18,8 @@ This release adds github attestation to release assets (.tar.xz and .zip files),
   actions, non-persistent checkout credentials, attestation coverage, and a
   GitHub-hosted macOS verifier. Action revisions and macOS image upgrades no
   longer require fixture-only edits.
+- Use native SHA-256 tooling on Linux and macOS when auditing release assets,
+  while preserving checksum verification on both platforms.
 
 ## 0.5.2
 

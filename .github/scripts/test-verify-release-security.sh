@@ -9,6 +9,17 @@ audit_workflow=$repository_root/.github/workflows/audit-release.yml
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/test-verify-release-security.XXXXXX")
 trap 'rm -rf "$test_root"' EXIT
 
+sha256_files() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$@"
+  else
+    printf 'SHA-256 checksum tool is required\n' >&2
+    return 127
+  fi
+}
+
 mock_bin=$test_root/bin
 fixture_dir=$test_root/fixture
 archive_stage=$test_root/archive-stage/anyr-aarch64-apple-darwin
@@ -27,7 +38,7 @@ tar -cJf "$fixture_dir/anyr-aarch64-apple-darwin.tar.xz" \
 printf 'windows archive\n' > "$fixture_dir/anyr-x86_64-pc-windows-msvc.zip"
 printf 'installer\n' > "$fixture_dir/anyr-installer.sh"
 
-macos_hash=$(shasum -a 256 "$archive_stage/anyr" | awk '{print $1}')
+macos_hash=$(sha256_files "$archive_stage/anyr" | awk '{print $1}')
 jq -n \
   --arg repository "$repository" \
   --arg release_tag "$release_tag" \
@@ -53,12 +64,12 @@ for asset in \
   anyr-aarch64-apple-darwin.tar.xz \
   anyr-x86_64-pc-windows-msvc.zip
 do
-  asset_hash=$(shasum -a 256 "$fixture_dir/$asset" | awk '{print $1}')
+  asset_hash=$(sha256_files "$fixture_dir/$asset" | awk '{print $1}')
   printf '%s *%s\n' "$asset_hash" "$asset" > "$fixture_dir/$asset.sha256"
 done
 (
   cd "$fixture_dir"
-  shasum -a 256 \
+  sha256_files \
     anyr-aarch64-apple-darwin.tar.xz \
     anyr-x86_64-pc-windows-msvc.zip > sha256.sum
 )

@@ -28,6 +28,28 @@ fi
 script_dir=$(cd "$(dirname "$0")" && pwd)
 bash "$script_dir/validate-release-tag.sh" "$release_tag"
 
+sha256_files() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$@"
+  else
+    printf 'SHA-256 checksum tool is required\n' >&2
+    return 127
+  fi
+}
+
+sha256_check() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum --check "$1"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 --check "$1"
+  else
+    printf 'SHA-256 checksum tool is required\n' >&2
+    return 127
+  fi
+}
+
 asset_count=$(find "$asset_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
 if [[ "$asset_count" -eq 0 ]]; then
   printf 'release contains no downloaded assets\n' >&2
@@ -55,9 +77,9 @@ if [[ "$checksum_count" -eq 0 || ! -f "$asset_dir/sha256.sum" ]]; then
   exit 1
 fi
 while IFS= read -r checksum_path; do
-  (cd "$asset_dir" && shasum -a 256 --check "${checksum_path##*/}")
+  (cd "$asset_dir" && sha256_check "${checksum_path##*/}")
 done < "$checksum_list"
-(cd "$asset_dir" && shasum -a 256 --check sha256.sum)
+(cd "$asset_dir" && sha256_check sha256.sum)
 
 macos_archive=$asset_dir/anyr-aarch64-apple-darwin.tar.xz
 notarization_manifest=$asset_dir/anyr-aarch64-apple-darwin.notarization.json
@@ -75,7 +97,7 @@ if [[ ! -f "$macos_binary" ]]; then
   exit 1
 fi
 
-signed_hash=$(shasum -a 256 "$macos_binary" | awk '{print $1}')
+signed_hash=$(sha256_files "$macos_binary" | awk '{print $1}')
 jq -e \
   --arg repository "$repository" \
   --arg release_tag "$release_tag" \
