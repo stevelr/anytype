@@ -952,6 +952,17 @@ mod tests {
         }
     }
 
+    /// Removes a fixture tree without occupying the async runtime thread.
+    ///
+    /// A decision publication may wake its waiter before the detached
+    /// supervisor drops its last capability. The cleanup worker may retry
+    /// while that supervisor finishes on a current-thread runtime.
+    async fn remove_temporary_tree_after_detached_work(base: std::path::PathBuf) {
+        tokio::task::spawn_blocking(move || remove_temporary_tree(base))
+            .await
+            .expect("fixture cleanup worker");
+    }
+
     fn relative(value: &str) -> RelativeNativePath {
         RelativeNativePath::from_utf8(value).expect("relative path")
     }
@@ -2018,7 +2029,7 @@ mod tests {
             drop(decision);
             drop(gate);
             drop(registry);
-            remove_temporary_tree(base);
+            remove_temporary_tree_after_detached_work(base).await;
         }
     }
 

@@ -116,6 +116,10 @@ not fetch caller-supplied URLs.
   full upstream responses.
 - HTTP authentication, sessions, body collection, request concurrency, and
   graceful drain all have finite resource boundaries.
+- HTTP principals isolate session, cursor, and mutation replay state. They
+  share the process tool catalog, Anytype credentials, and space policy, so a
+  remote process serves one trusted operator identity. Separate processes and
+  Anytype accounts establish separate trust boundaries.
 - Artifact idempotency records distinguish definitive pre-dispatch failures
   from uncertain publication or mutation outcomes.
 

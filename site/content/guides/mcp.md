@@ -107,6 +107,26 @@ HTTP-only variables are rejected unless `ANY_MCP_TRANSPORT=streamable-http`.
 The listener is deliberately local; put a separately managed TLS reverse proxy
 in front of it for remote access.
 
+### HTTP trust model
+
+One `anyr mcp` process uses one tool catalog, one Anytype credential set, and
+one space policy. HTTP authentication binds sessions to a principal and
+partitions cursor and mutation replay state. Every accepted principal still
+receives the process-wide Anytype authority.
+
+Streamable HTTP currently supports one trusted operator identity. Do not give
+mutually untrusted users access to the same process. Static-token holders are
+the same operator for authorization purposes. In OAuth mode, configure the
+authorization server so only one trusted subject can obtain the required
+audience and scope. `any-mcp` verifies the issuer, audience, scope, expiry, and
+subject grammar, but this release does not restrict the subject to an operator
+configured in `any-mcp`.
+
+Run a separate operating-system-isolated process, configuration, keystore, and
+Anytype account for each trust boundary. To limit the data available through a
+process, use a dedicated headless account invited only to a purpose-built
+sharing space as described in [Connections and gRPC](/reference/connections/#limit-model-visible-data).
+
 ## Catalog and runtime settings
 
 | Variable                          | Values and default                                                    |

@@ -14,6 +14,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   live-test coverage, and private failure evidence. Run this repository-wide
   policy and inventory gate once during preflight, before the long portable
   platform matrix.
+- Document the Streamable HTTP single-operator trust model. Authenticated
+  principals receive separate session and replay state while sharing the
+  process catalog, Anytype credentials, and space policy.
+
+### Fixed
+
+- Keep Windows client-root panic and spawn-failure fixtures from blocking the
+  current-thread Tokio runtime during retrying directory cleanup.
 
 ## [0.5.2] - 2026-08-22
 
