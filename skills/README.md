@@ -16,15 +16,33 @@ endorsed by Anytype.
 
 Install `anyr`, connect it to a running Anytype desktop or headless service,
 and configure endpoint-specific credentials. The desktop app is sufficient
-for HTTP-backed workflows; install the Anytype headless CLI only for the
-documented gRPC-backed tools. Use `anytype-setup` for this one-time connection
-work and for bounded recovery. The `any-mcp` skill also requires an MCP host
-with a configured `anyr mcp` connection. Some fallback recipes use the `anyr`
-executable directly; the `save-links` recipe additionally uses Trafilatura for
-web-page extraction.
+for HTTP-backed workflows. Install the Anytype headless CLI for documented
+gRPC-backed tools or for a dedicated-account data boundary. Use
+`anytype-setup` for this one-time connection work and for bounded recovery.
+The `any-mcp` skill also requires an MCP host with a configured `anyr mcp`
+connection. Some fallback recipes use the `anyr` executable directly; the
+`save-links` recipe additionally uses Trafilatura for web-page extraction.
 
 The package contains instructions and metadata. It does not contain Anytype
 credentials or start an MCP server when installed.
+
+## Choose the data boundary before connection
+
+Installing these skills does not connect to Anytype or expose Anytype data.
+The account selected during later CLI or MCP setup determines which spaces the
+agent can access.
+
+If you want to limit data that can become visible to a model, run the Anytype
+CLI as a dedicated headless account and invite that account only to a
+purpose-built sharing space. Keep your personal, team, and family spaces on
+your desktop account, then move or copy selected content into the sharing
+space from the desktop app. Running the headless server with the same account
+as the desktop app does not provide this separation.
+
+Reader, Writer, and Owner permissions apply to an entire space. Anytype does
+not provide per-object permissions within a space, so treat everything in the
+sharing space as available to the connected agent according to its role. Use
+`anytype-setup` for the isolated headless procedure.
 
 Choose `anyr` when the agent can run the `anyr` executable and you want direct,
 scriptable CLI operations. Choose `any-mcp` when the host already has an MCP

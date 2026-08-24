@@ -1,7 +1,7 @@
 {
   "name": "anytype-toolbox-skills",
   "version": "0.1.1",
-  "description": "Agent Skills for Anytype setup, CLI automation, and any-mcp workflows.",
+  "description": "Agent Skills for Anytype setup, including a dedicated headless account for one LLM-sharing space, plus anyr and any-mcp workflows.",
   "author": {
     "name": "Steve Schoettler",
     "email": "stevelr-git@pm.me",
@@ -14,14 +14,14 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Anytype Toolbox Skills",
-    "shortDescription": "Set up and automate Anytype with anyr and any-mcp",
-    "longDescription": "Set up an Anytype connection, use the anyr CLI, or work through a configured any-mcp connection.",
+    "shortDescription": "Limit Anytype access with a dedicated headless account",
+    "longDescription": "Set up desktop access or a dedicated headless account invited only to an LLM-sharing space, then use anyr or any-mcp.",
     "developerName": "Steve Schoettler",
     "category": "Productivity",
     "capabilities": [],
     "websiteURL": "https://docs.anytype-toolbox.org/",
     "defaultPrompt": [
-      "Use anytype-setup to connect anyr to my existing Anytype desktop app.",
+      "Use anytype-setup to connect a dedicated headless Anytype account only to an LLM-sharing space.",
       "Use anyr to find and update an Anytype document.",
       "Use any-mcp to organize content in Anytype."
     ]

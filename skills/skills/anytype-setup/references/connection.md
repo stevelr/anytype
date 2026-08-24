@@ -110,6 +110,34 @@ Choose one backend while configuring or switching a connection. Ask when that
 choice is genuinely ambiguous; an ordinary operation on an already configured
 MCP connection uses its selected mode without asking again.
 
+## Limit model-visible data
+
+Use a separate Anytype CLI account when the operator wants to keep personal,
+team, or family spaces outside the agent's reach. Provision that account in an
+isolated headless profile, create a purpose-built sharing space from the
+desktop app, and invite the headless account only to that space. Running a
+headless server with the desktop account does not reduce the spaces available
+to the account.
+
+Choose the least space role that supports the workflow. Reader permits reads;
+Writer permits content changes. Owner is unnecessary for ordinary agent work.
+Each role applies across the space because Anytype has no per-object permission
+boundary within a space. Content moved or copied into the sharing space should
+therefore be treated as available to the connected agent and model.
+
+Keep the invitation link out of chat, logs, and skill files. After the
+operator supplies it through a protected local mechanism, join during
+headless initialization:
+
+```sh
+anyr init-cli --join "$INVITE_LINK"
+```
+
+Do not use `--force` in a profile that contains an account the operator wants
+to preserve. A dedicated operating-system account, home directory, or
+equivalent Anytype CLI profile prevents the new headless account from reusing
+the desktop account's configuration.
+
 ## Desktop
 
 Start the existing Anytype desktop application. Select an isolated desktop

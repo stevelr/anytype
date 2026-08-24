@@ -75,6 +75,7 @@ The trigger metadata was also reviewed against this prompt matrix:
 | Use `anyr` to list Anytype pages from the command line | `anyr`          |
 | Search Anytype through the configured MCP connection   | `any-mcp`       |
 | Install `anyr` and connect it to the desktop app       | `anytype-setup` |
+| Limit model access to a dedicated Anytype space        | `anytype-setup` |
 | Diagnose a missing MCP tool, then use a CLI fallback   | both            |
 | Refactor an unrelated Rust parser                      | neither         |
 
@@ -82,7 +83,8 @@ The `anyr` skill delegates installation, authentication, endpoint changes, and
 backend recovery to `anytype-setup`. The `any-mcp` prerequisite section tells
 the agent to report an absent MCP connection or optional toolset instead of
 inventing a tool or starting a second server. The setup skill distinguishes
-desktop HTTP from paired headless backends and preserves saved credentials.
+desktop HTTP from paired headless backends, preserves saved credentials, and
+recommends a dedicated headless account for a space-scoped data boundary.
 
 The release workflow builds all platform archives and exports the Nix-built
 macOS binary as a signing input. It does not publish a GitHub Release. The

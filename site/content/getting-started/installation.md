@@ -14,6 +14,19 @@ You need either a running Anytype desktop app or a separately installed,
 running Anytype headless CLI server. Anytype Toolbox connects to that existing
 environment; it does not install or start Anytype itself.
 
+## Choose the account boundary
+
+The selected Anytype account determines which spaces can supply data to CLI
+and MCP workflows. If you want to limit data that can become visible to a
+model, use a dedicated headless account and invite it only to a purpose-built
+sharing space. Keep personal, team, and family spaces on your desktop account,
+then move or copy selected content into the sharing space.
+
+Reader, Writer, and Owner roles apply to the whole space. Anytype does not
+provide per-object permissions within a space. See the
+[connection guide](/reference/connections/#limit-model-visible-data) for the
+isolated setup and invitation flow.
+
 ## Install `anyr`
 
 ### macOS with Homebrew
@@ -67,7 +80,8 @@ credential sources.
 
 Install the separate
 [Anytype headless CLI](https://github.com/anyproto/anytype-cli) when you need
-its gRPC-backed capabilities. Start that server, then run:
+its gRPC-backed capabilities or a dedicated-account data boundary. Start that
+server, then run:
 
 ```sh
 anyr init-cli

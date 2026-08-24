@@ -25,6 +25,12 @@ headless service must have valid endpoint-specific credentials. The examples
 use `jq` for JSON processing. OpenSSL is optional and appears only in the
 encrypted file-keystore example.
 
+The configured Anytype account determines the accessible spaces, including
+the scope of a global search. When the user wants to limit model-visible data,
+use `anytype-setup` to configure a dedicated headless account invited only to
+a purpose-built sharing space. Anytype space roles do not provide per-object
+isolation within that space.
+
 ## Mental model
 
 - Everything lives in a **space**. Commands take a space **name or id**

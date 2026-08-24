@@ -8,6 +8,38 @@ weight = 10
 Anytype Toolbox uses HTTP for the public REST API and gRPC for capabilities the
 REST API does not expose. The transports authenticate separately.
 
+## Limit model-visible data
+
+An Anytype connection can read from the spaces available to its account. A
+desktop account may already belong to personal, team, and family spaces, so
+connecting an agent to that account can make those spaces available to its
+tools. Installing a skill alone does not connect to Anytype or grant this
+access.
+
+For a smaller data boundary, provision a dedicated Anytype CLI account in an
+isolated headless profile. Create a purpose-built sharing space in the desktop
+app, invite only the headless account, and move or copy selected content into
+that space. Running a headless server with the desktop account does not reduce
+the account's existing space memberships.
+
+Choose Reader for read workflows and Writer when the workflow must change
+content. Owner is unnecessary for ordinary agent work. These roles apply to
+the entire space. Anytype does not provide per-object permissions within a
+space, so treat every object and file in the sharing space as available to the
+connected agent according to its role. MCP read-only mode limits mutations but
+does not hide content.
+
+Keep the invitation link out of chat and logs. Supply it locally during setup:
+
+```sh
+anyr init-cli --join "$INVITE_LINK"
+```
+
+Use a dedicated operating-system account, home directory, or equivalent
+Anytype CLI profile so initialization cannot reuse the desktop account's
+configuration. Do not use `--force` in a profile containing an account you
+want to preserve.
+
 ## Endpoint defaults
 
 ### `ANYTYPE_URL` or `--url URL`

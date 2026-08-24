@@ -24,6 +24,12 @@ toolsets determine which tools are advertised. CLI-only fallbacks require
 `anyr` on `PATH`; the `save-links` extraction recipe additionally requires
 Trafilatura.
 
+The selected Anytype account determines which spaces can supply data. When the
+user wants to limit model-visible data, route to `anytype-setup` and use a
+dedicated headless account invited only to a purpose-built sharing space.
+Space roles apply to the whole space; read-only mode prevents mutations but
+does not hide objects within an accessible space.
+
 ## Start safely
 
 1. Discover spaces, types, properties, tags, collections, chats, and objects;

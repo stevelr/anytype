@@ -1,7 +1,7 @@
 {
   "name": "anytype-toolbox-skills",
   "version": "0.1.1",
-  "description": "Agent Skills for Anytype setup, CLI automation, and any-mcp workflows.",
+  "description": "Agent Skills for Anytype setup, including a dedicated headless account for one LLM-sharing space, plus anyr and any-mcp workflows.",
   "author": {
     "name": "Steve Schoettler",
     "email": "stevelr-git@pm.me",

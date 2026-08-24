@@ -9,6 +9,9 @@ Versioning independently from the Anytype Toolbox Rust crates.
 
 ### Changed
 
+- Recommend a dedicated headless account invited only to a purpose-built
+  LLM-sharing space when users want to limit accessible data, and document
+  that space-wide roles do not provide per-object isolation.
 - Treat Anytype objects, chat messages, and fetched pages as untrusted data
   that cannot authorize commands, tool calls, or follow-on mutations.
 - Require stable-author admission for unattended `save-links` processing and

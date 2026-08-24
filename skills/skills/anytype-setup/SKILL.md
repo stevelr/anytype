@@ -1,6 +1,6 @@
 ---
 name: anytype-setup
-description: Install anyr, then connect safely to an existing desktop app or operator-installed Anytype headless server. Use for authentication, endpoint selection, connection diagnosis, and bounded credential recovery; not ordinary object workflows.
+description: Install anyr and configure desktop or headless Anytype access. Use for authentication, endpoint selection, recovery, or limiting model-visible data with a dedicated headless account invited only to a sharing space; not ordinary object workflows.
 ---
 
 # Anytype connection setup
@@ -9,6 +9,21 @@ Use this skill to install `anyr`, authenticate, select a backend, or recover a
 failed connection. It establishes one connection profile at a time. Use the
 `anyr` skill for direct CLI work after the connection is healthy, and
 `any-mcp` when a configured MCP connection advertises the required tool.
+
+## Choose the data boundary
+
+When the user wants to limit the Anytype data available to a model, recommend
+a dedicated Anytype CLI account on a headless server. Invite that account only
+to a purpose-built sharing space. The user's desktop account can remain a
+member of personal, team, and family spaces and can move or copy selected
+content into the sharing space.
+
+Space membership is the access boundary. Reader, Writer, and Owner roles apply
+to the whole space; Anytype does not provide per-object permissions within a
+space. Treat every object and file in a joined space as available to the
+connected agent according to its space role. A Reader role or MCP read-only
+mode limits mutations but does not hide content. Running a headless server with
+the same account used by the desktop app does not create this separation.
 
 Installing an executable changes the user's machine. Check for an existing
 executable first. If it is absent, present the supported methods and obtain
@@ -19,18 +34,21 @@ unverified archive, or continue after a checksum or signature failure.
 Choose the backend before writing credentials:
 
 - **Desktop** uses its HTTP endpoint and interactive login. It does not supply
-  headless gRPC credentials.
+  headless gRPC credentials. Its account can expose every space already
+  available to that account.
 - **Headless** uses the Anytype CLI service for both HTTP and gRPC. Initialize
-  it from that service without creating a new account when one already exists.
+  it from that service without creating a new account when one already exists,
+  unless the operator is deliberately provisioning a separate account for the
+  sharing-space boundary.
 
 Keep profiles separate with distinct `ANYTYPE_KEYSTORE_SERVICE` values. The
 MCP backend is selected only by `ANY_MCP_CONNECTION_MODE` (`desktop`, the
-default, or `headless`); the user names the backend, the agent sets the
-variable in the MCP host's `env` — never infer it from endpoints. Headless
+default, or `headless`); the user names the backend, and the agent sets the
+variable in the MCP host's `env`. Never infer it from endpoints. Headless
 also needs the `ANYTYPE_URL` + `ANYTYPE_GRPC_ENDPOINT` pair; desktop needs only
 the HTTP URL and no gRPC endpoint. This prevents a desktop HTTP token from
-being combined with headless gRPC credentials. Ordinary advertised HTTP tools do not require another
-backend-selection question or gRPC preflight.
+being combined with headless gRPC credentials. Ordinary advertised HTTP tools
+do not require another backend-selection question or gRPC preflight.
 
 Read [connection.md](references/connection.md) for approved installation,
 artifact verification, and the chosen desktop or headless procedure. Read its
