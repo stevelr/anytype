@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.5.3] - 2026-08-24
+
+### Fixed
+
+- Keep the protected live workflow's daily and weekly schedule guards aligned
+  with their UTC triggers, and check every scheduled tier in the offline
+  workflow-policy test.
+
 ## [0.5.2] - 2026-08-22
 
 ### Added

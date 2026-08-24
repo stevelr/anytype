@@ -69,7 +69,7 @@ jobs:
 
   headless-required:
     name: protected disposable required tier
-    if: ${{ inputs.tier == 'required' || inputs.tier == 'all' || github.event_name == 'push' || github.event.schedule == '29 2 * * *' }}
+    if: ${{ inputs.tier == 'required' || inputs.tier == 'all' || github.event_name == 'push' || github.event.schedule == '29 10 * * *' }}
     needs: ignored-test-inventory
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -197,7 +197,7 @@ jobs:
 
   headless-account-global:
     name: isolated account-global chat read tier
-    if: ${{ inputs.tier == 'account-global' || inputs.tier == 'all' || github.event_name == 'push' || github.event.schedule == '29 2 * * *' }}
+    if: ${{ inputs.tier == 'account-global' || inputs.tier == 'all' || github.event_name == 'push' || github.event.schedule == '29 10 * * *' }}
     needs: ignored-test-inventory
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -284,7 +284,7 @@ jobs:
 
   headless-soak:
     name: scheduled disposable characterization tier
-    if: ${{ inputs.tier == 'soak' || inputs.tier == 'all' || github.event.schedule == '43 3 * * 0' }}
+    if: ${{ inputs.tier == 'soak' || inputs.tier == 'all' || github.event.schedule == '43 11 * * 0' }}
     needs: ignored-test-inventory
     runs-on: ubuntu-24.04
     timeout-minutes: 60

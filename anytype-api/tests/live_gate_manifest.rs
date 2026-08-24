@@ -389,8 +389,8 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
     assert!(!workflow.contains("  pull_request:\n"));
     assert!(workflow.contains("  push:\n"));
     assert!(workflow.contains("  schedule:\n"));
-    assert!(workflow.contains("- cron: \"29 2 * * *\""));
-    assert!(workflow.contains("- cron: \"43 3 * * 0\""));
+    assert!(workflow.contains("- cron: \"29 10 * * *\""));
+    assert!(workflow.contains("- cron: \"43 11 * * 0\""));
     let required = workflow
         .split("  headless-required:\n")
         .nth(1)
@@ -406,9 +406,10 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
         .nth(1)
         .expect("headless-soak block");
     assert!(required.contains("github.event_name == 'push'"));
-    assert!(required.contains("github.event.schedule == '29 2 * * *'"));
+    assert!(required.contains("github.event.schedule == '29 10 * * *'"));
     assert!(required.contains("needs: ignored-test-inventory"));
     assert!(account_global.contains("needs: ignored-test-inventory"));
+    assert!(account_global.contains("github.event.schedule == '29 10 * * *'"));
     assert!(account_global.contains("runs-on: ubuntu-24.04"));
     assert!(account_global.contains("provision-headless-server.sh ANYTYPE_ACCOUNT_GLOBAL"));
     assert!(account_global.contains("ANYTYPE_ACCOUNT_GLOBAL_TEST_PROCESS=1"));
@@ -431,7 +432,7 @@ fn protected_live_workflow_requires_inventory_and_trusted_events() {
     }
     assert!(!account_global.contains("ANYTYPE_HEADLESS_NETWORK_MODE: connected"));
     assert!(!account_global.contains("self-hosted"));
-    assert!(soak.contains("github.event.schedule == '43 3 * * 0'"));
+    assert!(soak.contains("github.event.schedule == '43 11 * * 0'"));
     for block in [required, soak] {
         assert!(block.contains("needs: ignored-test-inventory"));
         // The disposable per-runner server replaced the retired self-hosted
