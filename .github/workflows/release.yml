@@ -49,6 +49,7 @@ jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 100
     permissions:
       contents: read
     outputs:
@@ -85,7 +86,12 @@ jobs:
       - name: Require green verification workflows on the tagged commit
         if: github.event_name == 'push'
         shell: bash
-        run: python3 .github/scripts/release_eligibility.py --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA"
+        run: |
+          python3 .github/scripts/release_eligibility.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --sha "$GITHUB_SHA" \
+            --wait-minutes 90 \
+            --poll-seconds 30
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Verify pinned CI prerequisites

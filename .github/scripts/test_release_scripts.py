@@ -22,13 +22,18 @@ qual = load("release_qual")
 
 
 def run(
-    name: str, conclusion: str | None, completed_at: str | None, status: str = "completed"
+    name: str,
+    conclusion: str | None,
+    completed_at: str | None,
+    status: str = "completed",
+    started_at: str | None = None,
 ):
     return {
         "name": name,
         "status": status,
         "conclusion": conclusion,
         "completed_at": completed_at,
+        "started_at": started_at,
     }
 
 
@@ -75,6 +80,75 @@ class EligibilityTests(unittest.TestCase):
         )
         _, failing = eligibility.evaluate(runs, ("clippy (linux-aarch64)",))
         self.assertEqual(failing, [("clippy (linux-aarch64)", None)])
+
+    def test_wait_returns_after_delayed_success(self):
+        required = ("candidate",)
+        observations = [
+            [run("candidate", None, None, "queued", "2026-08-19T10:00:00Z")],
+            [run("candidate", None, None, "in_progress", "2026-08-19T10:00:01Z")],
+            [run("candidate", "success", "2026-08-19T10:00:03Z")],
+        ]
+        now = [0.0]
+
+        def fetch():
+            return observations.pop(0)
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        snapshot, timed_out, elapsed = eligibility.wait_for_eligibility(
+            fetch,
+            required=required,
+            timeout_seconds=90,
+            poll_seconds=5,
+            clock=lambda: now[0],
+            sleep=sleep,
+            emit=lambda _: None,
+        )
+        self.assertTrue(snapshot.eligible)
+        self.assertFalse(timed_out)
+        self.assertEqual(elapsed, 10)
+
+    def test_wait_fails_immediately_on_terminal_failure(self):
+        slept = []
+        snapshot, timed_out, elapsed = eligibility.wait_for_eligibility(
+            lambda: [run("candidate", "cancelled", "2026-08-19T10:00:03Z")],
+            required=("candidate",),
+            timeout_seconds=90,
+            poll_seconds=5,
+            clock=lambda: 0.0,
+            sleep=slept.append,
+            emit=lambda _: None,
+        )
+        self.assertEqual(snapshot.failed, (("candidate", "cancelled"),))
+        self.assertFalse(timed_out)
+        self.assertEqual(elapsed, 0)
+        self.assertEqual(slept, [])
+
+    def test_wait_times_out_when_required_check_never_appears(self):
+        now = [0.0]
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        snapshot, timed_out, elapsed = eligibility.wait_for_eligibility(
+            lambda: [],
+            timeout_seconds=12,
+            poll_seconds=5,
+            clock=lambda: now[0],
+            sleep=sleep,
+            emit=lambda _: None,
+        )
+        self.assertEqual(snapshot.missing, eligibility.REQUIRED_CHECKS)
+        self.assertTrue(timed_out)
+        self.assertEqual(elapsed, 12)
+
+    def test_skipped_required_check_is_terminal_failure(self):
+        snapshot = eligibility.classify(
+            [run("candidate", "skipped", "2026-08-19T10:00:03Z")],
+            ("candidate",),
+        )
+        self.assertEqual(snapshot.failed, (("candidate", "skipped"),))
 
     def test_unrelated_check_runs_are_ignored(self):
         runs = [

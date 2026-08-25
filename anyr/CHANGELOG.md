@@ -10,6 +10,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Build Step 1 CLI executables with the distribution profile while keeping
   Rust test harnesses on their test-specific profile.
+- Wait up to 90 minutes for required checks when a release tag reaches GitHub
+  before its main-commit workflows finish.
 
 ## 0.5.3
 
