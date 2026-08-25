@@ -65,9 +65,13 @@ and tar.gz archives. Do not put Anytype credentials in a skill directory.
 The runtime skills treat Anytype objects, chat messages, and fetched pages as
 untrusted data rather than agent instructions. The setup skill requires
 approval for an exact installation method and version. Direct `anyr` archives
-must match their published SHA-256 before extraction; the Homebrew formula
-performs the same archive check. The direct and Homebrew macOS installations
-contain the same Apple Developer ID-signed and notarized binary.
+must match their published SHA-256 and tag-scoped GitHub build-provenance
+attestation before extraction. Beginning with `anyr` v0.5.3, every downloadable
+`anyr` release asset has that attestation. It binds the asset digest to the
+release tag and finalization workflow rather than embedding a signature in the
+executable. The Homebrew formula performs the archive checksum, and the direct
+and Homebrew macOS installations contain the same Apple Developer ID-signed
+and notarized binary.
 
 ## Install with the skills CLI
 

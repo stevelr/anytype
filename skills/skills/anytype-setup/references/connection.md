@@ -40,8 +40,8 @@ Select one immutable `anyr-vVERSION` release and the archive for the detected
 platform from the
 [Anytype Toolbox releases](https://github.com/stevelr/anytype/releases). Download
 both the archive and its adjacent `.sha256` file from that exact release. Do
-not extract or execute the archive until one platform-appropriate check passes
-in the directory containing both files:
+not extract or execute the archive until its platform-appropriate checksum
+check and its GitHub attestation verification both pass.
 
 ```sh
 # Linux
@@ -60,11 +60,9 @@ $actual = (Get-FileHash "ARCHIVE" -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw "anyr archive SHA-256 mismatch" }
 ```
 
-The adjacent checksum detects a corrupted or substituted download only when
-the checksum itself remains trustworthy; because both files are published in
-the same release, it does not independently prove publisher identity. On a
-platform without a native code signature, verify the GitHub build-provenance
-attestation before installing or use the pinned Cargo source-build method:
+Beginning with `anyr` v0.5.3, every downloadable `anyr` release asset has a
+GitHub build-provenance attestation. Verify the selected archive on every
+platform:
 
 ```sh
 gh attestation verify ARCHIVE \
@@ -75,7 +73,10 @@ gh attestation verify ARCHIVE \
 ```
 
 Stop if verification does not resolve the archive digest to the selected tag
-and finalization workflow.
+and finalization workflow. The attestation binds the release asset's digest to
+that workflow and tag; it is not an embedded executable signature. The
+adjacent checksum detects transfer corruption, but does not independently
+prove publisher identity because it is published beside the archive.
 
 After extracting a macOS archive, verify the same Developer ID signature and
 Apple notarization assessment used by the Homebrew installation:

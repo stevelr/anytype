@@ -29,7 +29,8 @@ Installing an executable changes the user's machine. Check for an existing
 executable first. If it is absent, present the supported methods and obtain
 approval for one method and an exact version before installing. Do not select
 `latest`, execute a remote installer script, use a fork or mirror, extract an
-unverified archive, or continue after a checksum or signature failure.
+unverified archive, or continue after a checksum, attestation, or native
+code signature failure.
 
 Choose the backend before writing credentials:
 
