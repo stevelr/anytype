@@ -111,7 +111,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: ${{ inputs.go-version }}
-          cache-dependency-path: source/go.sum
+          cache: false
 
       - name: Select anytype-heart version
         working-directory: source
