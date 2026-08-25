@@ -4,7 +4,7 @@
   "description": "Agent Skills for Anytype setup, including a dedicated headless account for one LLM-sharing space, plus anyr and any-mcp workflows.",
   "author": {
     "name": "Steve Schoettler",
-    "email": "stevelr-git@pm.me",
+    "email": "stevelr.git@pm.me",
     "url": "https://github.com/stevelr"
   },
   "homepage": "https://docs.anytype-toolbox.org/",

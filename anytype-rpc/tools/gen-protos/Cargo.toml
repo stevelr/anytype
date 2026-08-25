@@ -1,7 +1,7 @@
 [package]
 name = "gen-protos"
 version = "0.1.2"
-authors = ["Steve Schoettler <stevelr-git@pm.me>"]
+authors = ["Steve Schoettler <stevelr.git@pm.me>"]
 edition = "2024"
 homepage = "https://github.com/stevelr/anytype"
 license = "Apache-2.0"

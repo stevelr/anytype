@@ -101,12 +101,12 @@ npx skills add stevelr/anytype \
   --agent codex --global --yes
 ```
 
-To install the exact `0.1.1` release rather than the repository's current
+To install the exact `0.1.2` release rather than the repository's current
 default branch, use its immutable ZIP asset URL:
 
 ```sh
 npx skills add \
-  https://github.com/stevelr/anytype/releases/download/anytype-toolbox-skills-v0.1.1/anytype-toolbox-skills-v0.1.1.zip \
+  https://github.com/stevelr/anytype/releases/download/anytype-toolbox-skills-v0.1.2/anytype-toolbox-skills-v0.1.2.zip \
   --skill anyr --skill any-mcp --skill anytype-setup
 ```
 
@@ -122,7 +122,7 @@ then install the bundle:
 
 ```sh
 codex plugin marketplace add stevelr/anytype \
-  --ref anytype-toolbox-skills-v0.1.1
+  --ref anytype-toolbox-skills-v0.1.2
 codex plugin add anytype-toolbox-skills@anytype-toolbox
 ```
 
@@ -145,7 +145,7 @@ Claude Code can add the repository catalog and install the same plugin tree:
 
 ```sh
 claude plugin marketplace add \
-  stevelr/anytype@anytype-toolbox-skills-v0.1.1
+  stevelr/anytype@anytype-toolbox-skills-v0.1.2
 claude plugin install anytype-toolbox-skills@anytype-toolbox
 ```
 
