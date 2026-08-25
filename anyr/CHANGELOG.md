@@ -22,6 +22,8 @@ This release adds github attestation to release assets (.tar.xz and .zip files),
   while preserving checksum verification on both platforms.
 - Give mocked signing and audit fixtures private temporary storage, and keep
   their synthetic notarization and finalization output out of CI logs.
+- Remove the redundant Arch Linux source-test lane; Linux release builds
+  already verify that the distributed musl binary is static and starts.
 
 ## 0.5.2
 

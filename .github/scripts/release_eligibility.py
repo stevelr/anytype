@@ -35,7 +35,6 @@ REQUIRED_CHECKS: tuple[str, ...] = (
     # ci.yml
     "native gates (linux-x86_64)",
     "native gates (linux-aarch64)",
-    "native gates (archlinux-x86_64)",
     "native gates (macos-aarch64)",
     "native gates (windows-x86_64)",
     "native gates (windows-aarch64)",

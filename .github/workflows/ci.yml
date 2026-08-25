@@ -16,7 +16,6 @@ on:
           - linux
           - linux-x86_64
           - linux-aarch64
-          - archlinux-x86_64
           - macos-aarch64
           - windows
           - windows-x86_64
@@ -41,7 +40,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       nix: ${{ steps.matrix.outputs.nix }}
-      arch: ${{ steps.matrix.outputs.arch }}
       windows: ${{ steps.matrix.outputs.windows }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -64,7 +62,6 @@ jobs:
           all='[
             {"platform":"linux-x86_64","family":"linux","kind":"nix","runner":"ubuntu-24.04","system":"x86_64-linux"},
             {"platform":"linux-aarch64","family":"linux","kind":"nix","runner":"ubuntu-24.04-arm","system":"aarch64-linux"},
-            {"platform":"archlinux-x86_64","family":"linux","kind":"arch","runner":"ubuntu-24.04","system":"x86_64-linux"},
             {"platform":"macos-aarch64","family":"macos","kind":"nix","runner":"macos-15","system":"aarch64-darwin"},
             {"platform":"windows-x86_64","family":"windows","kind":"windows","runner":"windows-2025","python_arch":"x64"},
             {"platform":"windows-aarch64","family":"windows","kind":"windows","runner":"windows-11-arm","python_arch":"arm64"}
@@ -79,7 +76,6 @@ jobs:
           test "$(jq length <<<"$selected")" -gt 0
           {
             echo "nix=$(jq -c '[.[] | select(.kind == "nix")]' <<<"$selected")"
-            echo "arch=$(jq -c '[.[] | select(.kind == "arch")]' <<<"$selected")"
             echo "windows=$(jq -c '[.[] | select(.kind == "windows")]' <<<"$selected")"
           } >> "$GITHUB_OUTPUT"
 
@@ -132,70 +128,6 @@ jobs:
       - name: Format check
         if: ${{ !cancelled() }}
         run: cargo fmt --all --check
-
-  arch-native:
-    name: native gates (${{ matrix.platform }})
-    needs: preflight
-    if: ${{ needs.preflight.outputs.arch != '[]' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.preflight.outputs.arch) }}
-    runs-on: ${{ matrix.runner }}
-    container: archlinux:base-devel
-    steps:
-      - name: Install checkout prerequisites
-        shell: bash
-        run: pacman -Syu --noconfirm --needed git
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          persist-credentials: false
-
-      # Container steps run as root by default, but the gates must run as an
-      # ordinary user: the validator executable boundary (and its tests)
-      # deliberately rejects owner-writable binaries, which as root covers
-      # every root-owned 0755 system executable such as file(1).
-      - name: Install native prerequisites
-        shell: bash
-        run: |
-          pacman -S --noconfirm --needed gcc jq just lsof protobuf python rustup
-          useradd --create-home builder
-          chown -R builder: .
-          runuser -u builder -- rustup show
-          runuser -u builder -- bash .github/scripts/verify-ci-prerequisites.sh --without-gate
-
-      # Gate steps keep going after a failed gate (`!cancelled()`), and tests
-      # run with --no-fail-fast, so one run reports every failing gate. The
-      # job itself still fails when any gate fails. Every cargo invocation
-      # runs as the unprivileged builder user, whose home owns the toolchain.
-      - name: Build
-        shell: bash
-        run: runuser -u builder -- cargo build --locked --workspace --all-features
-
-      - name: Clippy
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: runuser -u builder -- cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
-      # Mirrors `just test`: every anytype-api integration target requires a
-      # reachable Anytype server, which this offline matrix does not provision.
-      - name: Test workspace
-        if: ${{ !cancelled() }}
-        timeout-minutes: 90
-        shell: bash
-        run: runuser -u builder -- cargo test --locked --workspace --all-features --exclude anytype --no-fail-fast
-
-      - name: Test anytype library
-        if: ${{ !cancelled() }}
-        timeout-minutes: 30
-        shell: bash
-        run: runuser -u builder -- cargo test --locked -p anytype --all-features --lib --no-fail-fast
-
-      - name: Format check
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: runuser -u builder -- cargo fmt --all --check
 
   windows-native:
     name: native gates (${{ matrix.platform }})
