@@ -13,8 +13,8 @@ uploaded_dir=$test_root/uploaded
 mkdir -p "$mock_bin" "$fixture_dir" "$uploaded_dir"
 
 source_commit=0123456789abcdef0123456789abcdef01234567
-release_tag=anyr-v0.5.0-pre.8
-source_run_id=123456
+release_tag=anyr-v9.9.9-fixture.1
+source_run_id=999999999
 team_id=TESTTEAM01
 printf '#!/bin/sh\nprintf anyr\n' > "$fixture_dir/anyr"
 chmod 0755 "$fixture_dir/anyr"
@@ -105,7 +105,7 @@ EOF
 cat > "$mock_bin/xcrun" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1 $2" == 'notarytool submit' ]]; then
-  printf '{"id":"12345678-1234-1234-1234-123456789abc","status":"Accepted"}\n'
+  printf '{"id":"00000000-0000-4000-8000-000000000000","status":"Accepted"}\n'
   exit 0
 fi
 if [[ "$1 $2" == 'notarytool log' ]]; then
@@ -137,7 +137,7 @@ case "$1 $2" in
   'variable get')
     printf '%s\n' "$MOCK_TEAM_ID"
     ;;
-  'api repos/stevelr/anytype/actions/runs/123456')
+  'api repos/stevelr/anytype/actions/runs/999999999')
     jq -n --arg sha "$MOCK_SOURCE_COMMIT" '{
       conclusion: "success",
       event: "push",
@@ -145,7 +145,7 @@ case "$1 $2" in
       head_sha: $sha
     }'
     ;;
-  'api repos/stevelr/anytype/commits/anyr-v0.5.0-pre.8')
+  'api repos/stevelr/anytype/commits/anyr-v9.9.9-fixture.1')
     printf '%s\n' "$MOCK_SOURCE_COMMIT"
     ;;
   'run download')
@@ -194,11 +194,19 @@ export MOCK_STATE_DIR=$test_root
 export MOCK_TEAM_ID=$team_id
 export MOCK_UPLOADED_DIR=$uploaded_dir
 
-PATH="$mock_bin:$PATH" "$script" \
+command_log=$test_root/sign-command.log
+if ! PATH="$mock_bin:$PATH" "$script" \
   --run-id "$source_run_id" \
   --identity "Developer ID Application: Test Operator (TESTTEAM01)" \
   --notary-profile anyr-notary \
-  --repo stevelr/anytype
+  --repo stevelr/anytype >"$command_log" 2>&1
+then
+  tail -c 8192 -- "$command_log" >&2
+  exit 1
+fi
+grep -Fq 'rejected (the code is valid but does not seem to be an app)' "$command_log"
+grep -Fq 'notarization submission: 00000000-0000-4000-8000-000000000000' "$command_log"
+grep -Fq "finalization dispatched for $release_tag from run $source_run_id" "$command_log"
 
 test -f "$uploaded_dir/anyr-aarch64-apple-darwin.signed"
 test -f "$uploaded_dir/anyr-aarch64-apple-darwin.signed.json"
@@ -213,7 +221,7 @@ jq -e \
     .identifier == "com.stevelr.anyr"
   ' "$uploaded_dir/anyr-aarch64-apple-darwin.signed.json" >/dev/null
 grep -q 'release upload' "$MOCK_LOG"
-grep -q -- 'workflow run finalize-release.yml --repo stevelr/anytype --ref anyr-v0.5.0-pre.8' "$MOCK_LOG"
+grep -q -- 'workflow run finalize-release.yml --repo stevelr/anytype --ref anyr-v9.9.9-fixture.1' "$MOCK_LOG"
 
 if PATH="$mock_bin:$PATH" "$script" \
   --run-id invalid \
@@ -233,3 +241,5 @@ then
   printf 'a genuine Gatekeeper rejection was accepted\n' >&2
   exit 1
 fi
+
+printf 'validated mocked macOS signing, notarization, and finalize dispatch\n'

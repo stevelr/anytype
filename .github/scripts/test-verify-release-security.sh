@@ -23,9 +23,10 @@ sha256_files() {
 mock_bin=$test_root/bin
 fixture_dir=$test_root/fixture
 archive_stage=$test_root/archive-stage/anyr-aarch64-apple-darwin
-mkdir -p "$mock_bin" "$fixture_dir" "$archive_stage"
+runner_temp=$test_root/runner-temp
+mkdir -p "$mock_bin" "$fixture_dir" "$archive_stage" "$runner_temp"
 
-release_tag=anyr-v0.5.3
+release_tag=anyr-v9.9.9-fixture.1
 repository=stevelr/anytype
 source_commit=0123456789abcdef0123456789abcdef01234567
 team_id=TESTTEAM01
@@ -53,7 +54,7 @@ jq -n \
       release_tag: $release_tag,
       target: "aarch64-apple-darwin",
       signed_sha256: $signed_hash,
-      notary_submission_id: "12345678-1234-1234-1234-123456789abc",
+      notary_submission_id: "00000000-0000-4000-8000-000000000000",
       team_id: $team_id,
       signing_authority: $signing_authority,
       identifier: "com.stevelr.anyr"
@@ -117,41 +118,56 @@ EOF
 chmod +x "$mock_bin"/*
 export MOCK_GH_LOG=$test_root/gh.log
 
-PATH="$mock_bin:$PATH" "$script" "$repository" "$release_tag" "$fixture_dir" "$team_id"
+audit_log=$test_root/audit.log
+if ! RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
+  "$script" "$repository" "$release_tag" "$fixture_dir" "$team_id" \
+  >"$audit_log" 2>&1
+then
+  tail -c 8192 -- "$audit_log" >&2
+  exit 1
+fi
+grep -Fq "verified 7 release assets for $release_tag" "$audit_log"
 expected_assets=$(find "$fixture_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
 test "$(wc -l < "$MOCK_GH_LOG" | tr -d ' ')" = "$expected_assets"
 grep -q -- '--signer-workflow stevelr/anytype/.github/workflows/finalize-release.yml' "$MOCK_GH_LOG"
-grep -q -- '--source-ref refs/tags/anyr-v0.5.3' "$MOCK_GH_LOG"
+grep -q -- '--source-ref refs/tags/anyr-v9.9.9-fixture.1' "$MOCK_GH_LOG"
 grep -q -- '--deny-self-hosted-runners' "$MOCK_GH_LOG"
 
-MOCK_SPCTL_MODE=standalone PATH="$mock_bin:$PATH" \
-  "$script" "$repository" "$release_tag" "$fixture_dir" "$team_id" >/dev/null
+standalone_log=$test_root/standalone.log
+if ! MOCK_SPCTL_MODE=standalone RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
+  "$script" "$repository" "$release_tag" "$fixture_dir" "$team_id" \
+  >"$standalone_log" 2>&1
+then
+  tail -c 8192 -- "$standalone_log" >&2
+  exit 1
+fi
+grep -Fq 'rejected: the code is valid but does not seem to be an app' "$standalone_log"
 
 tampered_dir=$test_root/tampered
 cp -R "$fixture_dir" "$tampered_dir"
 printf 'tampered\n' >> "$tampered_dir/anyr-x86_64-pc-windows-msvc.zip"
-if PATH="$mock_bin:$PATH" \
+if RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
   "$script" "$repository" "$release_tag" "$tampered_dir" "$team_id" >/dev/null 2>&1
 then
   printf 'tampered archive passed checksum verification\n' >&2
   exit 1
 fi
 
-if PATH="$mock_bin:$PATH" \
+if RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
   "$script" "$repository" "$release_tag" "$fixture_dir" WRONGTEAM >/dev/null 2>&1
 then
   printf 'incorrect Developer ID Team ID was accepted\n' >&2
   exit 1
 fi
 
-if MOCK_SPCTL_MODE=rejected PATH="$mock_bin:$PATH" \
+if MOCK_SPCTL_MODE=rejected RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
   "$script" "$repository" "$release_tag" "$fixture_dir" "$team_id" >/dev/null 2>&1
 then
   printf 'Gatekeeper rejection was accepted\n' >&2
   exit 1
 fi
 
-if MOCK_ATTESTATION_FAIL=anyr-installer.sh PATH="$mock_bin:$PATH" \
+if MOCK_ATTESTATION_FAIL=anyr-installer.sh RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
   "$script" "$repository" "$release_tag" "$fixture_dir" "$team_id" >/dev/null 2>&1
 then
   printf 'missing artifact attestation was accepted\n' >&2
@@ -167,3 +183,5 @@ grep -Fq "test \"\$GITHUB_REF\" = \"refs/tags/\$RELEASE_TAG\"" "$finalize_workfl
 grep -q 'cron:' "$audit_workflow"
 grep -Eq '^    runs-on: macos-(latest|[0-9]+)$' "$audit_workflow"
 grep -q 'verify-release-security.sh' "$audit_workflow"
+
+printf 'validated mocked release checksum, attestation, signature, and notarization audit\n'

@@ -20,6 +20,8 @@ This release adds github attestation to release assets (.tar.xz and .zip files),
   longer require fixture-only edits.
 - Use native SHA-256 tooling on Linux and macOS when auditing release assets,
   while preserving checksum verification on both platforms.
+- Give mocked signing and audit fixtures private temporary storage, and keep
+  their synthetic notarization and finalization output out of CI logs.
 
 ## 0.5.2
 
