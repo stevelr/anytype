@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Decide whether a commit has passed every release-qualifying check.
 
-A release tag may only be cut from a commit on which all five verification
-workflows (smoke, CI, any-mcp, anytype-api live, anyr-anyback-live) completed
-successfully. GitHub reports each workflow job as a check run on the commit,
-so eligibility is evaluated per job name: the latest completed check run for
-every required name must have the conclusion ``success``. Evaluating job
-names rather than workflow conclusions means a manual run that selected a
-narrower tier (for example any-mcp ``portable`` only) cannot satisfy the gate.
+A release tag may only be cut from a commit on which all verification workflows
+and five release-candidate builds completed successfully. GitHub reports each
+workflow job as a check run on the commit, so eligibility is evaluated per job
+name: the latest completed check run for every required name must have the
+conclusion ``success``. Evaluating job names rather than workflow conclusions
+means a manual run that selected a narrower tier (for example any-mcp
+``portable`` only) cannot satisfy the gate.
 
 Usage: release_eligibility.py --repo OWNER/NAME --sha COMMIT [--json]
 
@@ -54,6 +54,12 @@ REQUIRED_CHECKS: tuple[str, ...] = (
     "protected disposable required tier",
     # anyr-anyback-live.yml
     "installed anyr backup create/restore",
+    # release.yml on main
+    "release candidate (aarch64-apple-darwin)",
+    "release candidate (aarch64-unknown-linux-gnu)",
+    "release candidate (aarch64-pc-windows-msvc)",
+    "release candidate (x86_64-unknown-linux-gnu)",
+    "release candidate (x86_64-pc-windows-msvc)",
 )
 
 

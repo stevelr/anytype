@@ -5,10 +5,11 @@
 #
 # Cargo-dist qualification and release-input generation. This generated file
 # has an allow-dirty CI edit: Linux and macOS local archives come from flake
-# outputs, and tag runs export the macOS Nix binary for offline signing. Manual,
-# weekly, and tag runs build and validate without publishing. A maintainer signs
-# and notarizes the macOS input locally, then finalize-release.yml regenerates
-# checksums and installers before publishing the draft GitHub Release.
+# outputs. Main pushes build and attest the exact release candidates. Tag runs
+# promote those candidates, and export the macOS binary for offline signing.
+# Manual and weekly runs build and validate without publishing. A maintainer
+# signs and notarizes the macOS input locally, then finalize-release.yml
+# regenerates checksums and installers before publishing the draft release.
 
 name: Release artifacts
 permissions:
@@ -16,6 +17,8 @@ permissions:
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "[0-9]*.[0-9]*.[0-9]*"
       - "anyr-v[0-9]*.[0-9]*.[0-9]*"
@@ -54,8 +57,8 @@ jobs:
       contents: read
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ github.event_name == 'push' && github.ref_name || '' }}
-      tag-flag: ${{ github.event_name == 'push' && format('--tag={0}', github.ref_name) || '' }}
+      tag: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+      tag-flag: ${{ github.ref_type == 'tag' && format('--tag={0}', github.ref_name) || '' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SELECTED_ARCHITECTURE: ${{ inputs.architecture || 'all' }}
@@ -67,7 +70,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
       - name: Validate release tag and main ancestry
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag'
         shell: bash
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -84,7 +87,7 @@ jobs:
       # has already succeeded; push the tag after those main runs are green
       # or after release-qual.yml reports the commit eligible.
       - name: Require green verification workflows on the tagged commit
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag'
         shell: bash
         run: |
           python3 .github/scripts/release_eligibility.py \
@@ -115,7 +118,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          if [[ "${{ github.event_name }}" == push ]]; then
+          if [[ "${{ github.ref_type }}" == tag ]]; then
             dist host --steps=create --tag="$RELEASE_TAG" --output-format=json > plan-dist-manifest.json
           else
             dist plan --output-format=json > plan-dist-manifest.json
@@ -138,7 +141,7 @@ jobs:
 
   # Build and packages all the platform-specific things
   build-local-artifacts:
-    name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
+    name: ${{ github.ref == 'refs/heads/main' && 'release candidate' || 'build-local-artifacts' }} (${{ join(matrix.targets, ', ') }})
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
@@ -243,7 +246,7 @@ jobs:
           fi
           result/bin/anyr --help > /dev/null
       - name: Prepare macOS offline-signing input
-        if: github.event_name == 'push' && matrix.targets[0] == 'aarch64-apple-darwin'
+        if: github.ref_type == 'tag' && matrix.targets[0] == 'aarch64-apple-darwin'
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.plan.outputs.tag }}
@@ -287,6 +290,41 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+
+      - name: Attest release candidate
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.targets[0] }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_candidate.py create \
+            --root target/distrib \
+            --manifest "target/distrib/$RELEASE_TARGET-release-candidate.json" \
+            --kind local-artifacts \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --commit "$GITHUB_SHA" \
+            --target "$RELEASE_TARGET" \
+            --flake-lock flake.lock
+      - name: Prepare candidate macOS signing input
+        if: github.ref == 'refs/heads/main' && matrix.targets[0] == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          signing_dir=target/macos-signing-input
+          mkdir -p "$signing_dir"
+          cp -L result/bin/anyr "$signing_dir/anyr"
+          chmod 0755 "$signing_dir/anyr"
+          python3 .github/scripts/release_candidate.py create \
+            --root "$signing_dir" \
+            --manifest "$signing_dir/candidate-manifest.json" \
+            --kind macos-signing-input \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --commit "$GITHUB_SHA" \
+            --target aarch64-apple-darwin \
+            --flake-lock flake.lock
       - name: "Upload artifacts"
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -294,13 +332,16 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+            target/distrib/*-release-candidate.json
+          retention-days: 30
       - name: Upload macOS offline-signing input
-        if: github.event_name == 'push' && matrix.targets[0] == 'aarch64-apple-darwin'
+        if: (github.ref_type == 'tag' || github.ref == 'refs/heads/main') && matrix.targets[0] == 'aarch64-apple-darwin'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: macos-signing-input
           path: target/macos-signing-input/
           if-no-files-found: error
+          retention-days: 30
 
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
@@ -308,7 +349,7 @@ jobs:
       - plan
       - build-local-artifacts
     runs-on: "ubuntu-22.04"
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.architecture == 'all' }}
+    if: ${{ github.ref != 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || inputs.architecture == 'all') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
