@@ -107,7 +107,7 @@ jobs:
       # run with --no-fail-fast, so one run reports every failing gate. The
       # job itself still fails when any gate fails.
       - name: Build
-        run: cargo build --locked --workspace --all-features
+        run: cargo build --locked --profile dist --workspace --all-features
 
       - name: Clippy
         if: ${{ !cancelled() }}
@@ -176,7 +176,7 @@ jobs:
       # the default pwsh shell only propagates the final command's exit code
       # from a multi-line run block.
       - name: Build
-        run: cargo build --locked --workspace --all-features
+        run: cargo build --locked --profile dist --workspace --all-features
 
       - name: Clippy
         if: ${{ !cancelled() }}

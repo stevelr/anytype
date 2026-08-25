@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           install_root="$RUNNER_TEMP/installed"
-          cargo install --locked --path anyr --root "$install_root"
+          cargo install --locked --profile dist --path anyr --root "$install_root"
           anyr_bin="$install_root/bin/anyr"
           [[ -x "$anyr_bin" ]] || { printf '%s\n' "installed anyr binary is missing" >&2; exit 1; }
           printf 'ANYR_BIN=%s\n' "$anyr_bin" >> "$GITHUB_ENV"

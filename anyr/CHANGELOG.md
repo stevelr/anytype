@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## Unreleased
+
+### Changed
+
+- Build Step 1 CLI executables with the distribution profile while keeping
+  Rust test harnesses on their test-specific profile.
+
 ## 0.5.3
 
 Highlights (test & CI only):

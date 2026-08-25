@@ -21,7 +21,7 @@
 #                                  failure evidence and strict log consumers
 #
 # If ANYR_BIN names an existing anyr executable it is used for init-cli;
-# otherwise a debug anyr is built from the workspace.
+# otherwise the distribution-profile anyr is built from the workspace.
 
 set -euo pipefail
 
@@ -97,8 +97,8 @@ fi
 
 anyr_bin="${ANYR_BIN:-}"
 if [[ -z "$anyr_bin" ]]; then
-  cargo build --locked -p anyr --bin anyr
-  anyr_bin="$PWD/target/debug/anyr"
+  cargo build --locked --profile dist -p anyr --bin anyr
+  anyr_bin="$PWD/target/dist/anyr"
 fi
 if [[ ! -x "$anyr_bin" ]]; then
   printf '%s\n' "anyr binary is unavailable for init-cli" >&2
@@ -170,6 +170,7 @@ printf 'export ANY_MCP_CONNECTION_MODE=headless\n' >> "$env_file"
 printf 'export ANYTYPE_TEST_URL="$ANYTYPE_URL"\n' >> "$env_file"
 
 {
+  printf 'ANYR_BIN=%s\n' "$anyr_bin"
   printf '%s_ENV_FILE=%s\n' "$var_prefix" "$env_file"
   printf '%s_REDACTED_LOG_FILE=%s\n' "$var_prefix" "$server_log"
   printf '%s_REVIEWED_LOG_FILE=%s\n' "$var_prefix" "$reviewed_log"

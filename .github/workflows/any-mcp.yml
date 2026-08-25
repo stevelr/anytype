@@ -222,7 +222,7 @@ jobs:
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER
           ANY_MCP_HEADLESS_LOG_RUN_MARKER="$(sed -n 's/^run_marker=//p' "$context")"
           bash any-mcp/scripts/run-live-cgroup.sh command auth -- \
-            cargo run --locked -q -p anyr -- auth status --pretty
+            "$ANYR_BIN" auth status --pretty
           bash any-mcp/scripts/run-live-cgroup.sh test direct -- \
             cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1 --nocapture
@@ -382,7 +382,7 @@ jobs:
           export ANY_MCP_HEADLESS_LOG_RUN_MARKER
           ANY_MCP_HEADLESS_LOG_RUN_MARKER="$(sed -n 's/^run_marker=//p' "$context")"
           bash any-mcp/scripts/run-live-cgroup.sh command auth -- \
-            cargo run --locked -q -p anyr -- auth status --pretty
+            "$ANYR_BIN" auth status --pretty
           bash any-mcp/scripts/run-live-cgroup.sh test direct -- \
             cargo test --locked -p any-mcp --lib headless_ -- \
             --ignored --test-threads=1 --nocapture

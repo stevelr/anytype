@@ -356,6 +356,10 @@ fn shared_headless_provisioner_honors_the_cli_override() {
     let provisioner = include_str!("../../.github/scripts/provision-headless-server.sh");
     assert!(provisioner.contains("ANYTYPE_CLI_BIN=\"${ANYTYPE_CLI_BIN:-anytype}\""));
     assert!(provisioner.contains("command -v -- \"$ANYTYPE_CLI_BIN\""));
+    assert!(provisioner.contains("cargo build --locked --profile dist -p anyr --bin anyr"));
+    assert!(provisioner.contains("anyr_bin=\"$PWD/target/dist/anyr\""));
+    assert!(provisioner.contains("printf 'ANYR_BIN=%s\\n' \"$anyr_bin\""));
+    assert!(!provisioner.contains("target/debug/anyr"));
     assert!(provisioner.contains("network_mode=\"${ANYTYPE_HEADLESS_NETWORK_MODE:-isolated}\""));
     assert!(provisioner.contains("isolated | connected"));
     assert!(
