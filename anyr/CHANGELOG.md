@@ -6,7 +6,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## 0.5.3
 
-This release adds github attestation to release assets (.tar.xz and .zip files), fixes a Windows test race condition (tokio thread releasing dir handle), and adds Security and vulnerability reporting policy to repo.
+Highlights (test & CI only):
+
+- add github attestation to release assets (.tar.xz and .zip files)
+- fix a Windows test race condition (tokio thread releasing dir handle)
+- add Security and vulnerability reporting policy to repo
+- remove Arch linux build from CI matrix (redundant because we build single musl-static binary for all linux platforms)
 
 ### Changed
 
