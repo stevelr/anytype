@@ -52,10 +52,12 @@ jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
-    timeout-minutes: 100
+    timeout-minutes: 120
     permissions:
+      actions: read
       contents: read
     outputs:
+      candidate-run-id: ${{ steps.candidate.outputs.run-id }}
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
       tag-flag: ${{ github.ref_type == 'tag' && format('--tag={0}', github.ref_name) || '' }}
@@ -82,10 +84,9 @@ jobs:
             printf 'release tag %s does not point to a commit reachable from main\n' "$RELEASE_TAG" >&2
             exit 1
           fi
-      # A tag produces signing inputs only from a commit on which every verification
-      # workflow (smoke, CI, any-mcp, anytype-api live, anyr-anyback-live)
-      # has already succeeded; push the tag after those main runs are green
-      # or after release-qual.yml reports the commit eligible.
+      # A tag promotes signing inputs only from a commit on which every
+      # verification workflow and release-candidate build has succeeded.
+      # An early tag waits here instead of racing those main-commit jobs.
       - name: Require green verification workflows on the tagged commit
         if: github.ref_type == 'tag'
         shell: bash
@@ -95,10 +96,32 @@ jobs:
             --sha "$GITHUB_SHA" \
             --wait-minutes 90 \
             --poll-seconds 30
+      - id: candidate
+        name: Locate the successful candidate run for this commit
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          runs=$RUNNER_TEMP/candidate-runs.json
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?branch=main&event=push&status=success&head_sha=$GITHUB_SHA&per_page=100" \
+            > "$runs"
+          candidate_run_id=$(python3 .github/scripts/release_candidate_run.py \
+            --input "$runs" --commit "$GITHUB_SHA")
+          echo "run-id=$candidate_run_id" >> "$GITHUB_OUTPUT"
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - name: Verify pinned CI prerequisites
-        run: nix develop --command bash .github/scripts/verify-ci-prerequisites.sh --check-repository
+      - name: Verify pinned release prerequisites
+        shell: bash
+        run: |
+          prerequisite_args=(--check-repository)
+          # Main CI supplies the repository gate for push commits. Re-running
+          # cargo clippy here would delay both candidate creation and promotion.
+          if [[ "${{ github.event_name }}" == push ]]; then
+            prerequisite_args=(--without-gate)
+          fi
+          nix develop --command bash .github/scripts/verify-ci-prerequisites.sh \
+            "${prerequisite_args[@]}"
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -145,7 +168,7 @@ jobs:
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null }}
+    if: ${{ github.ref_type != 'tag' && fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null }}
     strategy:
       fail-fast: false
       # Target platforms/runners are computed by dist in create-release.
@@ -202,6 +225,25 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      - name: Verify packaged Windows release binary starts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_TARGET: ${{ matrix.targets[0] }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = "target/distrib/anyr-$env:RELEASE_TARGET.zip"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "release archive is missing: $archive"
+          }
+          $extract = Join-Path $env:RUNNER_TEMP "anyr-$env:RELEASE_TARGET-smoke"
+          Expand-Archive -LiteralPath $archive -DestinationPath $extract
+          $binaries = @(Get-ChildItem $extract -Recurse -File -Filter anyr.exe)
+          if ($binaries.Count -ne 1) {
+            throw "release archive must contain exactly one anyr.exe"
+          }
+          & $binaries[0].FullName --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'packaged anyr.exe --help failed' }
       - name: Build Nix release binary
         if: runner.os != 'Windows'
         shell: bash
@@ -245,36 +287,6 @@ jobs:
             }
           fi
           result/bin/anyr --help > /dev/null
-      - name: Prepare macOS offline-signing input
-        if: github.ref_type == 'tag' && matrix.targets[0] == 'aarch64-apple-darwin'
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          signing_dir=target/macos-signing-input
-          mkdir -p "$signing_dir"
-          cp -L result/bin/anyr "$signing_dir/anyr"
-          chmod 0755 "$signing_dir/anyr"
-          binary_hash=$(shasum -a 256 "$signing_dir/anyr" | awk '{print $1}')
-          flake_lock_hash=$(shasum -a 256 flake.lock | awk '{print $1}')
-          jq -n \
-            --arg repository "$GITHUB_REPOSITORY" \
-            --argjson source_run_id "$GITHUB_RUN_ID" \
-            --arg source_commit "$GITHUB_SHA" \
-            --arg release_tag "$RELEASE_TAG" \
-            --arg binary_sha256 "$binary_hash" \
-            --arg flake_lock_sha256 "$flake_lock_hash" \
-            '{
-              schema_version: 1,
-              repository: $repository,
-              source_run_id: $source_run_id,
-              source_commit: $source_commit,
-              release_tag: $release_tag,
-              target: "aarch64-apple-darwin",
-              binary_sha256: $binary_sha256,
-              flake_lock_sha256: $flake_lock_sha256
-            }' > "$signing_dir/manifest.json"
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
@@ -335,7 +347,145 @@ jobs:
             target/distrib/*-release-candidate.json
           retention-days: 30
       - name: Upload macOS offline-signing input
-        if: (github.ref_type == 'tag' || github.ref == 'refs/heads/main') && matrix.targets[0] == 'aarch64-apple-darwin'
+        if: github.ref == 'refs/heads/main' && matrix.targets[0] == 'aarch64-apple-darwin'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-signing-input
+          path: target/macos-signing-input/
+          if-no-files-found: error
+          retention-days: 30
+
+  promote-local-artifacts:
+    name: build-local-artifacts (${{ matrix.target }})
+    needs: plan
+    if: github.ref_type == 'tag'
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - aarch64-unknown-linux-gnu
+          - aarch64-pc-windows-msvc
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CANDIDATE_RUN_ID: ${{ needs.plan.outputs.candidate-run-id }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+      RELEASE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.ref }}
+      - name: Install cached dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: cargo-dist-cache
+          path: ~/.cargo/bin/
+      - name: Download and verify candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/distrib
+          gh run download "$CANDIDATE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "artifacts-build-local-$RELEASE_TARGET" \
+            --dir target/distrib
+          python3 .github/scripts/release_candidate.py verify \
+            --root target/distrib \
+            --manifest "target/distrib/$RELEASE_TARGET-release-candidate.json" \
+            --kind local-artifacts \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --commit "$GITHUB_SHA" \
+            --target "$RELEASE_TARGET" \
+            --flake-lock flake.lock
+      - name: Bind local manifest to the release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x "$HOME/.cargo/bin/dist"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          case "$RELEASE_TARGET" in
+            *windows-msvc) extension=zip ;;
+            *) extension=tar.xz ;;
+          esac
+          archive="anyr-$RELEASE_TARGET.$extension"
+          archive_hash=$(sha256sum "target/distrib/$archive" | awk '{print $1}')
+          recorded_hash=$(awk 'NF {print $1; exit}' "target/distrib/$archive.sha256")
+          test "$archive_hash" = "$recorded_hash"
+          dist manifest \
+            --artifacts=local \
+            "--target=$RELEASE_TARGET" \
+            "--tag=$RELEASE_TAG" \
+            --output-format=json > "$RUNNER_TEMP/tagged-manifest.json"
+          jq --exit-status \
+            --arg archive "$archive" \
+            --arg hash "$archive_hash" '
+              if .artifacts[$archive] == null then
+                error("dist manifest omitted the promoted release archive")
+              else
+                .artifacts[$archive].checksums.sha256 = $hash
+              end
+            ' "$RUNNER_TEMP/tagged-manifest.json" \
+            > "target/distrib/$RELEASE_TARGET-dist-manifest.json"
+      - name: Prepare tag-bound macOS signing input
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          signing_dir=target/macos-signing-input
+          mkdir -p "$signing_dir"
+          gh run download "$CANDIDATE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name macos-signing-input \
+            --dir "$signing_dir"
+          python3 .github/scripts/release_candidate.py verify \
+            --root "$signing_dir" \
+            --manifest "$signing_dir/candidate-manifest.json" \
+            --kind macos-signing-input \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --commit "$GITHUB_SHA" \
+            --target aarch64-apple-darwin \
+            --flake-lock flake.lock
+          binary_hash=$(sha256sum "$signing_dir/anyr" | awk '{print $1}')
+          flake_lock_hash=$(sha256sum flake.lock | awk '{print $1}')
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --argjson source_run_id "$GITHUB_RUN_ID" \
+            --argjson candidate_run_id "$CANDIDATE_RUN_ID" \
+            --arg source_commit "$GITHUB_SHA" \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg binary_sha256 "$binary_hash" \
+            --arg flake_lock_sha256 "$flake_lock_hash" \
+            '{
+              schema_version: 1,
+              repository: $repository,
+              source_run_id: $source_run_id,
+              candidate_run_id: $candidate_run_id,
+              source_commit: $source_commit,
+              release_tag: $release_tag,
+              target: "aarch64-apple-darwin",
+              binary_sha256: $binary_sha256,
+              flake_lock_sha256: $flake_lock_sha256
+            }' > "$signing_dir/manifest.json"
+      - name: Upload promoted local artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: artifacts-build-local-${{ matrix.target }}
+          path: |
+            target/distrib/anyr-${{ matrix.target }}.*
+            target/distrib/${{ matrix.target }}-dist-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload tag-bound macOS signing input
+        if: matrix.target == 'aarch64-apple-darwin'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: macos-signing-input
@@ -348,8 +498,16 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
+      - promote-local-artifacts
     runs-on: "ubuntu-22.04"
-    if: ${{ github.ref != 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || inputs.architecture == 'all') }}
+    if: >-
+      ${{
+        always() &&
+        github.ref != 'refs/heads/main' &&
+        needs.plan.result == 'success' &&
+        (needs.build-local-artifacts.result == 'success' || needs.promote-local-artifacts.result == 'success') &&
+        (github.event_name != 'workflow_dispatch' || inputs.architecture == 'all')
+      }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json

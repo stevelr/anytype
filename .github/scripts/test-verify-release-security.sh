@@ -50,6 +50,8 @@ jq -n \
     {
       schema_version: 1,
       repository: $repository,
+      source_run_id: 999999999,
+      candidate_run_id: 888888888,
       source_commit: $source_commit,
       release_tag: $release_tag,
       target: "aarch64-apple-darwin",

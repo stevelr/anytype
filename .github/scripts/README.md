@@ -86,17 +86,22 @@ inventing a tool or starting a second server. The setup skill distinguishes
 desktop HTTP from paired headless backends, preserves saved credentials, and
 recommends a dedicated headless account for a space-scoped data boundary.
 
-The release workflow builds all platform archives and exports the Nix-built
-macOS binary as a signing input. It does not publish a GitHub Release. The
-macOS signing command verifies that input against its workflow run, applies a
-Developer ID signature from the local keychain, submits it to Apple's notary
-service, uploads the signed handoff to a draft release, and dispatches the
-finalization workflow. The finalizer verifies the signature and notarization,
-rebuilds the macOS archive and global checksums, validates the installers, and
-publishes the draft. Before publication, it creates GitHub build-provenance
-attestations for every downloadable asset. The release retains an attested
-macOS notarization record that binds the signed binary hash to the Developer ID
-identity, Apple submission ID, source commit, and release tag.
+On each main push, the release workflow builds the five platform archives and
+records provenance that binds them to the exact commit, workflow run, target,
+and locked inputs. A tag run waits up to 90 minutes for the commit's required
+checks, verifies and promotes those archives without rebuilding their binaries,
+and exports the promoted Nix-built macOS binary as a signing input. It does not
+publish a GitHub Release. Candidate artifacts are retained for 30 days.
+
+The macOS signing command verifies that input against its tag workflow run,
+applies a Developer ID signature from the local keychain, submits it to Apple's
+notary service, uploads the signed handoff to a draft release, and dispatches
+the finalization workflow. The finalizer verifies the signature and
+notarization, rebuilds the macOS archive and global checksums, validates the
+installers, and publishes the draft. Before publication, it creates GitHub
+build-provenance attestations for every downloadable asset. The release retains
+an attested macOS notarization record that binds the signed binary hash to the
+Developer ID identity, Apple submission ID, source commit, and release tag.
 
 `Audit published release` runs daily on a GitHub-hosted macOS runner. It
 downloads the latest public release, verifies every checksum and attestation,
@@ -148,8 +153,9 @@ gh variable set MACOS_DEVELOPER_TEAM_ID \
 
 ## Sign and finalize a release
 
-Push a supported release tag only after release qualification succeeds. Wait
-for its `Release artifacts` run to finish, then note the run ID:
+Push a supported release tag for the main commit. If required checks are still
+running, `Release artifacts` waits for them for up to 90 minutes; a completed
+failure or timeout stops the release. After the run succeeds, note its run ID:
 
 ```sh
 gh run list \

@@ -1,11 +1,11 @@
 # Release qualification: one manual run that proves a candidate commit is
 # releasable. Stage 1 dispatches the five verification workflows on the
 # candidate branch with their full platform and live tiers and waits for all of
-# them; stage 2 runs only after stage 1 is green and dispatches the artifact
-# build plus the cargo-dist plan/build (no publication, no GitHub Release).
-# The final job evaluates the commit's check runs with the same rule that
+# them; stage 2 runs only after stage 1 is green and dispatches the general
+# artifact build. Main pushes produce release candidates automatically. The
+# final job evaluates the commit's check runs with the same rule that
 # release.yml enforces on a pushed tag, so a green run here means the
-# maintainer can sign the release commit and push a signed tag.
+# maintainer can push a signed release tag.
 name: release qualification
 
 on:
@@ -72,7 +72,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.source_ref }}
-      - name: Dispatch the artifact build and cargo-dist plan/build and wait
+      - name: Dispatch the general artifact build and wait
         run: |
           python3 .github/scripts/release_qual.py \
             --repo "$GITHUB_REPOSITORY" --ref "${{ inputs.source_ref }}" --stage build

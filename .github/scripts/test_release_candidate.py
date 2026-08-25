@@ -69,6 +69,16 @@ class ReleaseCandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source_commit"):
             self.verify(manifest)
 
+    def test_wrong_target_is_rejected(self):
+        manifest = self.create()
+        manifest["target"] = "aarch64-unknown-linux-gnu"
+        with self.assertRaisesRegex(ValueError, "target"):
+            self.verify(manifest)
+
+    def test_missing_manifest_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "missing"):
+            candidate.parse_manifest(self.root / "missing.json")
+
     def test_wrong_target_file_set_is_rejected(self):
         manifest = self.create()
         manifest["files"]["unexpected"] = "0" * 64

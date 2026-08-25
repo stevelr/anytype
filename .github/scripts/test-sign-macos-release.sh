@@ -15,6 +15,7 @@ mkdir -p "$mock_bin" "$fixture_dir" "$uploaded_dir"
 source_commit=0123456789abcdef0123456789abcdef01234567
 release_tag=anyr-v9.9.9-fixture.1
 source_run_id=999999999
+candidate_run_id=888888888
 team_id=TESTTEAM01
 printf '#!/bin/sh\nprintf anyr\n' > "$fixture_dir/anyr"
 chmod 0755 "$fixture_dir/anyr"
@@ -28,6 +29,7 @@ PY
 )
 jq -n \
   --argjson source_run_id "$source_run_id" \
+  --argjson candidate_run_id "$candidate_run_id" \
   --arg source_commit "$source_commit" \
   --arg release_tag "$release_tag" \
   --arg binary_sha256 "$binary_hash" \
@@ -35,6 +37,7 @@ jq -n \
     schema_version: 1,
     repository: "stevelr/anytype",
     source_run_id: $source_run_id,
+    candidate_run_id: $candidate_run_id,
     source_commit: $source_commit,
     release_tag: $release_tag,
     target: "aarch64-apple-darwin",
@@ -213,9 +216,11 @@ test -f "$uploaded_dir/anyr-aarch64-apple-darwin.signed.json"
 jq -e \
   --arg source_commit "$source_commit" \
   --arg release_tag "$release_tag" \
+  --argjson candidate_run_id "$candidate_run_id" \
   --arg team_id "$team_id" '
     .source_commit == $source_commit and
     .release_tag == $release_tag and
+    .candidate_run_id == $candidate_run_id and
     .team_id == $team_id and
     .signing_authority == "Developer ID Application: Test Operator (TESTTEAM01)" and
     .identifier == "com.stevelr.anyr"

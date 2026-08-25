@@ -27,7 +27,7 @@ from typing import NamedTuple
 
 # Job names (GitHub check-run contexts) that must be green on the release
 # commit. Keep in sync with the job `name:` values in the workflows named in
-# the comments; the qualification workflow dispatches exactly these workflows.
+# the comments; the release workflow produces the candidate checks on main.
 REQUIRED_CHECKS: tuple[str, ...] = (
     # smoke.yml
     "repository checks, clippy, and fast tests (linux-x86_64)",

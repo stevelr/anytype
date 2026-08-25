@@ -154,6 +154,7 @@ jq -e \
     .schema_version == 1 and
     .repository == $repository and
     (.source_run_id | tostring) == $run_id and
+    (.candidate_run_id | type == "number" and . > 0) and
     .source_commit == $commit and
     .target == "aarch64-apple-darwin" and
     (.release_tag | type == "string" and length > 0) and
@@ -161,6 +162,7 @@ jq -e \
   ' "$input_manifest" >/dev/null || die 'macOS signing-input manifest failed validation'
 
 release_tag=$(jq -r .release_tag "$input_manifest")
+candidate_run_id=$(jq -r .candidate_run_id "$input_manifest")
 tag_commit=$(gh api "repos/$repository/commits/$release_tag" --jq .sha)
 [[ "$tag_commit" == "$source_commit" ]] || die "release tag $release_tag does not resolve to source commit $source_commit"
 
@@ -235,6 +237,7 @@ cp "$signed_binary" "$signed_asset"
 jq -n \
   --arg repository "$repository" \
   --argjson source_run_id "$run_id" \
+  --argjson candidate_run_id "$candidate_run_id" \
   --arg source_commit "$source_commit" \
   --arg release_tag "$release_tag" \
   --arg unsigned_sha256 "$actual_binary_hash" \
@@ -247,6 +250,7 @@ jq -n \
     schema_version: 1,
     repository: $repository,
     source_run_id: $source_run_id,
+    candidate_run_id: $candidate_run_id,
     source_commit: $source_commit,
     release_tag: $release_tag,
     target: "aarch64-apple-darwin",

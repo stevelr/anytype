@@ -177,12 +177,10 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(inputs["any-mcp.yml"], {"tier": "all"})
         self.assertEqual(inputs["anytype-api-live.yml"], {"tier": "required"})
 
-    def test_build_stage_runs_artifacts_and_dist_plan_on_the_candidate_ref(self):
+    def test_build_stage_does_not_rebuild_main_release_candidates(self):
         plan = dict(qual.stage_plan("build", "release-candidate", "all", "all"))
         self.assertEqual(plan["build.yml"], {"platform": "all"})
-        self.assertEqual(
-            plan["release.yml"], {"source_ref": "release-candidate", "architecture": "all"}
-        )
+        self.assertNotIn("release.yml", plan)
 
     def test_unknown_stage_is_rejected(self):
         with self.assertRaises(ValueError):

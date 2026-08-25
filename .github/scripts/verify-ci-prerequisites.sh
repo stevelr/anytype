@@ -51,6 +51,8 @@ jq --version
 gcc --version | head -n 1
 bash .github/scripts/test-release-tag-policy.sh
 PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_release_scripts.py
+PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_release_candidate.py
+PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_release_candidate_run.py
 PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_skills_package.py
 PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_skills_release.py
 PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_skills_marketplaces.py

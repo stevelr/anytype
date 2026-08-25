@@ -4,9 +4,10 @@
 ``release-qual.yml`` calls this twice: the ``test`` stage dispatches the five
 verification workflows on the candidate ref (full platform matrix, live
 tiers included) and the ``build`` stage, which runs only after the test stage
-is green, dispatches the artifact build and the cargo-dist plan/build without
-publishing. Each stage waits for every dispatched run to complete and fails
-unless all of them succeed.
+is green, dispatches the general artifact build. Main-branch release candidates
+are produced automatically by ``release.yml`` and are not rebuilt here. Each
+stage waits for every dispatched run to complete and fails unless all of them
+succeed.
 
 Usage: release_qual.py --repo OWNER/NAME --ref BRANCH --stage test|build
                        [--any-mcp-tier TIER] [--anytype-api-tier TIER]
@@ -43,10 +44,7 @@ def stage_plan(
             ("anyr-anyback-live.yml", {}),
         ]
     if stage == "build":
-        return [
-            ("build.yml", {"platform": "all"}),
-            ("release.yml", {"source_ref": ref, "architecture": "all"}),
-        ]
+        return [("build.yml", {"platform": "all"})]
     raise ValueError(f"unknown stage: {stage}")
 
 

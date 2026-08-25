@@ -12,6 +12,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   Rust test harnesses on their test-specific profile.
 - Preserve attested release-candidate archives from main-branch verification
   for promotion by a later release tag instead of rebuilding those binaries.
+- Avoid rebuilding release candidates during manual release qualification.
 - Wait up to 90 minutes for required checks when a release tag reaches GitHub
   before its main-commit workflows finish.
 

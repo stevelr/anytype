@@ -105,6 +105,8 @@ jq -e \
   --arg team_id "$expected_team_id" '
     .schema_version == 1 and
     .repository == $repository and
+    (.source_run_id | type == "number" and . > 0) and
+    (.candidate_run_id | type == "number" and . > 0) and
     .release_tag == $release_tag and
     .target == "aarch64-apple-darwin" and
     .signed_sha256 == $signed_hash and
