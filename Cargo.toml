@@ -9,7 +9,7 @@ default-members = ["anyr"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.3"
+version = "0.5.4-pre.1"
 authors = ["Steve Schoettler <stevelr.git@pm.me>"]
 edition = "2024"
 homepage = "https://github.com/stevelr/anytype"
@@ -17,11 +17,11 @@ license = "Apache-2.0"
 repository = "https://github.com/stevelr/anytype"
 
 [workspace.dependencies]
-any-edit = { version = "0.5.3", path = "./any-edit" }
-any-mcp = { version = "0.5.3", path = "./any-mcp" }
-anyback_reader = { package = "anyback", version = "0.5.3", path = "./anyback", default-features = false }
-anytype = { version = "0.5.3", path = "./anytype-api" }
-anytype-rpc = { version = "0.5.3", path = "./anytype-rpc" }
+any-edit = { version = "0.5.4-pre.1", path = "./any-edit" }
+any-mcp = { version = "0.5.4-pre.1", path = "./any-mcp" }
+anyback_reader = { package = "anyback", version = "0.5.4-pre.1", path = "./anyback", default-features = false }
+anytype = { version = "0.5.4-pre.1", path = "./anytype-api" }
+anytype-rpc = { version = "0.5.4-pre.1", path = "./anytype-rpc" }
 
 anyhow = "1.0.104"
 base16ct = "1.0.0"
