@@ -61,6 +61,8 @@ jobs:
       # so the devshell PATH and protobuf variables are promoted to the job.
       - name: Expose pinned devshell tools to the job
         run: |
+          # The nested Bash expands these variables after Nix activates the devshell.
+          # shellcheck disable=SC2016
           nix develop --command bash -euo pipefail -c '
             {
               printf "PATH=%s\n" "$PATH"
@@ -103,6 +105,8 @@ jobs:
           [[ -r "$ANYR_ANYBACK_HEADLESS_REDACTED_LOG_FILE" ]] || fail_preflight "redacted server log is unreadable"
 
           set -a
+          # The provisioner supplies this runtime path, which the checks above validate.
+          # shellcheck disable=SC1090
           source "$ANYR_ANYBACK_HEADLESS_ENV_FILE"
           set +a
           export ANYTYPE_DISPOSABLE_TEST_PROCESS=1

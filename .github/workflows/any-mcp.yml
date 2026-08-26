@@ -138,6 +138,8 @@ jobs:
       # a `nix develop` wrapper, so the devshell PATH is promoted to the job.
       - name: Expose pinned devshell tools to the job
         run: |
+          # The nested Bash expands these variables after Nix activates the devshell.
+          # shellcheck disable=SC2016
           nix develop --command bash -euo pipefail -c '
             {
               printf "PATH=%s\n" "$PATH"
@@ -206,6 +208,8 @@ jobs:
           test "${ANY_MCP_HEADLESS_REVIEWED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"
           test -r "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"
           set -a
+          # The provisioner supplies this runtime path, which the checks above validate.
+          # shellcheck disable=SC1090
           source "$ANY_MCP_HEADLESS_ENV_FILE"
           set +a
           export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
@@ -296,6 +300,8 @@ jobs:
       # a `nix develop` wrapper, so the devshell PATH is promoted to the job.
       - name: Expose pinned devshell tools to the job
         run: |
+          # The nested Bash expands these variables after Nix activates the devshell.
+          # shellcheck disable=SC2016
           nix develop --command bash -euo pipefail -c '
             {
               printf "PATH=%s\n" "$PATH"
@@ -366,6 +372,8 @@ jobs:
           test "${ANY_MCP_HEADLESS_REVIEWED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"
           test -r "$ANY_MCP_HEADLESS_REVIEWED_LOG_FILE"
           set -a
+          # The provisioner supplies this runtime path, which the checks above validate.
+          # shellcheck disable=SC1090
           source "$ANY_MCP_HEADLESS_ENV_FILE"
           set +a
           export ANYTYPE_DISPOSABLE_TEST_PROCESS=1

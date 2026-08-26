@@ -83,6 +83,8 @@ jobs:
       # a `nix develop` wrapper, so the devshell PATH is promoted to the job.
       - name: Expose pinned devshell tools to the job
         run: |
+          # The nested Bash expands these variables after Nix activates the devshell.
+          # shellcheck disable=SC2016
           nix develop --command bash -euo pipefail -c '
             {
               printf "PATH=%s\n" "$PATH"
@@ -105,7 +107,11 @@ jobs:
           test -n "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-          set -a; source "$ANY_MCP_HEADLESS_ENV_FILE"; set +a
+          set -a
+          # The provisioner supplies this runtime path, which the checks above validate.
+          # shellcheck disable=SC1090
+          source "$ANY_MCP_HEADLESS_ENV_FILE"
+          set +a
           export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
           test_prefix="${ANYTYPE_TEST_SPACE_PREFIX:-}"
           test -n "$test_prefix" && test "${#test_prefix}" -le 485
@@ -209,6 +215,8 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Expose pinned devshell tools to the job
         run: |
+          # The nested Bash expands these variables after Nix activates the devshell.
+          # shellcheck disable=SC2016
           nix develop --command bash -euo pipefail -c '
             {
               printf "PATH=%s\n" "$PATH"
@@ -230,6 +238,8 @@ jobs:
             systemctl --user stop "$unit" > /dev/null 2>&1 || true
           }
           trap cleanup_unit EXIT
+          # The service's nested Bash expands variables after systemd starts the unit.
+          # shellcheck disable=SC2016
           systemd-run --user --wait --pipe --collect --same-dir \
             --unit="$unit" \
             --service-type=exec \
@@ -298,6 +308,8 @@ jobs:
       # a `nix develop` wrapper, so the devshell PATH is promoted to the job.
       - name: Expose pinned devshell tools to the job
         run: |
+          # The nested Bash expands these variables after Nix activates the devshell.
+          # shellcheck disable=SC2016
           nix develop --command bash -euo pipefail -c '
             {
               printf "PATH=%s\n" "$PATH"
@@ -324,7 +336,11 @@ jobs:
           test -n "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test "${ANY_MCP_HEADLESS_REDACTED_LOG_FILE#/}" != "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
           test -r "$ANY_MCP_HEADLESS_REDACTED_LOG_FILE"
-          set -a; source "$ANY_MCP_HEADLESS_ENV_FILE"; set +a
+          set -a
+          # The provisioner supplies this runtime path, which the checks above validate.
+          # shellcheck disable=SC1090
+          source "$ANY_MCP_HEADLESS_ENV_FILE"
+          set +a
           export ANYTYPE_DISPOSABLE_TEST_PROCESS=1
           test_prefix="${ANYTYPE_TEST_SPACE_PREFIX:-}"
           test -n "$test_prefix" && test "${#test_prefix}" -le 485

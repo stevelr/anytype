@@ -11,6 +11,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Version new macOS signing and notarization manifests as schema 2 while
   preserving complete audits of legacy schema 1 releases, and report each
   rejected manifest assertion in the published-release audit.
+- Make repository-wide `actionlint` validation pass for live workflows while
+  preserving nested Nix-shell expansion and provisioner-supplied environment
+  loading.
 
 ## 0.5.3
 

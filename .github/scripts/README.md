@@ -1,5 +1,12 @@
 # Release scripts
 
+## Workflow validation
+
+Run `actionlint` from the repository root to validate every GitHub Actions
+workflow and its embedded shell scripts. ShellCheck exclusions stay beside the
+intentional nested-shell or runtime-source construct so unrelated scripts keep
+the complete rule set.
+
 ## Skills package validation
 
 `validate_skills_package.py` checks the unpacked Anytype Toolbox Skills plugin
