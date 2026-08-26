@@ -33,7 +33,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 clap_complete = "4.6.9"
 crossterm = "0.29.0"
-db-keystore = "0.5.1"
+db-keystore = { version = "0.5.2", default-features = false }
 fs2 = "0.4.3"
 futures = "0.3.34"
 getrandom = "0.4.3"
