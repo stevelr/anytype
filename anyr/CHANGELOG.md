@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## Unreleased
 
+### Fixed
+
+- Version new macOS signing and notarization manifests as schema 2 while
+  preserving complete audits of legacy schema 1 releases, and report each
+  rejected manifest assertion in the published-release audit.
+
 ## 0.5.3
 
 Highlights (test & CI only):

@@ -6,6 +6,7 @@ repository_root=$(cd "$(dirname "$0")/../.." && pwd)
 script=$repository_root/.github/scripts/verify-release-security.sh
 finalize_workflow=$repository_root/.github/workflows/finalize-release.yml
 audit_workflow=$repository_root/.github/workflows/audit-release.yml
+release_workflow=$repository_root/.github/workflows/release.yml
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/test-verify-release-security.XXXXXX")
 trap 'rm -rf "$test_root"' EXIT
 
@@ -48,7 +49,7 @@ jq -n \
   --arg team_id "$team_id" \
   --arg signing_authority "$signing_authority" '
     {
-      schema_version: 1,
+      schema_version: 2,
       repository: $repository,
       source_run_id: 999999999,
       candidate_run_id: 888888888,
@@ -135,6 +136,90 @@ grep -q -- '--signer-workflow stevelr/anytype/.github/workflows/finalize-release
 grep -q -- '--source-ref refs/tags/anyr-v9.9.9-fixture.1' "$MOCK_GH_LOG"
 grep -q -- '--deny-self-hosted-runners' "$MOCK_GH_LOG"
 
+legacy_dir=$test_root/legacy
+cp -R "$fixture_dir" "$legacy_dir"
+jq '.schema_version = 1 | del(.candidate_run_id)' \
+  "$legacy_dir/anyr-aarch64-apple-darwin.notarization.json" \
+  > "$legacy_dir/notarization.json"
+mv "$legacy_dir/notarization.json" \
+  "$legacy_dir/anyr-aarch64-apple-darwin.notarization.json"
+legacy_log=$test_root/legacy.log
+if ! RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
+  "$script" "$repository" "$release_tag" "$legacy_dir" "$team_id" \
+  >"$legacy_log" 2>&1
+then
+  tail -c 8192 -- "$legacy_log" >&2
+  exit 1
+fi
+grep -Fq "verified 7 release assets for $release_tag" "$legacy_log"
+
+expect_manifest_failure() {
+  local case_name=$1
+  local case_dir=$2
+  local expected_error=$3
+  local case_log=$test_root/$case_name.log
+
+  if RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
+    "$script" "$repository" "$release_tag" "$case_dir" "$team_id" \
+    >"$case_log" 2>&1
+  then
+    printf '%s manifest unexpectedly passed validation\n' "$case_name" >&2
+    exit 1
+  fi
+  if ! grep -Fq -- "$expected_error" "$case_log"; then
+    tail -c 8192 -- "$case_log" >&2
+    exit 1
+  fi
+}
+
+legacy_invalid_candidate_dir=$test_root/legacy-invalid-candidate
+cp -R "$fixture_dir" "$legacy_invalid_candidate_dir"
+jq '.schema_version = 1 | .candidate_run_id = "invalid"' \
+  "$legacy_invalid_candidate_dir/anyr-aarch64-apple-darwin.notarization.json" \
+  > "$legacy_invalid_candidate_dir/notarization.json"
+mv "$legacy_invalid_candidate_dir/notarization.json" \
+  "$legacy_invalid_candidate_dir/anyr-aarch64-apple-darwin.notarization.json"
+expect_manifest_failure \
+  legacy-invalid-candidate \
+  "$legacy_invalid_candidate_dir" \
+  'candidate_run_id must be a positive integer when present'
+
+missing_candidate_dir=$test_root/missing-candidate
+cp -R "$fixture_dir" "$missing_candidate_dir"
+jq 'del(.candidate_run_id)' \
+  "$missing_candidate_dir/anyr-aarch64-apple-darwin.notarization.json" \
+  > "$missing_candidate_dir/notarization.json"
+mv "$missing_candidate_dir/notarization.json" \
+  "$missing_candidate_dir/anyr-aarch64-apple-darwin.notarization.json"
+expect_manifest_failure \
+  missing-candidate \
+  "$missing_candidate_dir" \
+  'candidate_run_id must be a positive integer for schema version 2 or later'
+
+unsupported_schema_dir=$test_root/unsupported-schema
+cp -R "$fixture_dir" "$unsupported_schema_dir"
+jq '.schema_version = 3' \
+  "$unsupported_schema_dir/anyr-aarch64-apple-darwin.notarization.json" \
+  > "$unsupported_schema_dir/notarization.json"
+mv "$unsupported_schema_dir/notarization.json" \
+  "$unsupported_schema_dir/anyr-aarch64-apple-darwin.notarization.json"
+expect_manifest_failure \
+  unsupported-schema \
+  "$unsupported_schema_dir" \
+  'schema_version 3 is unsupported (supported: 1, 2)'
+
+malformed_schema_dir=$test_root/malformed-schema
+cp -R "$fixture_dir" "$malformed_schema_dir"
+jq '.schema_version = "2"' \
+  "$malformed_schema_dir/anyr-aarch64-apple-darwin.notarization.json" \
+  > "$malformed_schema_dir/notarization.json"
+mv "$malformed_schema_dir/notarization.json" \
+  "$malformed_schema_dir/anyr-aarch64-apple-darwin.notarization.json"
+expect_manifest_failure \
+  malformed-schema \
+  "$malformed_schema_dir" \
+  'schema_version must be an integer'
+
 standalone_log=$test_root/standalone.log
 if ! MOCK_SPCTL_MODE=standalone RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
   "$script" "$repository" "$release_tag" "$fixture_dir" "$team_id" \
@@ -155,12 +240,15 @@ then
   exit 1
 fi
 
+wrong_team_log=$test_root/wrong-team.log
 if RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
-  "$script" "$repository" "$release_tag" "$fixture_dir" WRONGTEAM >/dev/null 2>&1
+  "$script" "$repository" "$release_tag" "$fixture_dir" WRONGTEAM \
+  >"$wrong_team_log" 2>&1
 then
   printf 'incorrect Developer ID Team ID was accepted\n' >&2
   exit 1
 fi
+grep -Fq -- '- team_id does not match MACOS_DEVELOPER_TEAM_ID' "$wrong_team_log"
 
 if MOCK_SPCTL_MODE=rejected RUNNER_TEMP="$runner_temp" PATH="$mock_bin:$PATH" \
   "$script" "$repository" "$release_tag" "$fixture_dir" "$team_id" >/dev/null 2>&1
@@ -182,8 +270,10 @@ grep -Eq '^[[:space:]]+uses: actions/attest@[0-9a-f]{40}([[:space:]]|$)' "$final
 grep -q 'subject-path: artifacts/\*' "$finalize_workflow"
 grep -q 'anyr-aarch64-apple-darwin.notarization.json' "$finalize_workflow"
 grep -Fq "test \"\$GITHUB_REF\" = \"refs/tags/\$RELEASE_TAG\"" "$finalize_workflow"
+test "$(grep -Fc '.schema_version == 2' "$finalize_workflow")" -ge 2
 grep -q 'cron:' "$audit_workflow"
 grep -Eq '^    runs-on: macos-(latest|[0-9]+)$' "$audit_workflow"
 grep -q 'verify-release-security.sh' "$audit_workflow"
+grep -Fq 'schema_version: 2' "$release_workflow"
 
 printf 'validated mocked release checksum, attestation, signature, and notarization audit\n'

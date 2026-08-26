@@ -102,12 +102,17 @@ installers, and publishes the draft. Before publication, it creates GitHub
 build-provenance attestations for every downloadable asset. The release retains
 an attested macOS notarization record that binds the signed binary hash to the
 Developer ID identity, Apple submission ID, source commit, and release tag.
+New signing inputs and notarization records use schema 2, which also binds the
+candidate workflow run. The audit accepts legacy schema 1 records, validates a
+candidate run when one is present, requires it for schema 2 and later, and
+rejects schema versions it does not understand.
 
 `Audit published release` runs daily on a GitHub-hosted macOS runner. It
 downloads the latest public release, verifies every checksum and attestation,
 restricts accepted attestations to the tag-triggered finalization workflow, and
 rechecks the macOS binary's Developer ID signature and Gatekeeper assessment.
-You can dispatch the workflow with a release tag to audit a specific release.
+Manifest failures name each rejected assertion without dumping the record. You
+can dispatch the workflow with a release tag to audit a specific release.
 
 Consumers can verify an individual asset with GitHub CLI. Pin the signer
 workflow and source tag so another workflow in the repository cannot satisfy

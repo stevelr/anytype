@@ -34,7 +34,7 @@ jq -n \
   --arg release_tag "$release_tag" \
   --arg binary_sha256 "$binary_hash" \
   '{
-    schema_version: 1,
+    schema_version: 2,
     repository: "stevelr/anytype",
     source_run_id: $source_run_id,
     candidate_run_id: $candidate_run_id,
@@ -218,6 +218,7 @@ jq -e \
   --arg release_tag "$release_tag" \
   --argjson candidate_run_id "$candidate_run_id" \
   --arg team_id "$team_id" '
+    .schema_version == 2 and
     .source_commit == $source_commit and
     .release_tag == $release_tag and
     .candidate_run_id == $candidate_run_id and
@@ -236,6 +237,23 @@ then
   printf 'invalid run ID was accepted\n' >&2
   exit 1
 fi
+
+legacy_fixture_dir=$test_root/legacy-fixture
+cp -R "$fixture_dir" "$legacy_fixture_dir"
+jq '.schema_version = 1' "$legacy_fixture_dir/manifest.json" \
+  > "$legacy_fixture_dir/legacy-manifest.json"
+mv "$legacy_fixture_dir/legacy-manifest.json" "$legacy_fixture_dir/manifest.json"
+legacy_log=$test_root/legacy-schema.log
+if MOCK_FIXTURE_DIR="$legacy_fixture_dir" PATH="$mock_bin:$PATH" "$script" \
+  --run-id "$source_run_id" \
+  --identity "Developer ID Application: Test Operator (TESTTEAM01)" \
+  --notary-profile anyr-notary \
+  --repo stevelr/anytype >"$legacy_log" 2>&1
+then
+  printf 'schema 1 signing input was accepted\n' >&2
+  exit 1
+fi
+grep -Fq 'macOS signing-input manifest failed validation' "$legacy_log"
 
 if MOCK_SPCTL_MODE=rejected PATH="$mock_bin:$PATH" "$script" \
   --run-id "$source_run_id" \

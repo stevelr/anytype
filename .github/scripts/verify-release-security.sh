@@ -98,24 +98,115 @@ if [[ ! -f "$macos_binary" ]]; then
 fi
 
 signed_hash=$(sha256_files "$macos_binary" | awk '{print $1}')
-jq -e \
+validation_errors=
+if ! validation_errors=$(jq -r \
   --arg repository "$repository" \
   --arg release_tag "$release_tag" \
   --arg signed_hash "$signed_hash" \
   --arg team_id "$expected_team_id" '
-    .schema_version == 1 and
-    .repository == $repository and
-    (.source_run_id | type == "number" and . > 0) and
-    (.candidate_run_id | type == "number" and . > 0) and
-    .release_tag == $release_tag and
-    .target == "aarch64-apple-darwin" and
-    .signed_sha256 == $signed_hash and
-    .team_id == $team_id and
-    .identifier == "com.stevelr.anyr" and
-    (.source_commit | test("^[0-9a-f]{40}$")) and
-    (.notary_submission_id | test("^[0-9A-Fa-f-]{36}$")) and
-    (.signing_authority | startswith("Developer ID Application:"))
-  ' "$notarization_manifest" >/dev/null
+    def integer:
+      type == "number" and floor == .;
+    def positive_integer:
+      integer and . > 0;
+    def string_matching($pattern):
+      type == "string" and test($pattern);
+
+    if type != "object" then
+      ["manifest root must be an object"]
+    else
+      [
+        if (.schema_version | integer) then
+          empty
+        else
+          "schema_version must be an integer"
+        end,
+        if (.schema_version | integer) and
+          (.schema_version != 1 and .schema_version != 2)
+        then
+          "schema_version \(.schema_version) is unsupported (supported: 1, 2)"
+        else
+          empty
+        end,
+        if .repository == $repository then
+          empty
+        else
+          "repository does not match the audited repository"
+        end,
+        if (.source_run_id | positive_integer) then
+          empty
+        else
+          "source_run_id must be a positive integer"
+        end,
+        if (.schema_version | integer) and .schema_version >= 2 then
+          if (.candidate_run_id | positive_integer) then
+            empty
+          else
+            "candidate_run_id must be a positive integer for schema version 2 or later"
+          end
+        elif has("candidate_run_id") and
+          ((.candidate_run_id | positive_integer) | not)
+        then
+          "candidate_run_id must be a positive integer when present"
+        else
+          empty
+        end,
+        if .release_tag == $release_tag then
+          empty
+        else
+          "release_tag does not match the audited release"
+        end,
+        if .target == "aarch64-apple-darwin" then
+          empty
+        else
+          "target must be aarch64-apple-darwin"
+        end,
+        if .signed_sha256 == $signed_hash then
+          empty
+        else
+          "signed_sha256 does not match the archived macOS binary"
+        end,
+        if .team_id == $team_id then
+          empty
+        else
+          "team_id does not match MACOS_DEVELOPER_TEAM_ID"
+        end,
+        if .identifier == "com.stevelr.anyr" then
+          empty
+        else
+          "identifier must be com.stevelr.anyr"
+        end,
+        if (.source_commit | string_matching("^[0-9a-f]{40}$")) then
+          empty
+        else
+          "source_commit must be a 40-character lowercase hexadecimal commit ID"
+        end,
+        if (.notary_submission_id | string_matching("^[0-9A-Fa-f-]{36}$")) then
+          empty
+        else
+          "notary_submission_id must match the 36-character submission ID format"
+        end,
+        if (.signing_authority | type == "string" and
+          startswith("Developer ID Application:"))
+        then
+          empty
+        else
+          "signing_authority must identify a Developer ID Application certificate"
+        end
+      ]
+    end
+    | .[]
+  ' "$notarization_manifest")
+then
+  printf 'notarization manifest is not valid JSON\n' >&2
+  exit 1
+fi
+if [[ -n "$validation_errors" ]]; then
+  printf 'notarization manifest validation failed:\n' >&2
+  while IFS= read -r validation_error; do
+    printf -- '- %s\n' "$validation_error" >&2
+  done <<< "$validation_errors"
+  exit 1
+fi
 
 codesign --verify --strict --verbose=4 "$macos_binary"
 codesign_details=$extract_dir/codesign-details.txt

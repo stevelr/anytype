@@ -143,7 +143,7 @@ jobs:
             --arg source_sha "$SOURCE_SHA" \
             --arg tag "$RELEASE_TAG" \
             --arg source_hash "$source_hash" '
-              .schema_version == 1 and
+              .schema_version == 2 and
               .repository == $repository and
               (.source_run_id | tostring) == $run_id and
               (.candidate_run_id | type == "number" and . > 0) and
@@ -162,7 +162,7 @@ jobs:
             --arg signed_hash "$signed_hash" \
             --arg team_id "$EXPECTED_TEAM_ID" \
             --arg identifier "$EXPECTED_IDENTIFIER" '
-              .schema_version == 1 and
+              .schema_version == 2 and
               .repository == $repository and
               (.source_run_id | tostring) == $run_id and
               (.candidate_run_id | tostring) == $candidate_run_id and

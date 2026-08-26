@@ -151,7 +151,7 @@ jq -e \
   --arg run_id "$run_id" \
   --arg commit "$source_commit" \
   '
-    .schema_version == 1 and
+    .schema_version == 2 and
     .repository == $repository and
     (.source_run_id | tostring) == $run_id and
     (.candidate_run_id | type == "number" and . > 0) and
@@ -247,7 +247,7 @@ jq -n \
   --arg signing_authority "$signing_authority" \
   --arg identifier "$signed_identifier" \
   '{
-    schema_version: 1,
+    schema_version: 2,
     repository: $repository,
     source_run_id: $source_run_id,
     candidate_run_id: $candidate_run_id,

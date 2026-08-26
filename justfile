@@ -7,6 +7,7 @@ test:
 
 check:
     gate check
+    actionlint
 
 rustdoc:
     cargo doc --workspace --no-deps --open
