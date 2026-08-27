@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- disable turso's mimalloc feature (by transitive feature disable in db-keystore 0.5.2), removing C library dependency.
+- bumped rust-toolchain to 1.98.1
+
 ## [0.5.3] - 2026-08-24
 
 ### Changed

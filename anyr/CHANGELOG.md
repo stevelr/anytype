@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## Unreleased
 
+### Changed
+
+- bumped rust-toolchain to 1.98.1
+
 ### Fixed
 
 - Version new macOS signing and notarization manifests as schema 2 while

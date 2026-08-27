@@ -228,8 +228,8 @@ pub enum DisposableCallbackStage {
 /// ```compile_fail
 /// use anytype::test_util::{DisposableFailureCategory, TestError};
 /// let _ = TestError::DisposableCallback {
-///     stage: "forged-stage",
-///     category: "forged-category",
+///     stage: DisposableCallbackStage::Fixture,
+///     category: DisposableFailureCategory::Auth,
 /// };
 /// # let _ = DisposableFailureCategory::Other;
 /// ```
