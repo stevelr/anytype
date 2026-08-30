@@ -108,7 +108,7 @@ libc.workspace = true
 [dev-dependencies]
 anytype = { workspace = true, features = ["test-fixtures"] }
 futures-util = "0.3.34"
-jsonschema = { version = "0.50.1", default-features = false }
+jsonschema = { version = "0.52.0", default-features = false }
 reqwest.workspace = true
 serial_test = "4.0.1"
 tokio = { workspace = true, features = ["test-util"] }
