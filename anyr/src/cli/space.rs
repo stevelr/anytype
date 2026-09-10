@@ -350,7 +350,7 @@ fn validate_archive_file(archive: &Path) -> Result<()> {
 
 #[cfg(feature = "backup")]
 fn validate_archive_contents(archive: &Path) -> Result<()> {
-    let reader = anyback_reader::archive::ArchiveReader::from_path(archive)
+    let reader = anyback::archive::ArchiveReader::from_path(archive)
         .with_context(|| format!("backup archive is unreadable: {}", archive.display()))?;
     let files = reader
         .list_files()

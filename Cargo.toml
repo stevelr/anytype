@@ -9,7 +9,7 @@ default-members = ["anyr"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.4-pre.1"
+version = "0.5.4-pre.2"
 authors = ["Steve Schoettler <stevelr.git@pm.me>"]
 edition = "2024"
 homepage = "https://github.com/stevelr/anytype"
@@ -17,11 +17,11 @@ license = "Apache-2.0"
 repository = "https://github.com/stevelr/anytype"
 
 [workspace.dependencies]
-any-edit = { version = "0.5.4-pre.1", path = "./any-edit" }
-any-mcp = { version = "0.5.4-pre.1", path = "./any-mcp" }
-anyback_reader = { package = "anyback", version = "0.5.4-pre.1", path = "./anyback", default-features = false }
-anytype = { version = "0.5.4-pre.1", path = "./anytype-api" }
-anytype-rpc = { version = "0.5.4-pre.1", path = "./anytype-rpc" }
+any-edit = { version = "0.5.4-pre.2", path = "./any-edit" }
+any-mcp = { version = "0.5.4-pre.2", path = "./any-mcp" }
+anyback = { version = "0.5.4-pre.2", path = "./anyback", default-features = false }
+anytype = { version = "0.5.4-pre.2", path = "./anytype-api" }
+anytype-rpc = { version = "0.5.4-pre.2", path = "./anytype-rpc" }
 
 anyhow = "1.0.104"
 base16ct = "1.0.0"
@@ -33,7 +33,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 clap_complete = "4.6.9"
 crossterm = "0.29.0"
-db-keystore = { version = "0.5.2", default-features = false }
+db-keystore = "0.6.0-pre.2"
 fs2 = "0.4.3"
 futures = "0.3.34"
 getrandom = "0.4.3"
@@ -41,7 +41,7 @@ http = "1.5.0"
 http-body = "1.1.0"
 http-body-util = "0.1.5"
 httpdate = "1.0.3"
-hyper = { version = "1.11.0", features = ["http1", "server"] }
+hyper = { version = "1.11.1", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 icu_properties = "2.3.0"
 # for jsonwebtoken 11.0, use aws_lc_rs backend instead of rust_crypto
@@ -55,8 +55,8 @@ prost = "0.14.4"
 prost-types = "0.14.4"
 ratatui = "0.30.2"
 regex = "1.13.1"
-reqwest = { version = "0.13.4", features = ["json", "multipart", "stream", "rustls", "query"] }
-rmcp = { version = "3.1.4", default-features = false, features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+reqwest = { version = "0.13.5", features = ["json", "multipart", "stream", "rustls", "query"] }
+rmcp = { version = "3.2.0", default-features = false, features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -70,7 +70,7 @@ subtle = "2.6.1"
 test-log = { version = "0.2.21", features = ["log", "trace"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
-toml = "1.1.4" # "1.1.4+spec-1.1.0"
+toml = "1.1.5" # "1.1.4+spec-1.1.0"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tracing = "0.1.44"

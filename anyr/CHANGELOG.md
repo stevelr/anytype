@@ -4,10 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## Unreleased
+## Unreleased (0.5.4-pre.x)
 
 ### Changed
 
+- bumped db-keystore to 0.6.0-pre.2
 - bumped rust-toolchain to 1.98.1
 
 ### Fixed

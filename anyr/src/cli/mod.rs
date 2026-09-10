@@ -188,7 +188,7 @@ pub enum Commands {
     /// Backup, restore, and inspect archive commands
     #[cfg(feature = "backup")]
     #[command(subcommand)]
-    Backup(anyback_reader::cli::Commands),
+    Backup(anyback::cli::Commands),
 
     /// Run the bounded Anytype MCP server or its maintenance commands
     #[cfg(feature = "mcp")]
@@ -2092,13 +2092,13 @@ pub async fn run(mut cli: Cli) -> Result<()> {
     #[cfg(feature = "backup")]
     let backup_workflow_deadline = match &cli.command {
         Commands::Backup(
-            command @ (anyback_reader::cli::Commands::Create(_)
-            | anyback_reader::cli::Commands::Export(_)
-            | anyback_reader::cli::Commands::Restore(_)
-            | anyback_reader::cli::Commands::Import(_)),
+            command @ (anyback::cli::Commands::Create(_)
+            | anyback::cli::Commands::Export(_)
+            | anyback::cli::Commands::Restore(_)
+            | anyback::cli::Commands::Import(_)),
         ) => {
             let _ = command;
-            Some(anyback_reader::cli::WorkflowDeadline::from_env()?)
+            Some(anyback::cli::WorkflowDeadline::from_env()?)
         }
         _ => None,
     };
@@ -2170,12 +2170,12 @@ pub async fn run(mut cli: Cli) -> Result<()> {
         Commands::Backup(args) => {
             let output = backup_output(&ctx.output);
             if let Some(deadline) = backup_workflow_deadline {
-                Box::pin(anyback_reader::cli::run_command_with_deadline(
+                Box::pin(anyback::cli::run_command_with_deadline(
                     args, ctx.client, output, deadline,
                 ))
                 .await
             } else {
-                anyback_reader::cli::run_command(args, ctx.client, output).await
+                anyback::cli::run_command(args, ctx.client, output).await
             }
         }
         #[cfg(feature = "mcp")]
@@ -2453,8 +2453,8 @@ fn resolve_output_format(cli: &Cli) -> OutputFormat {
 /// Anyr's table presentation maps to the backup commands' human text summaries;
 /// the backup reports are documents rather than uniform rows.
 #[cfg(feature = "backup")]
-fn backup_output(output: &Output) -> anyback_reader::cli::CommandOutput {
-    use anyback_reader::cli::{CommandOutput, OutputMode};
+fn backup_output(output: &Output) -> anyback::cli::CommandOutput {
+    use anyback::cli::{CommandOutput, OutputMode};
 
     let mode = match output.format() {
         OutputFormat::Json => OutputMode::Json,
@@ -2470,8 +2470,8 @@ fn backup_output(output: &Output) -> anyback_reader::cli::CommandOutput {
 /// Global output conflicts are rejected before dispatch. Backup commands add
 /// restrictions for interactive output and paths that alias command inputs.
 #[cfg(feature = "backup")]
-fn validate_backup_output_flags(cli: &Cli, command: &anyback_reader::cli::Commands) -> Result<()> {
-    use anyback_reader::cli::{command_is_interactive, command_name};
+fn validate_backup_output_flags(cli: &Cli, command: &anyback::cli::Commands) -> Result<()> {
+    use anyback::cli::{command_is_interactive, command_name};
 
     let name = command_name(command);
 
@@ -2496,7 +2496,7 @@ fn validate_backup_output_flags(cli: &Cli, command: &anyback_reader::cli::Comman
     }
 
     let output = Output::new(resolve_output_format(cli), cli.output.clone());
-    anyback_reader::cli::validate_command_output(command, &backup_output(&output))
+    anyback::cli::validate_command_output(command, &backup_output(&output))
         .with_context(|| format!("invalid output path for `backup {name}`"))
 }
 
@@ -2749,7 +2749,7 @@ mod space_delete_arg_tests {
 #[cfg(all(test, feature = "backup"))]
 mod backup_output_tests {
     use super::*;
-    use anyback_reader::cli::OutputMode;
+    use anyback::cli::OutputMode;
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("arguments should parse")
