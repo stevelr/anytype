@@ -40,20 +40,22 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 mod deadline;
-pub mod decode;
+mod display;
 #[cfg(feature = "tui")]
 mod inspector;
 pub mod output;
 
+use display::{format_datetime_display, format_last_modified};
+
 pub use deadline::WorkflowDeadline;
 pub use output::{CommandOutput, OutputMode, TextBuilder};
 
-use decode::{
+use crate::metadata::{
     ExpandedSnapshotEntry, ImportEventProgressReport, ImportReport, MANIFEST_NAME, Manifest,
     ManifestSummary, ObjectDescriptor, ObjectImportError, archive_binding_from_file, detail_value,
-    format_datetime_display, format_last_modified, manifest_sidecar_path, manifest_summary,
-    parse_expanded_entries, parse_snapshot_details_from_pb, parse_snapshot_details_from_pb_json,
-    read_manifest_from_reader, read_manifest_from_sidecar, read_manifest_prefer_sidecar,
+    manifest_sidecar_path, manifest_summary, parse_expanded_entries,
+    parse_snapshot_details_from_pb, parse_snapshot_details_from_pb_json, read_manifest_from_reader,
+    read_manifest_from_sidecar, read_manifest_prefer_sidecar,
 };
 
 const TMP_BACKUP_PREFIX: &str = "anyback_tmp";
@@ -2961,8 +2963,8 @@ mod tests {
             &fs::read(&prepared.staged_sidecar).expect("bound staged manifest"),
         )
         .expect("parse bound manifest");
-        let (expected_size, expected_digest) =
-            decode::archive_binding(&retained).expect("binding for retained original archive");
+        let (expected_size, expected_digest) = crate::metadata::archive_binding(&retained)
+            .expect("binding for retained original archive");
         assert_eq!(bound.archive_size, Some(expected_size));
         assert_eq!(
             bound.archive_sha256.as_deref(),

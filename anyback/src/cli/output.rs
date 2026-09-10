@@ -1,5 +1,5 @@
 /*
- * anyback_reader - backup command output contract
+ * anyback - backup command output contract
  * github.com/stevelr/anytype
  *
  * SPDX-FileCopyrightText: 2025-2026 Steve Schoettler

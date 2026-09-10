@@ -17,10 +17,6 @@ readme = "README.md"
 repository.workspace = true
 description = "Backup and restore for Anytype"
 
-[lib]
-name = "anyback_reader"
-path = "src/lib.rs"
-
 [[test]]
 name = "e2e_backup_restore"
 path = "tests/e2e_backup_restore.rs"
@@ -58,16 +54,15 @@ required-features = ["cli"]
 
 [features]
 default = ["cli"]
+metadata = ["dep:serde_json", "dep:prost-types", "dep:prost"]
 cli = [
+  "metadata",
   "dep:chrono",
   "dep:clap",
-  "dep:serde_json",
-  "dep:prost-types",
   "dep:tokio",
   "dep:tracing",
   "dep:indicatif",
   "dep:tonic",
-  "dep:prost",
   "dep:same-file",
 ]
 tui = [
@@ -92,11 +87,11 @@ clap = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
 image = { version = "0.25.10", optional = true }
 indicatif = { version = "0.18.6", optional = true }
-lru = { version = "0.18.2", optional = true }
+lru = { version = "0.18.4", optional = true }
 prost = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
-ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm", "image-defaults", "tokio"], optional = true }
+ratatui-image = { version = "11.0.8", default-features = false, features = ["crossterm", "image-defaults", "tokio"], optional = true }
 same-file = { version = "1.0.6", optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }

@@ -5,10 +5,10 @@ use crate::archive::{ArchiveReader, ArchiveSourceKind};
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::cli::decode::{
-    Manifest, detail_value, format_datetime_display, format_last_modified, parse_expanded_entries,
-    parse_snapshot_details_from_pb, parse_snapshot_details_from_pb_json,
-    read_manifest_prefer_sidecar, value_as_i64,
+use crate::cli::display::{format_datetime_display, format_last_modified};
+use crate::metadata::{
+    Manifest, detail_value, parse_expanded_entries, parse_snapshot_details_from_pb,
+    parse_snapshot_details_from_pb_json, read_manifest_prefer_sidecar, value_as_i64,
 };
 
 #[derive(Debug, Clone)]

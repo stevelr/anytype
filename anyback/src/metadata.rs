@@ -1,7 +1,11 @@
+//! Backup manifests, snapshot metadata, and restore reports.
+//!
+//! Reads archive metadata without CLI argument parsing or terminal presentation.
+//! Enable the `metadata` feature to use this module without the `cli` feature.
+
 use crate::archive::{ArchiveFileEntry, ArchiveReader, infer_object_id_from_snapshot_path};
 use anyhow::{Context, Result, anyhow};
 use anytype_rpc::anytype::SnapshotWithType;
-use chrono::{DateTime, FixedOffset, Utc};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,9 +17,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// File name of a manifest embedded in an archive.
 pub const MANIFEST_NAME: &str = "manifest.json";
+/// Suffix appended to an archive file name for its sibling manifest.
 pub const MANIFEST_SIDECAR_SUFFIX: &str = ".manifest.json";
 
+/// Identifies an archived object and, when available, its restored identifier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectDescriptor {
     pub id: String,
@@ -26,6 +33,7 @@ pub struct ObjectDescriptor {
     pub last_modified: Option<String>,
 }
 
+/// Records backup provenance, object selection, and optional archive integrity binding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub schema_version: u32,
@@ -56,6 +64,7 @@ pub struct Manifest {
     pub archive_sha256: Option<String>,
 }
 
+/// Describes the restore failure reported for an individual object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectImportError {
     pub id: String,
@@ -67,6 +76,7 @@ pub struct ObjectImportError {
     pub status: String,
 }
 
+/// Records the attempted, successful, and failed objects in a restore operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportReport {
     pub archive: String,
@@ -81,6 +91,7 @@ pub struct ImportReport {
     pub event_progress: Option<ImportEventProgressReport>,
 }
 
+/// Summarizes server process and import events observed during a restore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportEventProgressReport {
     pub processes_started: usize,
@@ -102,6 +113,7 @@ pub struct ImportEventProgressReport {
     pub last_process_error: Option<String>,
 }
 
+/// Summarizes backup provenance and selection without the per-object inventory.
 #[derive(Debug, Clone, Serialize)]
 pub struct ManifestSummary {
     pub schema_version: u32,
@@ -127,6 +139,7 @@ pub struct ManifestSummary {
     pub type_ids: Option<Vec<String>>,
 }
 
+/// Contains decoded object metadata or an unreadable status for one archive snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExpandedSnapshotEntry {
     pub path: String,
@@ -153,6 +166,7 @@ pub struct ExpandedSnapshotEntry {
     pub last_modified_date: Option<Value>,
 }
 
+/// Converts a protobuf value recursively into JSON; unset and non-finite values become null.
 pub fn proto_value_to_json(value: &prost_types::Value) -> Value {
     use prost_types::value::Kind;
     match value.kind.as_ref() {
@@ -175,6 +189,7 @@ pub fn proto_value_to_json(value: &prost_types::Value) -> Value {
     }
 }
 
+/// Unwraps protobuf JSON value wrappers, preserving unrecognized JSON values.
 pub fn normalize_jsonpb_value(value: &Value) -> Value {
     let Some(obj) = value.as_object() else {
         return value.clone();
@@ -214,6 +229,7 @@ pub fn normalize_jsonpb_value(value: &Value) -> Value {
     value.clone()
 }
 
+/// Reads an integer from a JSON number or numeric string, truncating floating-point values.
 #[allow(clippy::cast_possible_truncation)]
 pub fn value_as_i64(value: &Value) -> Option<i64> {
     value
@@ -222,6 +238,7 @@ pub fn value_as_i64(value: &Value) -> Option<i64> {
         .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
 }
 
+/// Reads a boolean from a JSON boolean, integer, or true/false/1/0 string.
 pub fn value_as_bool(value: &Value) -> Option<bool> {
     value
         .as_bool()
@@ -235,6 +252,7 @@ pub fn value_as_bool(value: &Value) -> Option<bool> {
         })
 }
 
+/// Returns the protobuf layout name for a recognized numeric layout identifier.
 pub fn derive_layout_name(layout: Option<i64>) -> Option<String> {
     let layout = layout?;
     let parsed =
@@ -242,6 +260,9 @@ pub fn derive_layout_name(layout: Option<i64>) -> Option<String> {
     Some(parsed.as_str_name().to_string())
 }
 
+/// Decodes the smart-block type and object details from a protobuf snapshot.
+///
+/// Returns an error if decoding fails or the snapshot lacks data or details.
 pub fn parse_snapshot_details_from_pb(
     bytes: &[u8],
 ) -> Result<(Option<String>, serde_json::Map<String, Value>)> {
@@ -263,6 +284,9 @@ pub fn parse_snapshot_details_from_pb(
     Ok((sb_type, map))
 }
 
+/// Decodes the smart-block type and object details from a protobuf JSON snapshot.
+///
+/// Accepts both direct detail objects and protobuf fields wrappers.
 pub fn parse_snapshot_details_from_pb_json(
     bytes: &[u8],
 ) -> Result<(Option<String>, serde_json::Map<String, Value>)> {
@@ -297,6 +321,7 @@ pub fn parse_snapshot_details_from_pb_json(
     Ok((sb_type, map))
 }
 
+/// Returns a named property from decoded snapshot details.
 pub fn detail_value<'a>(
     details: &'a serde_json::Map<String, Value>,
     key: &str,
@@ -304,6 +329,7 @@ pub fn detail_value<'a>(
     details.get(key)
 }
 
+/// Builds snapshot metadata, using the path-derived identifier when details omit it.
 pub fn build_expanded_entry_from_details(
     path: &str,
     id_from_path: Option<String>,
@@ -341,6 +367,9 @@ pub fn build_expanded_entry_from_details(
     }
 }
 
+/// Decodes protobuf and protobuf JSON snapshots in archive listing order.
+///
+/// Skips other files and records read or decode failures as unreadable entries.
 pub fn parse_expanded_entries(
     reader: &ArchiveReader,
     files: &[ArchiveFileEntry],
@@ -410,6 +439,9 @@ pub fn parse_expanded_entries(
     out
 }
 
+/// Reads an embedded manifest, returning a diagnostic for malformed JSON.
+///
+/// A missing or unreadable manifest returns `(None, None)`.
 pub fn read_manifest_from_reader(reader: &ArchiveReader) -> (Option<Manifest>, Option<String>) {
     let Ok(Some(manifest_bytes)) = reader.read_bytes_if_exists(MANIFEST_NAME) else {
         return (None, None);
@@ -420,6 +452,7 @@ pub fn read_manifest_from_reader(reader: &ArchiveReader) -> (Option<Manifest>, O
     }
 }
 
+/// Returns the sibling manifest path by appending `.manifest.json` to the archive name.
 pub fn manifest_sidecar_path(archive_path: &Path) -> PathBuf {
     let base_name = archive_path
         .file_name()
@@ -432,6 +465,9 @@ pub fn manifest_sidecar_path(archive_path: &Path) -> PathBuf {
         .join(sidecar_name)
 }
 
+/// Reads a sibling manifest and verifies its archive binding when present.
+///
+/// Returns `(None, None)` when absent, or a diagnostic for read, parse, or binding failures.
 pub fn read_manifest_from_sidecar(archive_path: &Path) -> (Option<Manifest>, Option<String>) {
     let sidecar = manifest_sidecar_path(archive_path);
     let bytes = match std::fs::read(&sidecar) {
@@ -462,11 +498,15 @@ pub fn read_manifest_from_sidecar(archive_path: &Path) -> (Option<Manifest>, Opt
     }
 }
 
+/// Returns the byte length and lowercase SHA-256 digest of an archive file.
 pub fn archive_binding(path: &Path) -> io::Result<(u64, String)> {
     let mut file = File::open(path)?;
     archive_binding_from_file(&mut file)
 }
 
+/// Hashes the whole file and returns its byte length and lowercase SHA-256 digest.
+///
+/// Rewinds before reading and again on success; an I/O error may leave the cursor advanced.
 pub fn archive_binding_from_file(file: &mut File) -> io::Result<(u64, String)> {
     file.rewind()?;
     let mut size = 0_u64;
@@ -513,6 +553,9 @@ fn validate_archive_binding(
     }
 }
 
+/// Reads the sibling manifest, falling back to the embedded manifest only when absent.
+///
+/// An invalid sidecar returns its diagnostic without falling back.
 pub fn read_manifest_prefer_sidecar(
     archive_path: &Path,
     reader: &ArchiveReader,
@@ -524,59 +567,7 @@ pub fn read_manifest_prefer_sidecar(
     read_manifest_from_reader(reader)
 }
 
-fn offset_label(offset: FixedOffset) -> String {
-    let seconds = offset.local_minus_utc();
-    if seconds == 0 {
-        return "UTC".to_string();
-    }
-    let sign = if seconds >= 0 { '+' } else { '-' };
-    let abs = seconds.unsigned_abs();
-    let hours = abs / 3600;
-    let minutes = (abs % 3600) / 60;
-    format!("{sign}{hours:02}:{minutes:02}")
-}
-
-fn format_datetime_with_tz(dt: DateTime<FixedOffset>) -> String {
-    format!(
-        "{} {}",
-        dt.format("%Y-%m-%d %H:%M:%S"),
-        offset_label(*dt.offset())
-    )
-}
-
-fn format_utc_datetime_with_tz(dt: DateTime<Utc>) -> String {
-    format!("{} UTC", dt.format("%Y-%m-%d %H:%M:%S"))
-}
-
-pub fn format_datetime_display(value: &str) -> Option<String> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(format_datetime_with_tz)
-}
-
-pub fn format_last_modified(value: Option<&Value>) -> Option<String> {
-    let value = value?;
-    if let Some(text) = value.as_str() {
-        if let Ok(parsed) = DateTime::parse_from_rfc3339(text) {
-            return Some(format_datetime_with_tz(parsed));
-        }
-        return Some(text.to_string());
-    }
-    if let Some(raw) = value.as_i64() {
-        let dt = if raw > 2_000_000_000_000 {
-            DateTime::<Utc>::from_timestamp_millis(raw)
-        } else {
-            DateTime::<Utc>::from_timestamp(raw, 0)
-        };
-        return dt.map(format_utc_datetime_with_tz);
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    if let Some(raw) = value.as_f64() {
-        return format_last_modified(Some(&Value::Number(serde_json::Number::from(raw as i64))));
-    }
-    Some(value.to_string())
-}
-
+/// Copies backup provenance and selection into a summary without per-object descriptors.
 pub fn manifest_summary(manifest: &Manifest) -> ManifestSummary {
     ManifestSummary {
         schema_version: manifest.schema_version,

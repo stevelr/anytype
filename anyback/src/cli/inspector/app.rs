@@ -26,7 +26,7 @@ use serde_json::Value;
 use super::index::{ArchiveIndex, ObjectEntry, SortState};
 use super::keys::{KeyAction, map_key_with_input_mode};
 use super::ui;
-use crate::cli::decode::{parse_snapshot_details_from_pb, parse_snapshot_details_from_pb_json};
+use crate::metadata::{parse_snapshot_details_from_pb, parse_snapshot_details_from_pb_json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelFocus {

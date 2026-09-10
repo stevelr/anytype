@@ -1,5 +1,5 @@
 /*
- * anyback_reader - archive reader library for Anytype backups
+ * anyback - archive reader library for Anytype backups
  * github.com/stevelr/anytype
  *
  * SPDX-FileCopyrightText: 2025-2026 Steve Schoettler
@@ -27,8 +27,18 @@
 #![warn(clippy::unnecessary_wraps)]
 #![warn(clippy::unused_async)]
 
+//! Reusable backup archive APIs live in [`archive`], `metadata`, and `markdown`.
+//! These modules are intended to remain stable. CLI integration APIs are
+//! implementation details and may change as command ownership moves to `anyr`.
+
+/// Traverses ZIP archives and unpacked backup directories.
 pub mod archive;
+/// Embedded command integration for `anyr`; this API is subject to change.
+#[doc(hidden)]
 #[cfg(feature = "cli")]
 pub mod cli;
+/// Renders archived object snapshots as Markdown and extracts raw file payloads.
 #[cfg(feature = "cli")]
 pub mod markdown;
+#[cfg(feature = "metadata")]
+pub mod metadata;

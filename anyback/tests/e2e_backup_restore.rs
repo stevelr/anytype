@@ -4140,9 +4140,9 @@ fn read_manifest_json(archive_path: &Path) -> Result<Value> {
 }
 
 fn archive_object_ids(archive_path: &Path) -> Result<Vec<String>> {
-    let reader = anyback_reader::archive::ArchiveReader::from_path(archive_path)?;
+    let reader = anyback::archive::ArchiveReader::from_path(archive_path)?;
     let files = reader.list_files()?;
-    Ok(anyback_reader::archive::infer_object_ids_from_files(&files))
+    Ok(anyback::archive::infer_object_ids_from_files(&files))
 }
 
 /// Returns the object IDs from the archive's manifest (the backup selection list).

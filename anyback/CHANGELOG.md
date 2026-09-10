@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Rename the Rust library from `anyback_reader` to `anyback`; downstream imports
+  and dependency aliases must use the new name.
+- Move reusable `cli::decode` APIs into the top-level `metadata` module, available
+  through a `metadata` feature independent of `cli`. Date presentation stays
+  internal to `cli`.
+- Hide `cli` from Rust API documentation and document its unstable integration
+  boundary alongside the intended stable `archive`, `metadata`, and `markdown` APIs.
+
 ## [0.5.2] - 2026-08-22
 
 ### Fixed

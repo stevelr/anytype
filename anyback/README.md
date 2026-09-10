@@ -8,22 +8,29 @@
 [Backup and restore guide](https://docs.anytype-toolbox.org/guides/backup-restore/) ·
 [Rust API](https://docs.rs/anyback)**
 
-The `anyback` package supplies the `anyback_reader` Rust library and the
-archive commands embedded in `anyr backup`. It does not install an `anyback`
-executable. See the backup and restore guide for command usage.
+This package provides backup capabilities for Anytype: Backup an entire space, Backup a partial space using selection filters, and Visually explore a backup with a TUI inspector.
 
-Status: alpha. Test restores before relying on an archive as your only copy.
+Backup cli documentation is at [Anytype Toolbox](https://docs.anytype-toolbox.org/guides/backup-restore/).
+
+To use the library from a Rust application, see [anyback - Rust docs](https://docs.rs/anyback).
+
+Please report any problems found.
+
+API Stability: The library is functionally complete, and passes an extensive test suite. The `archive`, `metadata`, and `markdown` modules are intended to remain stable. The cli module, including its clap types and command entrypoints, is subject to change and will be moved to the anyr module. Consequently, the cli module is not included in the published rustdoc documentation.
 
 ## Library surface
 
-`anyback_reader` reads ZIP archives and unpacked archive directories. Its
-public modules provide archive traversal, protobuf snapshot inspection, and
-Markdown rendering. The default `cli` feature also builds the command types
-and `run_command` entry point used by `anyr`; `default-features = false`
-excludes those dependencies.
+`anyback` provides three reusable API modules:
 
-The `tui` feature adds the interactive inspector used by
-`anyr backup inspect`.
+- `archive`: ZIP and directory traversal and file access.
+- `metadata`: backup manifests, snapshot metadata decoding, and restore reports.
+- `markdown`: snapshot rendering and object extraction.
+
+The default `cli` feature enables all three modules and the commands embedded in
+`anyr`. With `default-features = false`, `archive` remains available; enable
+`metadata` to add metadata APIs without enabling the embedded CLI or inspector.
+The `markdown` module currently requires `cli`. The `tui` feature adds the
+interactive inspector used by `anyr backup inspect`.
 
 ## Archive and restore design
 
